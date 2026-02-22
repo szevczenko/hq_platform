@@ -1,0 +1,4 @@
+/build_posix
+**/.build
+**/build
+**/sdkconfig

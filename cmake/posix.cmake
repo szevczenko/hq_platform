@@ -1,0 +1,5 @@
+set(HQ_PLATFORM_NAME "posix")
+set(HQ_PLATFORM_POSIX ON)
+set(HQ_PLATFORM_ESP OFF)
+
+add_compile_definitions(CONFIG_HQ_PLATFORM_POSIX)

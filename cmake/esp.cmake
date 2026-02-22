@@ -1,0 +1,5 @@
+set(HQ_PLATFORM_NAME "esp")
+set(HQ_PLATFORM_POSIX OFF)
+set(HQ_PLATFORM_ESP ON)
+
+add_compile_definitions(CONFIG_HQ_PLATFORM_ESP)

@@ -1,0 +1,31 @@
+mainmenu "hq_platform"
+
+menu "Platform Selection"
+
+choice
+  prompt "Target platform"
+  default HQ_PLATFORM_POSIX
+
+config HQ_PLATFORM_POSIX
+  bool "Build POSIX backend"
+
+config HQ_PLATFORM_ESP
+  bool "Build ESP backend"
+
+endchoice
+
+endmenu
+
+menu "OSAL"
+
+config OSAL_LOG_LEVEL
+  int "OSAL log level"
+  default 3
+  range 0 3
+  help
+    0 = DEBUG
+    1 = INFO
+    2 = WARNING
+    3 = ERROR
+
+endmenu
