@@ -3,33 +3,18 @@ set(OSAL_PUBLIC_INCLUDES
   ${HQ_CONFIG_DIR}
 )
 
-set(OSAL_COMMON_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/common/osal_error.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/common/osal_log.c
+file(GLOB OSAL_COMMON_SOURCES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/common/*.c
 )
 
 if(CONFIG_HQ_PLATFORM_POSIX)
-  set(OSAL_PLATFORM_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/posix/osal_task_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/posix/osal_bin_sem_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/posix/osal_count_sem_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/posix/osal_mutex_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/posix/osal_queue_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/posix/osal_timer_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/posix/osal_log_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/posix/osal_assert.c
+  file(GLOB OSAL_PLATFORM_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/posix/*.c
   )
   set(OSAL_PLATFORM_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/posix)
 elseif(CONFIG_HQ_PLATFORM_ESP)
-  set(OSAL_PLATFORM_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp/osal_task_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp/osal_bin_sem_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp/osal_count_sem_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp/osal_mutex_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp/osal_queue_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp/osal_timer_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp/osal_log_impl.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/esp/osal_assert.c
+  file(GLOB OSAL_PLATFORM_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/esp/*.c
   )
   set(OSAL_PLATFORM_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/esp)
 endif()

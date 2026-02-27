@@ -1,0 +1,3 @@
+#undef MG_ARCH
+#define MG_ARCH MG_ARCH_UNIX
+#define MG_TLS MG_TLS_NONE

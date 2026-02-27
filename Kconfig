@@ -29,3 +29,18 @@ config OSAL_LOG_LEVEL
     3 = ERROR
 
 endmenu
+
+menu "Mongoose"
+
+config MONGOOSE_LOG_LEVEL
+  int "Mongoose log level"
+  default 2
+  range 0 4
+  help
+    0 = MG_LL_NONE
+    1 = MG_LL_ERROR
+    2 = MG_LL_INFO
+    3 = MG_LL_DEBUG
+    4 = MG_LL_VERBOSE
+
+endmenu

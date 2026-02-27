@@ -1,0 +1,3 @@
+[submodule "src/mongoose/mongoose"]
+	path = src/mongoose/mongoose
+	url = https://github.com/cesanta/mongoose.git
