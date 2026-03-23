@@ -10,6 +10,8 @@ int osal_task_tests_run(void);
 int osal_sync_tests_run(void);
 int osal_queue_tests_run(void);
 int osal_timer_tests_run(void);
+int osal_file_tests_run(void);
+int osal_mount_tests_run(void);
 
 #ifdef ESP_PLATFORM
 void app_main(void)
@@ -27,6 +29,8 @@ int main(void)
     failed_total += osal_sync_tests_run();
     failed_total += osal_queue_tests_run();
     failed_total += osal_timer_tests_run();
+    failed_total += osal_mount_tests_run();
+    failed_total += osal_file_tests_run();
 
     printf("\n==================================================\n");
     printf("              AGGREGATED SUMMARY                 \n");

@@ -20,7 +20,7 @@ struct osal_timer_internal
 	bool active;
 	bool stop_requested;
 	bool use_static;
-	void (*callback)(osal_timer_id_t);
+	void (*callback)(struct osal_timer_internal *);
 	void *context;
 	char name[OSAL_MAX_NAME_LEN];
 };
