@@ -14,10 +14,18 @@ static int osal_printf(const char *format, ...)
     return result;
 }
 
-void osal_log_v(const char *level, const char *format, va_list args)
+static void osal_log_v(const char *level, const char *format, va_list args)
 {
     osal_printf("[%s]: ", level);
     osal_impl_printf(format, args);
     osal_printf("\n");
     fflush(stdout);
+}
+
+void osal_log_printf(const char *level, const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    osal_log_v(level, format, args);
+    va_end(args);
 }
