@@ -1,144 +1,74 @@
-# HQ Platform - Quick Reference
+# HQ Platform
 
-## 📋 Specification Documents
+## Prerequisites
 
-- **[OSAL_SPECIFICATION.md](OSAL_SPECIFICATION.md)** - OSAL API specification
-- **[HQ_PLATFORM_BUILD_SYSTEM.md](HQ_PLATFORM_BUILD_SYSTEM.md)** - Build system and CMake rules
+- CMake >= 3.16
+- C99-compatible compiler (GCC, Clang)
+- pthreads (POSIX builds)
+- ESP-IDF (ESP32 builds)
 
-## 🎯 Quick Overview
+## Build (POSIX)
 
-The Operating System Abstraction Layer (OSAL) provides a unified API for:
-
-1. **Task Management** - Cross-platform thread/task creation and control
-2. **Synchronization** - Binary semaphores, counting semaphores, and mutexes
-3. **Message Queues** - Thread-safe inter-task communication
-4. **Software Timers** - Callback-based timing functionality
-5. **Logging** - Platform-independent debug and error logging
-
-## 🏗️ Project Structure
-
-```
-hq_platform/
-├── CMakeLists.txt          # Root build file
-├── Kconfig                 # Platform selection (HQ_PLATFORM_POSIX / HQ_PLATFORM_ESP)
-├── defconfig/
-│   ├── posix.defconfig
-│   └── esp.defconfig
-├── cmake/
-│   ├── posix.cmake         # POSIX platform toolchain/flags
-│   └── esp.cmake           # ESP platform toolchain/flags
-├── src/
-│   └── osal/
-│       ├── CMakeLists.txt
-│       ├── include/            # Public API headers
-│       │   ├── osal_common_type.h
-│       │   ├── osal_error.h
-│       │   ├── osal_task.h
-│       │   ├── osal_bin_sem.h
-│       │   ├── osal_count_sem.h
-│       │   ├── osal_mutex.h
-│       │   ├── osal_queue.h
-│       │   ├── osal_timer.h
-│       │   ├── osal_log.h
-│       │   ├── osal_log_impl.h
-│       │   ├── osal_macro.h
-│       │   └── osal_assert.h
-│       ├── common/             # Platform-independent sources
-│       │   ├── osal_log.c
-│       │   └── osal_error.c
-│       ├── posix/              # POSIX implementation
-│       │   ├── osal_impl_task.h
-│       │   ├── osal_impl_sem.h
-│       │   ├── osal_impl_queue.h
-│       │   ├── osal_impl_timer.h
-│       │   ├── osal_task_impl.c
-│       │   ├── osal_bin_sem_impl.c
-│       │   ├── osal_count_sem_impl.c
-│       │   ├── osal_mutex_impl.c
-│       │   ├── osal_queue_impl.c
-│       │   ├── osal_timer_impl.c
-│       │   ├── osal_log_impl.c
-│       │   └── osal_assert.c
-│       └── esp/                # ESP32/FreeRTOS implementation
-│           ├── osal_impl_task.h
-│           ├── osal_impl_sem.h
-│           ├── osal_impl_queue.h
-│           ├── osal_impl_timer.h
-│           ├── osal_task_impl.c
-│           ├── osal_bin_sem_impl.c
-│           ├── osal_count_sem_impl.c
-│           ├── osal_mutex_impl.c
-│           ├── osal_queue_impl.c
-│           ├── osal_timer_impl.c
-│           ├── osal_log_impl.c
-│           └── osal_assert.c
-├── tests/
-│   └── CMakeLists.txt
-└── examples/
-    └── CMakeLists.txt
+```bash
+cmake -B build -DHQ_DEFCONFIG=defconfig/posix.defconfig
+cmake --build build
 ```
 
-## 🔑 Key Features
+## Build with tests
 
-### Portability
-- Single API works across POSIX and ESP32/FreeRTOS platforms
-- Platform-specific implementations hidden behind common interface
+```bash
+cmake -B build -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_TESTS=ON
+cmake --build build
+```
 
-### Type Safety
-- Uses C99 fixed-width integer types (`uint32_t`, `int8_t`, etc.)
-- Enum-based error codes instead of `#define` macros
+Run tests:
 
-### ISR Support
-- Dedicated `_from_isr()` functions for interrupt-safe operations
-- Proper context switching support
+```bash
+./build/tests/osal_tests
+```
 
-### Comprehensive Error Handling
-- Detailed error codes for precise error diagnosis
-- Human-readable error name conversion
+Note: POSIX test builds currently produce a single aggregated test binary (`osal_tests`).
 
-## 📚 Documentation Sections
+## Build with examples
 
-The specification is organized into the following documents:
+```bash
+cmake -B build -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_EXAMPLES=ON
+cmake --build build
+```
 
-### Main Specification
-- **[OSAL_SPECIFICATION.md](OSAL_SPECIFICATION.md)** - Core specification with project structure and header organization
-- **[HQ_PLATFORM_BUILD_SYSTEM.md](HQ_PLATFORM_BUILD_SYSTEM.md)** - CMake build system, Kconfig, and platform selection
+## Build (ESP32)
 
-### API Documentation (Detailed)
-1. **[Task Management API](OSAL_Task_Management.md)** - Thread/task creation and control
-2. **[Semaphore API](OSAL_Semaphore_API.md)** - Synchronization primitives
-3. **[Queue API](OSAL_Queue_API.md)** - Message passing
-4. **[Timer API](OSAL_Timer_API.md)** - Software timers
+Requires ESP-IDF environment to be sourced (`. $IDF_PATH/export.sh`).
 
-Each API document includes:
-- Comprehensive function documentation
-- Usage examples and code samples
-- Best practices and common pitfalls
-- Platform-specific implementation notes
+```bash
+idf.py build
+```
 
-## 🚀 Getting Started
+The ESP platform is selected automatically when `ESP_PLATFORM` is defined by the IDF toolchain.
 
-1. Read the [OSAL_SPECIFICATION.md](OSAL_SPECIFICATION.md) document
-2. Read the [HQ_PLATFORM_BUILD_SYSTEM.md](HQ_PLATFORM_BUILD_SYSTEM.md) for build rules
-3. Create the directory structure as specified in `src/osal/`
-4. Configure platform via Kconfig (`CONFIG_HQ_PLATFORM_POSIX` or `CONFIG_HQ_PLATFORM_ESP`)
-5. Implement platform-specific headers in `osal_impl_*.h` files
-6. Implement platform-specific functions in posix/ or esp/ directory
-7. Build: `cmake -B build -DHQ_DEFCONFIG=defconfig/posix.defconfig && cmake --build build`
+## Configuration
 
-## 📖 Additional Notes
+Platform configuration is provided via defconfig files:
 
-### Migration from Legacy Code
-- Replace all `OS_*` prefixes with `OSAL_*`
-- Convert `#define` error codes to enum
-- Update integer types to use `stdint.h` types
+| File | Platform |
+|------|----------|
+| `defconfig/posix.defconfig` | Linux / macOS |
+| `defconfig/esp.defconfig` | ESP32 (FreeRTOS) |
 
-### Best Practices
-- Always check return codes from OSAL functions
-- Use appropriate `_from_isr()` variants in interrupt handlers
-- Set `OSAL_MAX_DELAY` for infinite waits
-- Keep timer callbacks short and non-blocking
+Available config options:
 
----
+| Option | Values | Description |
+|--------|--------|-------------|
+| `CONFIG_HQ_PLATFORM_POSIX` | y/n | Enable POSIX backend |
+| `CONFIG_HQ_PLATFORM_ESP` | y/n | Enable ESP backend |
+| `CONFIG_OSAL_LOG_LEVEL` | 0-4 | OSAL log verbosity |
+| `CONFIG_MONGOOSE_LOG_LEVEL` | 0-4 | Mongoose log verbosity |
 
-**For complete details, examples, and API documentation, see [OSAL_SPECIFICATION.md](OSAL_SPECIFICATION.md)**
+## Documentation
+
+- [OSAL_SPECIFICATION.md](docs/OSAL_SPECIFICATION.md) - OSAL API specification
+- [HQ_PLATFORM_BUILD_SYSTEM.md](docs/HQ_PLATFORM_BUILD_SYSTEM.md) - Build system details
+- [OSAL_Task_Management.md](docs/OSAL_Task_Management.md) - Task API
+- [OSAL_Semaphore_API.md](docs/OSAL_Semaphore_API.md) - Semaphore API
+- [OSAL_Queue_API.md](docs/OSAL_Queue_API.md) - Queue API
+- [OSAL_Timer_API.md](docs/OSAL_Timer_API.md) - Timer API

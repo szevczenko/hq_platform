@@ -1,0 +1,12 @@
+# Use 4MB flash (partition table requires ~2.6MB)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# LittleFS malloc strategy - required for LFS contexts to be allocated
+CONFIG_LITTLEFS_MALLOC_STRATEGY_DEFAULT=y
+
+# Custom partition table for this test app
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# LittleFS settings for testing
+CONFIG_LITTLEFS_USE_MTIME=y

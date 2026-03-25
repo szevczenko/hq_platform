@@ -1,3 +1,6 @@
 [submodule "src/mongoose/mongoose"]
 	path = src/mongoose/mongoose
 	url = https://github.com/cesanta/mongoose.git
+[submodule "src/osal/external/littlefs"]
+	path = src/osal/external/littlefs
+	url = https://github.com/littlefs-project/littlefs.git

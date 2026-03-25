@@ -9,6 +9,9 @@
 
 #include "osal_common_type.h"
 
+struct osal_timer_internal;
+typedef struct osal_timer_internal *osal_timer_id_t;
+
 struct osal_timer_internal
 {
 	pthread_mutex_t mutex;
@@ -24,8 +27,6 @@ struct osal_timer_internal
 	void *context;
 	char name[OSAL_MAX_NAME_LEN];
 };
-
-typedef struct osal_timer_internal *osal_timer_id_t;
 
 #define OSAL_TIMER_STATIC_SIZE  (sizeof(struct osal_timer_internal))
 

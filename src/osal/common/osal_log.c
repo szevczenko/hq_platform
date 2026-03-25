@@ -22,44 +22,10 @@ static void osal_log_v(const char *level, const char *format, va_list args)
     fflush(stdout);
 }
 
-#if OSAL_LOG_LEVEL <= OSAL_LOG_DEBUG
-void osal_log_debug(const char *format, ...)
+void osal_log_printf(const char *level, const char *format, ...)
 {
     va_list args;
-
     va_start(args, format);
-    osal_log_v("DEBUG", format, args);
-    va_end(args);
-}
-#endif
-
-#if OSAL_LOG_LEVEL <= OSAL_LOG_INFO
-void osal_log_info(const char *format, ...)
-{
-    va_list args;
-
-    va_start(args, format);
-    osal_log_v("INFO", format, args);
-    va_end(args);
-}
-#endif
-
-#if OSAL_LOG_LEVEL <= OSAL_LOG_WARNING
-void osal_log_warning(const char *format, ...)
-{
-    va_list args;
-
-    va_start(args, format);
-    osal_log_v("WARNING", format, args);
-    va_end(args);
-}
-#endif
-
-void osal_log_error(const char *format, ...)
-{
-    va_list args;
-
-    va_start(args, format);
-    osal_log_v("ERROR", format, args);
+    osal_log_v(level, format, args);
     va_end(args);
 }

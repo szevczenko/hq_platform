@@ -44,7 +44,10 @@ typedef enum {
     OSAL_ERR_OUTPUT_TOO_LARGE        = -41, /**< @brief Output size exceeds limit */
     OSAL_ERR_INVALID_ARGUMENT        = -42, /**< @brief Invalid argument value */
     OSAL_ERR_TRY_AGAIN               = -43, /**< @brief Temporary failure, retry operation */
-    OSAL_ERR_EMPTY_SET               = -44  /**< @brief Lookup returned no results */
+    OSAL_ERR_EMPTY_SET               = -44, /**< @brief Lookup returned no results */
+    OSAL_FS_ERR_NAME_TOO_LONG        = -45, /**< @brief File name exceeds maximum length */
+    OSAL_FS_ERR_PATH_INVALID         = -46, /**< @brief File path is not valid */
+    OSAL_FS_ERR_PATH_TOO_LONG        = -47  /**< @brief File path exceeds maximum length */
 } osal_status_t;
 
 /**

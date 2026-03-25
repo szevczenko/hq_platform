@@ -4,7 +4,7 @@ This ESP-IDF project runs all OSAL tests in one firmware image.
 
 ## Building
 
-From this directory (`tests/osal_tests_esp`):
+From this directory (`tests/platform/esp`):
 
 ```bash
 # Set up ESP-IDF environment
