@@ -90,7 +90,27 @@ int32_t osal_mkfs(char *address, const char *devname, const char *volname, size_
     strncpy(g_osal_lfs_partition_label, devname, sizeof(g_osal_lfs_partition_label) - 1);
     g_osal_lfs_partition_label[sizeof(g_osal_lfs_partition_label) - 1] = '\0';
 
-    return (esp_littlefs_format(g_osal_lfs_partition_label) == 0) ? OSAL_SUCCESS : OSAL_ERROR;
+    /* esp_littlefs_format() fails on unregistered partitions in ESP-IDF 5.x.
+     * Drive the format through esp_vfs_littlefs_register with
+     * format_if_mount_failed=true, then unregister to leave the partition
+     * formatted and unmounted, ready for osal_mount(). */
+    esp_vfs_littlefs_conf_t conf = {
+        .base_path              = g_osal_lfs_mount_point,
+        .partition_label        = g_osal_lfs_partition_label,
+        .partition              = NULL,
+        .format_if_mount_failed = true,
+        .read_only              = false,
+        .dont_mount             = false,
+        .grow_on_mount          = false,
+    };
+
+    esp_err_t err = esp_vfs_littlefs_register(&conf);
+    if (err != ESP_OK)
+    {
+        return OSAL_ERROR;
+    }
+    esp_vfs_littlefs_unregister(g_osal_lfs_partition_label);
+    return OSAL_SUCCESS;
 }
 
 int32_t osal_initfs(char *address, const char *devname, const char *volname, size_t block_size, size_t num_blocks)
@@ -169,7 +189,34 @@ int32_t osal_rmfs(const char *devname)
         return rc;
     }
 
-    return (esp_littlefs_format(devname) == 0) ? OSAL_SUCCESS : OSAL_ERROR;
+    /* Unregister first if this partition is currently mounted. */
+    if (g_osal_lfs_mounted &&
+        strncmp(g_osal_lfs_partition_label, devname, OSAL_MAX_PATH_LEN) == 0)
+    {
+        esp_vfs_littlefs_unregister(g_osal_lfs_partition_label);
+        g_osal_lfs_mounted = false;
+    }
+
+    /* Register so that esp_littlefs_format() can operate on the partition,
+     * then format to wipe contents, then unregister. */
+    esp_vfs_littlefs_conf_t conf = {
+        .base_path              = "/osal_rmfs",
+        .partition_label        = devname,
+        .partition              = NULL,
+        .format_if_mount_failed = true,
+        .read_only              = false,
+        .dont_mount             = false,
+        .grow_on_mount          = false,
+    };
+
+    esp_err_t err = esp_vfs_littlefs_register(&conf);
+    if (err != ESP_OK)
+    {
+        return OSAL_ERROR;
+    }
+    err = esp_littlefs_format(devname);
+    esp_vfs_littlefs_unregister(devname);
+    return (err == ESP_OK) ? OSAL_SUCCESS : OSAL_ERROR;
 }
 
 int32_t osal_unmount(const char *mount_point)
@@ -201,6 +248,11 @@ int32_t osal_filesys_stat_volume(const char *name, osal_statvfs_t *stat_buf)
     if (stat_buf == NULL)
     {
         return OSAL_INVALID_POINTER;
+    }
+
+    if (!g_osal_lfs_mounted)
+    {
+        return OSAL_ERR_INCORRECT_OBJ_STATE;
     }
 
     size_t total_bytes = 0;

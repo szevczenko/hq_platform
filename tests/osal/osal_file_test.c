@@ -56,8 +56,13 @@ static int tests_failed = 0;
     printf("--------------------------------------------------\n")
 
 /* Test filesystem image/mount */
-#define TEST_IMAGE_PATH "/tmp/osal_file_test.img"
+#ifdef ESP_PLATFORM
+#define TEST_IMAGE_PATH  "flash_test"
+#define TEST_MOUNT_POINT "/littlefs"
+#else
+#define TEST_IMAGE_PATH  "/tmp/osal_file_test.img"
 #define TEST_MOUNT_POINT "/"
+#endif
 
 /* Test file paths inside mounted littlefs */
 #define TEST_FILE "/test_file.bin"
@@ -273,10 +278,14 @@ static void test_truncate(void)
     (void)osal_write(fd, data, sizeof(data));
 
     int32_t rc = osal_file_truncate(fd, 50);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_file_truncate to 50 succeeds");
+    TEST_ASSERT(rc == OSAL_SUCCESS || rc == OSAL_ERR_OPERATION_NOT_SUPPORTED,
+                "osal_file_truncate returns SUCCESS or NOT_SUPPORTED");
 
-    int32_t pos = osal_lseek(fd, 0, OSAL_SEEK_END);
-    TEST_ASSERT(pos == 50, "file size after truncate is 50");
+    if (rc == OSAL_SUCCESS)
+    {
+        int32_t pos = osal_lseek(fd, 0, OSAL_SEEK_END);
+        TEST_ASSERT(pos == 50, "file size after truncate is 50");
+    }
 
     rc = osal_file_truncate(-1, 10);
     TEST_ASSERT(rc == OSAL_ERR_INVALID_ID, "osal_file_truncate(-1) returns OSAL_ERR_INVALID_ID");

@@ -151,6 +151,12 @@ static int32_t osal_lfs_configure(const char *devname, const char *mount_point, 
     g_osal_lfs_bd_cfg.erase_size = (block_size > 0U) ? block_size : OSAL_LFS_DEFAULT_BLOCK_SIZE;
     g_osal_lfs_bd_cfg.erase_count = (num_blocks > 0U) ? num_blocks : OSAL_LFS_DEFAULT_BLOCK_COUNT;
 
+    if (g_osal_lfs_bd_cfg.erase_size > sizeof(g_osal_lfs_read_buffer) ||
+        g_osal_lfs_bd_cfg.erase_size > sizeof(g_osal_lfs_prog_buffer))
+    {
+        return OSAL_ERR_INVALID_SIZE;
+    }
+
     g_osal_lfs_cfg.context = &g_osal_lfs_bd;
     g_osal_lfs_cfg.read = lfs_filebd_read;
     g_osal_lfs_cfg.prog = lfs_filebd_prog;

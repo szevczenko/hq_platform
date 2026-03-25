@@ -13,52 +13,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include "sdkconfig.h"
-#include "esp_log.h"
-
-/* Default values when not provided by Kconfig (standalone vendored build). */
-#ifndef CONFIG_LITTLEFS_MAX_PARTITIONS
-#define CONFIG_LITTLEFS_MAX_PARTITIONS 1
-#endif
-#ifndef CONFIG_LITTLEFS_PAGE_SIZE
-#define CONFIG_LITTLEFS_PAGE_SIZE 256
-#endif
-#ifndef CONFIG_LITTLEFS_READ_SIZE
-#define CONFIG_LITTLEFS_READ_SIZE 128
-#endif
-#ifndef CONFIG_LITTLEFS_WRITE_SIZE
-#define CONFIG_LITTLEFS_WRITE_SIZE 128
-#endif
-#ifndef CONFIG_LITTLEFS_CACHE_SIZE
-#define CONFIG_LITTLEFS_CACHE_SIZE 128
-#endif
-#ifndef CONFIG_LITTLEFS_LOOKAHEAD_SIZE
-#define CONFIG_LITTLEFS_LOOKAHEAD_SIZE 128
-#endif
-#ifndef CONFIG_LITTLEFS_BLOCK_CYCLES
-#define CONFIG_LITTLEFS_BLOCK_CYCLES 512
-#endif
-#ifndef CONFIG_LITTLEFS_OBJ_NAME_LEN
-#define CONFIG_LITTLEFS_OBJ_NAME_LEN 64
-#endif
-#ifndef CONFIG_LITTLEFS_MULTIVERSION
-#define CONFIG_LITTLEFS_MULTIVERSION 0
-#endif
-#ifndef CONFIG_LITTLEFS_DISK_VERSION_
-#define CONFIG_LITTLEFS_DISK_VERSION_ 0
-#endif
-#ifndef CONFIG_LITTLEFS_DISK_VERSION_MOST_RECENT
-#define CONFIG_LITTLEFS_DISK_VERSION_MOST_RECENT 0
-#endif
-#ifndef CONFIG_LITTLEFS_FCNTL_GET_PATH
-#define CONFIG_LITTLEFS_FCNTL_GET_PATH 0
-#endif
-#ifndef CONFIG_LITTLEFS_FLUSH_FILE_EVERY_WRITE
-#define CONFIG_LITTLEFS_FLUSH_FILE_EVERY_WRITE 0
-#endif
-#ifndef CONFIG_LITTLEFS_OPEN_DIR
-#define CONFIG_LITTLEFS_OPEN_DIR 0
-#endif
-
+#include "osal_log.h"
 
 #if defined(CONFIG_LITTLEFS_MALLOC_STRATEGY_DEFAULT) || \
     defined(CONFIG_LITTLEFS_MALLOC_STRATEGY_INTERNAL) || \
@@ -87,13 +42,12 @@ extern "C"
 // Macros, may be replaced by system specific wrappers. Arguments to these
 // macros must not have side-effects as the macros can be removed for a smaller
 // code footprint
-extern const char ESP_LITTLEFS_TAG[];
 
 // Logging functions
 #ifndef LFS_TRACE
 #ifdef LFS_YES_TRACE
 #define LFS_TRACE_(fmt, ...) \
-    ESP_LOGV(ESP_LITTLEFS_TAG, "%s:%d:trace: " fmt "%s\n", __FILE__, __LINE__, __VA_ARGS__)
+    osal_log_debug("%s:%d:trace: " fmt "%s", __FILE__, __LINE__, __VA_ARGS__)
 #define LFS_TRACE(...) LFS_TRACE_(__VA_ARGS__, "")
 #else
 #define LFS_TRACE(...)
@@ -103,7 +57,7 @@ extern const char ESP_LITTLEFS_TAG[];
 #ifndef LFS_DEBUG
 #ifndef LFS_NO_DEBUG
 #define LFS_DEBUG_(fmt, ...) \
-    ESP_LOGD(ESP_LITTLEFS_TAG, "%s:%d:debug: " fmt "%s\n", __FILE__, __LINE__, __VA_ARGS__)
+    osal_log_debug("%s:%d:debug: " fmt "%s", __FILE__, __LINE__, __VA_ARGS__)
 #define LFS_DEBUG(...) LFS_DEBUG_(__VA_ARGS__, "")
 #else
 #define LFS_DEBUG(...)
@@ -113,7 +67,7 @@ extern const char ESP_LITTLEFS_TAG[];
 #ifndef LFS_WARN
 #ifndef LFS_NO_WARN
 #define LFS_WARN_(fmt, ...) \
-    ESP_LOGW(ESP_LITTLEFS_TAG, "%s:%d:warn: " fmt "%s\n", __FILE__, __LINE__, __VA_ARGS__)
+    osal_log_warning("%s:%d:warn: " fmt "%s", __FILE__, __LINE__, __VA_ARGS__)
 #define LFS_WARN(...) LFS_WARN_(__VA_ARGS__, "")
 #else
 #define LFS_WARN(...)
@@ -123,7 +77,7 @@ extern const char ESP_LITTLEFS_TAG[];
 #ifndef LFS_ERROR
 #ifndef LFS_NO_ERROR
 #define LFS_ERROR_(fmt, ...) \
-    ESP_LOGE(ESP_LITTLEFS_TAG, "%s:%d:error: " fmt "%s\n", __FILE__, __LINE__, __VA_ARGS__)
+    osal_log_error("%s:%d:error: " fmt "%s", __FILE__, __LINE__, __VA_ARGS__)
 #define LFS_ERROR(...) LFS_ERROR_(__VA_ARGS__, "")
 #else
 #define LFS_ERROR(...)

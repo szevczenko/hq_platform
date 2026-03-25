@@ -4,7 +4,7 @@ Comprehensive functional tests for the Operating System Abstraction Layer (OSAL)
 
 ```bash
 # Aggregated tests
-cd tests/osal_tests_esp
+cd tests/platform/esp
 
 # Set up ESP-IDF environment
 C:\projekty\esp-idf\export.ps1   # Windows
@@ -32,7 +32,7 @@ Tests are built as standalone ESP-IDF projects:
 
 ```bash
 # Navigate to the ESP32 test directory
-cd tests/osal_task_test_esp
+cd tests/platform/esp
 
 # Set up ESP-IDF environment
 C:\projekty\esp-idf\export.ps1   # Windows
@@ -46,7 +46,7 @@ idf.py -p /dev/ttyUSB0 flash monitor  # Linux
 
 ```bash
 # Synchronization tests
-cd tests/osal_sync_test_esp
+cd tests/platform/esp
 idf.py build
 idf.py -p COM4 flash monitor
 ```
@@ -58,17 +58,20 @@ Each test suite follows this structure:
 **ESP32 Aggregated Build:**
 ```
 tests/
+├── tests.c
 ├── osal/
 │   └── osal_task_test.c      # Test source (shared)
-└── osal_task_test_esp/       # ESP-IDF project
+└── platform/
+  ├── posix/
+  └── esp/
     ├── CMakeLists.txt
     ├── README.md
     └── main/
-        └── CMakeLists.txt
+      └── CMakeLists.txt
 
 ```bash
 # Aggregated tests
-cd tests/osal_tests_esp
+cd tests/platform/esp
 idf.py build
 idf.py -p COM4 flash monitor
 ```
@@ -83,11 +86,13 @@ tests/
 │   ├── osal_sync_test.c
 │   ├── osal_queue_test.c
 │   └── osal_timer_test.c
-└── osal_tests_esp/
-  ├── CMakeLists.txt
-  ├── README.md
-  └── main/
-    └── CMakeLists.txt
+└── platform/
+    ├── posix/
+    └── esp/
+        ├── CMakeLists.txt
+        ├── README.md
+        └── main/
+            └── CMakeLists.txt
 ```
 
 The same test source code in `tests/osal/` is used for both platforms with conditional compilation (`#ifdef ESP_PLATFORM`).
@@ -143,9 +148,9 @@ To add a new test suite:
    target_link_libraries(new_test hq_osal pthread)
    ```
 
-3. **Create ESP32 project**: `tests/new_test_esp/`
+3. **Create ESP32 project**: `tests/platform/esp/`
    - `CMakeLists.txt` - Points to `EXTRA_COMPONENT_DIRS`
-  - `main/CMakeLists.txt` - References `../osal/new_test.c`
+  - `main/CMakeLists.txt` - Includes `../../../common_tests.cmake`
 
 ## Planned Test Suites
 
@@ -174,7 +179,7 @@ cmake --build build_test
 ./build_test/tests/osal_task_test || exit 1
 
 # ESP32 tests (requires hardware or emulator)
-cd tests/osal_task_test_esp
+cd tests/platform/esp
 idf.py build || exit 1
 ```
 

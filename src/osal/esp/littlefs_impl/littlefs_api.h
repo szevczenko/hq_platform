@@ -9,7 +9,7 @@
 #include "esp_vfs.h"
 #include "esp_partition.h"
 #include "littlefs/lfs.h"
-#include "sdkconfig.h"
+#include "lfs_config.h"
 
 #ifdef __cplusplus
 extern "C" {

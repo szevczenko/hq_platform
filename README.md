@@ -27,15 +27,7 @@ Run tests:
 ./build/tests/osal_tests
 ```
 
-Or run individual test suites:
-
-```bash
-./build/tests/osal_task_test
-./build/tests/osal_sync_test
-./build/tests/osal_queue_test
-./build/tests/osal_timer_test
-./build/tests/osal_file_test
-```
+Note: POSIX test builds currently produce a single aggregated test binary (`osal_tests`).
 
 ## Build with examples
 

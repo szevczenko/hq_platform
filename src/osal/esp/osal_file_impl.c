@@ -149,13 +149,16 @@ osal_file_id_t osal_open_create(const char *path, osal_file_flag_t flags, os_fil
     }
 
     int slot = alloc_slot();
-    if (slot >= 0)
+    if (slot < 0)
     {
-        g_open_fds[slot].in_use = true;
-        g_open_fds[slot].fd = fd;
-        strncpy(g_open_fds[slot].path, vfs_path, sizeof(g_open_fds[slot].path) - 1);
-        g_open_fds[slot].path[sizeof(g_open_fds[slot].path) - 1] = '\0';
+        (void)close(fd);
+        return (osal_file_id_t)OSAL_ERR_NO_FREE_IDS;
     }
+
+    g_open_fds[slot].in_use = true;
+    g_open_fds[slot].fd = fd;
+    strncpy(g_open_fds[slot].path, vfs_path, sizeof(g_open_fds[slot].path) - 1);
+    g_open_fds[slot].path[sizeof(g_open_fds[slot].path) - 1] = '\0';
 
     return (osal_file_id_t)fd;
 }
@@ -176,7 +179,11 @@ int32_t osal_close(osal_file_id_t filedes)
         g_open_fds[slot].path[0] = '\0';
     }
 
-    return (rc == 0) ? OSAL_SUCCESS : OSAL_ERROR;
+    if (rc == 0)
+    {
+        return OSAL_SUCCESS;
+    }
+    return (errno == EBADF) ? OSAL_ERR_INVALID_ID : OSAL_ERROR;
 }
 
 int32_t osal_read(osal_file_id_t filedes, void *buffer, size_t nbytes)
@@ -232,7 +239,15 @@ int32_t osal_file_truncate(osal_file_id_t filedes, uint32_t len)
     int rc = ftruncate(filedes, (off_t)len);
     if (rc != 0)
     {
-        return (errno == EBADF) ? OSAL_ERR_INVALID_ID : OSAL_ERROR;
+        if (errno == EBADF)
+        {
+            return OSAL_ERR_INVALID_ID;
+        }
+        if (errno == ENOSYS || errno == EINVAL || errno == ENOTSUP || errno == EOPNOTSUPP)
+        {
+            return OSAL_ERR_OPERATION_NOT_SUPPORTED;
+        }
+        return OSAL_ERROR;
     }
     return OSAL_SUCCESS;
 }

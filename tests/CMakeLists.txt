@@ -1,12 +1,10 @@
 if(NOT ESP_PLATFORM)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/common_tests.cmake)
+
   # POSIX platform: unified test application
-  add_executable(osal_tests tests.c
-    osal/osal_task_test.c
-    osal/osal_sync_test.c
-    osal/osal_queue_test.c
-    osal/osal_timer_test.c
-    osal/osal_file_test.c
-    osal/osal_mount_test.c
+  add_executable(osal_tests
+    ${HQ_COMMON_TEST_RUNNER}
+    ${HQ_COMMON_OSAL_TEST_SOURCES}
   )
 
   target_include_directories(osal_tests

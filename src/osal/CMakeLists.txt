@@ -51,7 +51,8 @@ endif()
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${OSAL_ALL_SOURCES}
                          INCLUDE_DIRS ${OSAL_PUBLIC_INCLUDES} ${OSAL_PLATFORM_INCLUDES}
-                         REQUIRES esp_partition vfs spi_flash)
+                         REQUIRES esp_partition vfs spi_flash
+                         KCONFIG ${COMPONENT_DIR}/esp/littlefs_impl/Kconfig)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE OSAL_LOG_LEVEL=${CONFIG_OSAL_LOG_LEVEL})
   target_compile_definitions(${COMPONENT_LIB} PRIVATE LFS_CONFIG=lfs_config.h)
 else()

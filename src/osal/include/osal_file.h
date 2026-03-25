@@ -15,7 +15,7 @@ typedef enum
 {
     OSAL_READ_ONLY  = 0x00, /**< Read access */
     OSAL_WRITE_ONLY = 0x01, /**< Write access */
-    OSAL_READ_WRITE  = 0x02  /**< Execute access */
+    OSAL_READ_WRITE = 0x02  /**< Read and write access */
 } os_file_access_t;
 
 typedef enum
@@ -76,23 +76,15 @@ typedef enum
 /**
  * @brief Open or create a file
  *
- * Implements the same as OSAL_open/OSAL_creat but follows the OSAL paradigm
- * of outputting the ID/descriptor separately from the return value, rather
- * than relying on the user to convert it back.
+ * Opens an existing file or creates a new one and returns an OSAL file handle
+ * that can be used with other OSAL file APIs.
  *
- * @param[out] filedes     The handle ID (OSAL_OBJECT_ID_UNDEFINED on failure) @nonnull
  * @param[in]  path        File name to create or open @nonnull
- * @param[in]  flags       The file permissions - see osal_file_flag_t
+ * @param[in]  flags       File creation/open flags - see osal_file_flag_t
  * @param[in]  access_mode Intended access mode - see os_file_access_t
  *
- * @return Execution status, see osal_status_t
- * @retval OSAL_SUCCESS on success
- * @retval OSAL_ERROR if the command was not executed properly
- * @retval OSAL_INVALID_POINTER if pointer argument was NULL
- * @retval OSAL_ERR_NO_FREE_IDS if all available file handles are in use
- * @retval OSAL_FS_ERR_NAME_TOO_LONG if the filename portion of the path exceeds OSAL_MAX_FILE_NAME
- * @retval OSAL_FS_ERR_PATH_INVALID if the path argument is not valid
- * @retval OSAL_FS_ERR_PATH_TOO_LONG if the path argument exceeds OSAL_MAX_PATH_LEN
+ * @return The file handle identifier.
+ * @retval OSAL_OBJECT_ID_UNDEFINED if the file could not be opened or created
  */
 osal_file_id_t osal_open_create(const char *path, osal_file_flag_t flags, os_file_access_t access_mode);
 

@@ -32,8 +32,13 @@ static int tests_failed = 0;
 #define TEST_END() \
     printf("--------------------------------------------------\n")
 
-#define TEST_IMAGE_PATH "/tmp/osal_mount_test.img"
+#ifdef ESP_PLATFORM
+#define TEST_IMAGE_PATH  "flash_test"
+#define TEST_MOUNT_POINT "/littlefs"
+#else
+#define TEST_IMAGE_PATH  "/tmp/osal_mount_test.img"
 #define TEST_MOUNT_POINT "/"
+#endif
 #define TEST_FILE_PATH "/mount_suite_file.bin"
 #define TEST_BLOCK_SIZE 4096U
 #define TEST_BLOCK_COUNT 256U
