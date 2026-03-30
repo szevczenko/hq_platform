@@ -13,15 +13,25 @@ if(BUILD_EXAMPLES OR HQ_BUILD_EXAMPLES)
   target_include_directories(osal_demo
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
     PRIVATE ${_PLATFORM_IMPL_DIR}
-    PRIVATE ${CMAKE_BINARY_DIR}
-  )
-  
-  target_compile_definitions(osal_demo
-    PRIVATE OSAL_LOG_LEVEL=${CONFIG_OSAL_LOG_LEVEL}
+    PRIVATE ${HQ_CONFIG_DIR}
   )
   
   target_link_libraries(osal_demo
     hq_osal
+    pthread
+  )
+
+  add_executable(cmd_hello
+    cmd_hello.c
+  )
+
+  target_include_directories(cmd_hello
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/cmd/include
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_link_libraries(cmd_hello
+    hq_cmd
     pthread
   )
   

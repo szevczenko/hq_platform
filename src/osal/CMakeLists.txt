@@ -44,18 +44,11 @@ endif()
 
 set(OSAL_ALL_SOURCES ${OSAL_COMMON_SOURCES} ${OSAL_PLATFORM_SOURCES} ${OSAL_LITTLEFS_SOURCES})
 
-# Set default log level if not configured
-# 0=DEBUG (all), 1=INFO, 2=WARNING, 3=ERROR (only errors)
-if(NOT DEFINED CONFIG_OSAL_LOG_LEVEL OR CONFIG_OSAL_LOG_LEVEL STREQUAL "")
-  set(CONFIG_OSAL_LOG_LEVEL 0)  # Enable all log levels by default
-endif()
-
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${OSAL_ALL_SOURCES}
                          INCLUDE_DIRS ${OSAL_PUBLIC_INCLUDES} ${OSAL_PLATFORM_INCLUDES}
                          REQUIRES esp_partition vfs spi_flash
                          KCONFIG ${COMPONENT_DIR}/esp/littlefs_impl/Kconfig)
-  target_compile_definitions(${COMPONENT_LIB} PRIVATE OSAL_LOG_LEVEL=${CONFIG_OSAL_LOG_LEVEL})
   target_compile_definitions(${COMPONENT_LIB} PRIVATE LFS_CONFIG=lfs_config.h)
 else()
   add_library(hq_osal STATIC ${OSAL_ALL_SOURCES})
@@ -63,5 +56,4 @@ else()
     PUBLIC ${OSAL_PUBLIC_INCLUDES}
     PRIVATE ${OSAL_PLATFORM_INCLUDES}
   )
-  target_compile_definitions(hq_osal PRIVATE OSAL_LOG_LEVEL=${CONFIG_OSAL_LOG_LEVEL})
 endif()

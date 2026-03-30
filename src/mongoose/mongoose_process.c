@@ -2,7 +2,12 @@
 
 #include <stdbool.h>
 
+#include "hq_config.h"
 #include "osal_task.h"
+
+#ifndef CONFIG_MONGOOSE_LOG_LEVEL
+#define CONFIG_MONGOOSE_LOG_LEVEL 2
+#endif
 
 struct mg_mgr mgr;
 static osal_task_id_t mongooseProcessId;
@@ -25,7 +30,7 @@ void MongooseProcess_Init( void )
   }
 
   mg_mgr_init( &mgr );
-  mg_log_set( MONGOOSE_LOG_LEVEL );
+  mg_log_set( CONFIG_MONGOOSE_LOG_LEVEL );
 
   if ( osal_task_create( &mongooseProcessId,
                          "mg_poll",

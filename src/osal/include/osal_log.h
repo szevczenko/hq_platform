@@ -1,6 +1,7 @@
 #ifndef OSAL_LOG_H
 #define OSAL_LOG_H
 
+#include "hq_config.h"
 #include <stdarg.h>
 
 typedef enum {
@@ -11,29 +12,29 @@ typedef enum {
     OSAL_LOG_NONE       /**< @brief No logging */
 } osal_log_level_t;
 
-#ifndef OSAL_LOG_LEVEL
-#define OSAL_LOG_LEVEL  OSAL_LOG_INFO
+#ifndef CONFIG_OSAL_LOG_LEVEL
+#define CONFIG_OSAL_LOG_LEVEL OSAL_LOG_INFO
 #endif
 
-#if OSAL_LOG_LEVEL <= OSAL_LOG_DEBUG
+#if CONFIG_OSAL_LOG_LEVEL <= OSAL_LOG_DEBUG
 #define osal_log_debug(...)  osal_log_printf("DEBUG", __VA_ARGS__)
 #else
 #define osal_log_debug(...)  ((void)0)
 #endif
 
-#if OSAL_LOG_LEVEL <= OSAL_LOG_INFO
+#if CONFIG_OSAL_LOG_LEVEL <= OSAL_LOG_INFO
 #define osal_log_info(...)  osal_log_printf("INFO", __VA_ARGS__)
 #else
 #define osal_log_info(...)  ((void)0)
 #endif
 
-#if OSAL_LOG_LEVEL <= OSAL_LOG_WARNING
+#if CONFIG_OSAL_LOG_LEVEL <= OSAL_LOG_WARNING
 #define osal_log_warning(...)  osal_log_printf("WARNING", __VA_ARGS__)
 #else
 #define osal_log_warning(...)  ((void)0)
 #endif
 
-#if OSAL_LOG_LEVEL <= OSAL_LOG_ERROR
+#if CONFIG_OSAL_LOG_LEVEL <= OSAL_LOG_ERROR
 #define osal_log_error(...)  osal_log_printf("ERROR", __VA_ARGS__)
 #else
 #define osal_log_error(...)  ((void)0)

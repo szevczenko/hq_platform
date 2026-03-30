@@ -5,12 +5,28 @@ menu "Platform Selection"
 choice
   prompt "Target platform"
   default HQ_PLATFORM_POSIX
+  help
+    Select the target platform for this build
 
 config HQ_PLATFORM_POSIX
-  bool "Build POSIX backend"
+  bool "POSIX (Linux/Windows/macOS)"
+  help
+    Build for POSIX-compatible systems
 
 config HQ_PLATFORM_ESP
-  bool "Build ESP backend"
+  bool "ESP32 (ESP-IDF)"
+  help
+    Build for ESP32 microcontroller
+
+config HQ_PLATFORM_STM32
+  bool "STM32 (ARM Cortex-M)"
+  help
+    Build for STM32 microcontroller family
+
+config HQ_PLATFORM_NXP
+  bool "NXP (i.MX/MCUX)"
+  help
+    Build for NXP i.MX or MCUX platforms
 
 endchoice
 
@@ -27,6 +43,38 @@ config OSAL_LOG_LEVEL
     1 = INFO
     2 = WARNING
     3 = ERROR
+
+endmenu
+
+menu "Command Line"
+
+config CMD_RX_BUFFER_SIZE
+  int "CLI RX buffer size"
+  default 256
+  range 32 4096
+
+config CMD_BUFFER_SIZE
+  int "CLI command buffer size"
+  default 256
+  range 32 4096
+
+config CMD_HISTORY_BUFFER_SIZE
+  int "CLI history buffer size"
+  default 512
+  range 64 8192
+
+config CMD_MAX_BINDING_COUNT
+  int "CLI max binding count"
+  default 32
+  range 1 256
+
+config CMD_ENABLE_AUTOCOMPLETE
+  bool "Enable CLI autocomplete"
+  default y
+
+config CMD_INVITATION
+  string "CLI invitation"
+  default "hq> "
 
 endmenu
 
