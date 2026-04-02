@@ -35,7 +35,10 @@ if python3 -c "import kconfiglib" >/dev/null 2>&1; then
 # Option 2: use pipx (recommended on modern Debian/Ubuntu)
 elif command -v pipx >/dev/null 2>&1; then
     echo "Installing kconfiglib via pipx..."
-    pipx install kconfiglib
+    if ! pipx install kconfiglib; then
+        echo "kconfiglib already present in pipx, attempting upgrade..."
+        pipx upgrade kconfiglib
+    fi
     # pipx installs the 'menuconfig' script; find it
     MENUCONFIG_CMD="$(pipx environment --value PIPX_BIN_DIR)/menuconfig"
 

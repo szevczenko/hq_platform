@@ -20,11 +20,13 @@ config HQ_PLATFORM_ESP
 
 config HQ_PLATFORM_STM32
   bool "STM32 (ARM Cortex-M)"
+  depends on BROKEN
   help
     Build for STM32 microcontroller family
 
 config HQ_PLATFORM_NXP
   bool "NXP (i.MX/MCUX)"
+  depends on BROKEN
   help
     Build for NXP i.MX or MCUX platforms
 

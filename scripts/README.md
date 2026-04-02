@@ -84,9 +84,11 @@ Replace `/dev/ttyUSB0` with your actual serial port.
 
 **Features:**
 - Linux-only helper
-- Verifies `python3` and `pip`
-- Installs `kconfiglib` with `python3 -m pip install --user kconfiglib` when missing
-- Launches the `menuconfig` frontend from the installed Python package
+- Verifies `python3`
+- Uses `pipx` when available (install or upgrade `kconfiglib` idempotently)
+- Falls back to a local virtual environment (`.venv_menuconfig`) when `pipx` is unavailable
+- Installs/updates `kconfiglib` in the selected environment
+- Launches the `menuconfig` frontend from that environment
 - Writes the configuration to `.config` by default
 
 **Usage:**
@@ -97,7 +99,7 @@ Replace `/dev/ttyUSB0` with your actual serial port.
 **Requirements:**
 - Linux
 - Python 3
-- `python3-pip`
+- Either `pipx` or Python `venv` support
 - Terminal with `curses` support
 
 ---

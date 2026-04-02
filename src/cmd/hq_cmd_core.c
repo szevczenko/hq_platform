@@ -10,8 +10,8 @@
 #include "osal_log.h"
 
 static osal_task_id_t    g_input_task_id;
-static osal_bin_sem_id_t g_stop_sem;
-static volatile bool     g_input_running;
+static osal_bin_sem_id_t g_stop_done_sem;
+static osal_bin_sem_id_t g_stop_request_sem;
 
 static EmbeddedCli *g_cli = NULL;
 
@@ -37,8 +37,13 @@ static void hq_cmd_input_task(void *arg)
 {
     (void)arg;
 
-    while (g_input_running)
+    while (true)
     {
+        if (osal_bin_sem_timed_wait(g_stop_request_sem, 0) == OSAL_SUCCESS)
+        {
+            break;
+        }
+
         int c = hq_cmd_platform_read_char();
         if (c >= 0)
         {
@@ -51,7 +56,7 @@ static void hq_cmd_input_task(void *arg)
         }
     }
 
-    (void)osal_bin_sem_give(g_stop_sem);
+    (void)osal_bin_sem_give(g_stop_done_sem);
     (void)osal_task_delete(g_input_task_id);
 }
 
@@ -85,15 +90,22 @@ int32_t hq_cmd_init(void)
 
     hq_cmd_register_builtin_commands();
 
-    if ((status = osal_bin_sem_create(&g_stop_sem, "cmd_stop", OSAL_SEM_EMPTY)) != OSAL_SUCCESS)
+    if ((status = osal_bin_sem_create(&g_stop_done_sem, "cmd_stop_done", OSAL_SEM_EMPTY)) != OSAL_SUCCESS)
     {
-        osal_log_error("Failed to create stop semaphore %s", osal_get_status_name(status));
+        osal_log_error("Failed to create stop done semaphore %s", osal_get_status_name(status));
         embeddedCliFree(g_cli);
         g_cli = NULL;
         return -1;
     }
 
-    g_input_running = true;
+    if ((status = osal_bin_sem_create(&g_stop_request_sem, "cmd_stop_req", OSAL_SEM_EMPTY)) != OSAL_SUCCESS)
+    {
+        osal_log_error("Failed to create stop request semaphore %s", osal_get_status_name(status));
+        (void)osal_bin_sem_delete(g_stop_done_sem);
+        embeddedCliFree(g_cli);
+        g_cli = NULL;
+        return -1;
+    }
 
     osal_task_attr_t attr;
     (void)osal_task_attributes_init(&attr);
@@ -105,7 +117,8 @@ int32_t hq_cmd_init(void)
                          &attr)) != OSAL_SUCCESS)
     {
         osal_log_error("Failed to create input task %s", osal_get_status_name(status));
-        osal_bin_sem_delete(g_stop_sem);
+        (void)osal_bin_sem_delete(g_stop_request_sem);
+        (void)osal_bin_sem_delete(g_stop_done_sem);
         embeddedCliFree(g_cli);
         g_cli = NULL;
         return -1;
@@ -121,9 +134,10 @@ void hq_cmd_deinit(void)
         return;
     }
 
-    g_input_running = false;
-    (void)osal_bin_sem_take(g_stop_sem);
-    (void)osal_bin_sem_delete(g_stop_sem);
+    hq_cmd_stop();
+    (void)osal_bin_sem_take(g_stop_done_sem);
+    (void)osal_bin_sem_delete(g_stop_request_sem);
+    (void)osal_bin_sem_delete(g_stop_done_sem);
 
     embeddedCliFree(g_cli);
     g_cli = NULL;
@@ -131,7 +145,7 @@ void hq_cmd_deinit(void)
 
 void hq_cmd_stop(void)
 {
-    g_input_running = false;
+    (void)osal_bin_sem_give(g_stop_request_sem);
 }
 
 void hq_cmd_wait(void)
@@ -142,10 +156,10 @@ void hq_cmd_wait(void)
     }
 
     /* Block until the input task signals it has stopped. */
-    (void)osal_bin_sem_take(g_stop_sem);
+    (void)osal_bin_sem_take(g_stop_done_sem);
 
     /* Re-give so deinit can also take it. */
-    (void)osal_bin_sem_give(g_stop_sem);
+    (void)osal_bin_sem_give(g_stop_done_sem);
 }
 
 void hq_cmd_process(void)

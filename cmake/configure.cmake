@@ -59,7 +59,8 @@ if(NOT _genconfig_result EQUAL 0)
     "genconfig failed for ${HQ_DEFCONFIG}\n"
     "stdout:\n${_genconfig_stdout}\n"
     "stderr:\n${_genconfig_stderr}\n"
-    "Install kconfiglib with:\n  pip3 install --break-system-packages kconfiglib")
+      "Install kconfiglib with:\n  python3 -m pip install kconfiglib\n"
+      "Consider using a virtual environment or scripts/menuconfig.sh if needed.")
 endif()
 
 # Clean up local variables

@@ -26,7 +26,8 @@ CONFIG_CMD_ESP_UART_BAUDRATE=115200
 ```
 
 CMD initializes the selected UART in `hq_cmd_init()` and writes directly
-via `uart_write_bytes()`. This is output-only; no input path is configured.
+via `uart_write_bytes()`. UART mode also supports input:
+`hq_cmd_platform_read_char()` reads from the configured UART via `uart_read_bytes()`.
 
 ## Files
 
@@ -39,5 +40,6 @@ via `uart_write_bytes()`. This is output-only; no input path is configured.
 ## Adding new commands
 
 Create a file in `src/cmd/commands/` (e.g. `hq_cmd_foo.c`).
-Use `hq_cmd_print()` for output and register via `hq_cmd_register_internal()`.
+Use `hq_cmd_print()` for output and register via the public
+`hq_cmd_register()` API with `hq_cmd_binding_t`.
 The build picks up `commands/*.c` automatically via glob.
