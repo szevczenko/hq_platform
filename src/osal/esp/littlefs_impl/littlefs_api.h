@@ -8,7 +8,7 @@
 #include "freertos/semphr.h"
 #include "esp_vfs.h"
 #include "esp_partition.h"
-#include "littlefs/lfs.h"
+#include "lfs.h"
 #include "lfs_config.h"
 
 #ifdef __cplusplus

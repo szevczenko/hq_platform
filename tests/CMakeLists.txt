@@ -9,7 +9,7 @@ if(NOT ESP_PLATFORM)
 
   target_include_directories(osal_tests
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
-    PRIVATE ${CMAKE_BINARY_DIR}
+    PRIVATE ${HQ_CONFIG_DIR}
   )
 
   if(CONFIG_HQ_PLATFORM_POSIX)
@@ -22,10 +22,7 @@ if(NOT ESP_PLATFORM)
     )
   endif()
 
-  target_compile_definitions(osal_tests
-    PRIVATE OSAL_LOG_LEVEL=${CONFIG_OSAL_LOG_LEVEL}
-    PRIVATE OSAL_TESTS_AGGREGATE
-  )
+  target_compile_definitions(osal_tests PRIVATE OSAL_TESTS_AGGREGATE)
 
   target_link_libraries(osal_tests
     hq_osal

@@ -78,6 +78,32 @@ Replace `/dev/ttyUSB0` with your actual serial port.
 
 ---
 
+### menuconfig.sh
+
+**Purpose:** Open the project Kconfig menu on Linux using Python `kconfiglib`
+
+**Features:**
+- Linux-only helper
+- Verifies `python3`
+- Uses `pipx` when available (install or upgrade `kconfiglib` idempotently)
+- Falls back to a local virtual environment (`.venv_menuconfig`) when `pipx` is unavailable
+- Installs/updates `kconfiglib` in the selected environment
+- Launches the `menuconfig` frontend from that environment
+- Writes the configuration to `.config` by default
+
+**Usage:**
+```bash
+./scripts/menuconfig.sh
+```
+
+**Requirements:**
+- Linux
+- Python 3
+- Either `pipx` or Python `venv` support
+- Terminal with `curses` support
+
+---
+
 ## Configuration
 
 ### Log Level
@@ -100,6 +126,8 @@ Both scripts use all available CPU cores for faster compilation:
 - **CMake not found:** Install CMake: `apt install cmake` (Ubuntu/Debian) or `brew install cmake` (macOS)
 - **Compiler not found:** Install build tools: `apt install build-essential` (Ubuntu/Debian)
 - **Permission denied:** Ensure script is executable: `chmod +x scripts/*.sh`
+- **menuconfig.sh fails before launch:** Install pip: `sudo apt install python3-pip`
+- **kconfiglib install path not found:** Add the user Python bin directory to `PATH` or rerun from the same shell after installation
 
 ### ESP Build Issues
 - **Docker not found:** Install Docker from https://docs.docker.com/install/
@@ -115,6 +143,12 @@ Both scripts use all available CPU cores for faster compilation:
 - CMake 3.10+
 - GCC/Clang C compiler
 - POSIX-compatible system (Linux, macOS)
+
+### menuconfig
+- Linux
+- Python 3
+- `python3-pip`
+- `kconfiglib` from PyPI
 
 ### ESP32
 - Docker Engine 19.03+

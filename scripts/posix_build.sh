@@ -35,8 +35,9 @@ cd "$BUILD_DIR"
 cmake \
     -DCMAKE_TOOLCHAIN_FILE="$PROJECT_DIR/cmake/posix.cmake" \
     -DCONFIG_HQ_PLATFORM_POSIX=y \
-    -DCONFIG_OSAL_LOG_LEVEL=3 \
+    -DHQ_DEFCONFIG="$PROJECT_DIR/defconfig/posix.defconfig" \
     -DHQ_BUILD_TESTS=ON \
+    -DHQ_BUILD_EXAMPLES=ON \
     "$PROJECT_DIR"
 
 # Build project
@@ -49,7 +50,14 @@ echo "=========================================="
 echo "Build completed successfully!"
 echo "=========================================="
 echo "Test executable: $BUILD_DIR/tests/osal_tests"
+echo "Example executables:"
+echo "  $BUILD_DIR/examples/osal_demo"
+echo "  $BUILD_DIR/examples/cmd_demo"
 echo ""
 echo "To run tests:"
 echo "  $BUILD_DIR/tests/osal_tests"
+echo ""
+echo "To run examples:"
+echo "  $BUILD_DIR/examples/osal_demo"
+echo "  $BUILD_DIR/examples/cmd_demo"
 echo ""

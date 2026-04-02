@@ -145,11 +145,11 @@ static void test_queue_send_receive(void)
     TEST_ASSERT(osal_queue_get_count(queue_id) == 0, "Queue count starts at 0");
 
     status = osal_task_create(&producer_id, "queue_prod", producer_task_func,
-                              NULL, NULL, 16 * 1024, 10, NULL);
+                              NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
     TEST_ASSERT(status == OSAL_SUCCESS, "Producer task created");
 
     status = osal_task_create(&consumer_id, "queue_cons", consumer_task_func,
-                              NULL, NULL, 16 * 1024, 10, NULL);
+                              NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
     TEST_ASSERT(status == OSAL_SUCCESS, "Consumer task created");
 
     /* Wait for both tasks */

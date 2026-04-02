@@ -2,3 +2,6 @@
 **/.build
 **/build*
 **/sdkconfig
+.kconfig-venv/
+.config
+.config.old

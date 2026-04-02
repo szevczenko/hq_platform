@@ -9,7 +9,7 @@
 #include "osal_log.h"
 #include "esp_partition.h"
 #include "esp_vfs.h"
-#include "littlefs/lfs.h"
+#include "lfs.h"
 #include "esp_littlefs.h"
 #include "littlefs_api.h"
 

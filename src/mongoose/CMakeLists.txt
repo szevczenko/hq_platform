@@ -3,7 +3,7 @@ set(MONGOOSE_PUBLIC_INCLUDES
   ${HQ_CONFIG_DIR}
 )
 
-file(GLOB MONGOOSE_COMMON_SOURCES CONFIGURE_DEPENDS
+file(GLOB MONGOOSE_COMMON_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/*.c
 )
 
@@ -15,15 +15,10 @@ elseif(CONFIG_HQ_PLATFORM_ESP OR ESP_PLATFORM)
   set(MONGOOSE_OSAL_PLATFORM_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../osal/esp)
 endif()
 
-if(NOT DEFINED CONFIG_MONGOOSE_LOG_LEVEL OR CONFIG_MONGOOSE_LOG_LEVEL STREQUAL "")
-  set(CONFIG_MONGOOSE_LOG_LEVEL 2)
-endif()
-
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${MONGOOSE_COMMON_SOURCES}
                          INCLUDE_DIRS ${MONGOOSE_PUBLIC_INCLUDES} ${MONGOOSE_PLATFORM_INCLUDES}
                          REQUIRES osal esp_partition vfs app_update esp_timer mbedtls)
-  target_compile_definitions(${COMPONENT_LIB} PRIVATE MONGOOSE_LOG_LEVEL=${CONFIG_MONGOOSE_LOG_LEVEL})
 else()
   add_library(hq_mongoose STATIC ${MONGOOSE_COMMON_SOURCES})
   target_include_directories(hq_mongoose
@@ -33,6 +28,5 @@ else()
             ${MONGOOSE_OSAL_PLATFORM_INCLUDE}
   )
   target_compile_definitions(hq_mongoose PRIVATE MG_ARCH=MG_ARCH_CUSTOM)
-  target_compile_definitions(hq_mongoose PRIVATE MONGOOSE_LOG_LEVEL=${CONFIG_MONGOOSE_LOG_LEVEL})
   target_link_libraries(hq_mongoose PUBLIC hq_osal)
 endif()

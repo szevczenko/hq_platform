@@ -95,11 +95,11 @@ static void test_mutex_protection(void)
     TEST_ASSERT(status == OSAL_SUCCESS, "Mutex created successfully");
 
     status = osal_task_create(&task_ids[0], "mutex_task_0", mutex_task_func,
-                              &task_args[0], NULL, 16 * 1024, 10, NULL);
+                              &task_args[0], NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
     TEST_ASSERT(status == OSAL_SUCCESS, "Mutex task 0 created");
 
     status = osal_task_create(&task_ids[1], "mutex_task_1", mutex_task_func,
-                              &task_args[1], NULL, 16 * 1024, 10, NULL);
+                              &task_args[1], NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
     TEST_ASSERT(status == OSAL_SUCCESS, "Mutex task 1 created");
 
     /* Wait for both tasks */
@@ -168,11 +168,11 @@ static void test_binary_semaphore(void)
     TEST_ASSERT(status == OSAL_SUCCESS, "Binary semaphore created");
 
     status = osal_task_create(&waiter_id, "bin_waiter", bin_waiter_task,
-                              NULL, NULL, 16 * 1024, 10, NULL);
+                              NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
     TEST_ASSERT(status == OSAL_SUCCESS, "Waiter task created");
 
     status = osal_task_create(&signaler_id, "bin_signaler", bin_signaler_task,
-                              NULL, NULL, 16 * 1024, 10, NULL);
+                              NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
     TEST_ASSERT(status == OSAL_SUCCESS, "Signaler task created");
 
     /* Wait for both tasks */
@@ -253,11 +253,11 @@ static void test_counting_semaphore(void)
                 "Initial count is 0");
 
     status = osal_task_create(&producer_id, "count_prod", count_producer_task,
-                              NULL, NULL, 16 * 1024, 10, NULL);
+                              NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
     TEST_ASSERT(status == OSAL_SUCCESS, "Producer task created");
 
     status = osal_task_create(&consumer_id, "count_cons", count_consumer_task,
-                              NULL, NULL, 16 * 1024, 10, NULL);
+                              NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
     TEST_ASSERT(status == OSAL_SUCCESS, "Consumer task created");
 
     /* Wait for both tasks */
