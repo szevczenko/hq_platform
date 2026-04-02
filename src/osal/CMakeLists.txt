@@ -53,7 +53,6 @@ if(ESP_PLATFORM)
 else()
   add_library(hq_osal STATIC ${OSAL_ALL_SOURCES})
   target_include_directories(hq_osal
-    PUBLIC ${OSAL_PUBLIC_INCLUDES}
-    PRIVATE ${OSAL_PLATFORM_INCLUDES}
+    PUBLIC ${OSAL_PUBLIC_INCLUDES} ${OSAL_PLATFORM_INCLUDES}
   )
 endif()

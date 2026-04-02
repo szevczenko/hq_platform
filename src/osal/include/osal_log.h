@@ -2,6 +2,7 @@
 #define OSAL_LOG_H
 
 #include "hq_config.h"
+#include "osal_error.h"
 #include <stdarg.h>
 
 typedef enum {

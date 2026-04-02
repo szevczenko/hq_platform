@@ -34,52 +34,14 @@ if(NOT ESP_PLATFORM)
   endif()
 endif()
 
-# Generate hq_config.h using kconfiglib genconfig
-if(DEFINED PYTHON AND NOT PYTHON STREQUAL "")
-  set(HQ_PYTHON_EXECUTABLE "${PYTHON}")
-else()
-  find_program(HQ_PYTHON_EXECUTABLE NAMES python3 python REQUIRED)
-endif()
-
-if(ESP_PLATFORM)
-  set(HQ_CONFIG_DIR "${CMAKE_BINARY_DIR}/config")
-else()
-  set(HQ_CONFIG_DIR "${CMAKE_BINARY_DIR}")
-endif()
-
-file(MAKE_DIRECTORY "${HQ_CONFIG_DIR}")
-set(HQ_CONFIG_HEADER "${HQ_CONFIG_DIR}/hq_config.h")
-
-if(ESP_PLATFORM)
-  set(_hq_kconfig_config "${CMAKE_SOURCE_DIR}/sdkconfig")
-elseif(HQ_DEFCONFIG)
-  set(_hq_kconfig_config "${HQ_DEFCONFIG}")
-else()
-  message(FATAL_ERROR "HQ_DEFCONFIG not set. Pass -DHQ_DEFCONFIG=path/to/defconfig")
-endif()
-
-if(EXISTS "${_hq_kconfig_config}")
-  execute_process(
-    COMMAND ${CMAKE_COMMAND} -E env
-      KCONFIG_CONFIG=${_hq_kconfig_config}
-      ${HQ_PYTHON_EXECUTABLE} -m genconfig
-        --header-path ${HQ_CONFIG_HEADER}
-        ${CMAKE_SOURCE_DIR}/Kconfig
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    RESULT_VARIABLE _genconfig_result
-    OUTPUT_VARIABLE _genconfig_stdout
-    ERROR_VARIABLE _genconfig_stderr
-  )
-  if(NOT _genconfig_result EQUAL 0)
-    message(FATAL_ERROR
-      "genconfig failed for ${_hq_kconfig_config}\n"
-      "stdout:\n${_genconfig_stdout}\n"
-      "stderr:\n${_genconfig_stderr}\n"
-      "Install kconfiglib with:\n  pip3 install --break-system-packages kconfiglib")
+# Generate hq_config.h from defconfig
+set(HQ_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}")
+if(NOT DEFINED HQ_DEFCONFIG OR HQ_DEFCONFIG STREQUAL "")
+  if(ESP_PLATFORM)
+    set(HQ_DEFCONFIG "${HQ_REPO_ROOT}/defconfig/esp.defconfig")
   endif()
-else()
-  message(WARNING "Config not found: ${_hq_kconfig_config} - hq_config.h will not be generated")
 endif()
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/configure.cmake)
 
 if(ESP_PLATFORM)
   # For ESP-IDF, components are registered in their own CMakeLists.txt

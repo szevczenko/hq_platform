@@ -103,8 +103,8 @@ static void test_dynamic_task_creation(void)
         dynamic_task_func,
         &task_arg,
         NULL,
-        16 * 1024,  /* 16 KB stack */
-        10,         /* Priority */
+        OSAL_TASK_MIN_STACK_SIZE,
+        10,
         &attr
     );
     
@@ -135,7 +135,7 @@ static void test_dynamic_task_creation(void)
  * ========================================================================== */
 
 /* Static task memory buffers */
-static uint8_t static_task_stack[16 * 1024];
+static uint8_t static_task_stack[OSAL_TASK_MIN_STACK_SIZE];
 
 /**
  * Simple task function for static task test
@@ -310,7 +310,7 @@ static void test_concurrent_tasks(void)
             concurrent_task_func,
             &task_args[i],
             NULL,
-            16 * 1024,
+            OSAL_TASK_MIN_STACK_SIZE,
             10,
             NULL
         );

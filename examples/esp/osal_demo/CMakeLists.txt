@@ -6,7 +6,5 @@ set(HQ_DEFCONFIG "${HQ_REPO_ROOT}/defconfig/esp.defconfig")
 set(EXTRA_COMPONENT_DIRS ${HQ_REPO_ROOT}/src/osal)
 include(${HQ_REPO_ROOT}/cmake/configure.cmake)
 
-set(SDKCONFIG_DEFAULTS "sdkconfig.default")
-
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(osal_tests)
+project(osal_demo)
