@@ -5,6 +5,13 @@
 #include "hq_config.h"
 #include "hq_cmd.h"
 #include "hq_cmd_internal.h"
+#include "osal_task.h"
+#include "osal_bin_sem.h"
+#include "osal_log.h"
+
+static osal_task_id_t    g_input_task_id;
+static osal_bin_sem_id_t g_stop_sem;
+static volatile bool     g_input_running;
 
 static EmbeddedCli *g_cli = NULL;
 
@@ -26,12 +33,37 @@ static void hq_cmd_write_char_adapter(EmbeddedCli *cli, char c)
     hq_cmd_platform_write_char(c);
 }
 
+static void hq_cmd_input_task(void *arg)
+{
+    (void)arg;
+
+    while (g_input_running)
+    {
+        int c = hq_cmd_platform_read_char();
+        if (c >= 0)
+        {
+            hq_cmd_receive_char((char)c);
+            hq_cmd_process();
+        }
+        else
+        {
+            osal_task_delay_ms(10);
+        }
+    }
+
+    (void)osal_bin_sem_give(g_stop_sem);
+    (void)osal_task_delete(g_input_task_id);
+}
+
 int32_t hq_cmd_init(void)
 {
+    osal_status_t status;
     if (g_cli != NULL)
     {
         return 0;
     }
+
+    hq_cmd_platform_output_init();
 
     EmbeddedCliConfig *cfg = embeddedCliDefaultConfig();
     cfg->rxBufferSize = (uint16_t)CONFIG_CMD_RX_BUFFER_SIZE;
@@ -44,6 +76,7 @@ int32_t hq_cmd_init(void)
     g_cli = embeddedCliNew(cfg);
     if (g_cli == NULL)
     {
+        osal_log_error("Failed to create CLI instance");
         return -1;
     }
 
@@ -51,6 +84,32 @@ int32_t hq_cmd_init(void)
     g_cli->onCommand = hq_cmd_on_unknown;
 
     hq_cmd_register_builtin_commands();
+
+    if ((status = osal_bin_sem_create(&g_stop_sem, "cmd_stop", OSAL_SEM_EMPTY)) != OSAL_SUCCESS)
+    {
+        osal_log_error("Failed to create stop semaphore %s", osal_get_status_name(status));
+        embeddedCliFree(g_cli);
+        g_cli = NULL;
+        return -1;
+    }
+
+    g_input_running = true;
+
+    osal_task_attr_t attr;
+    (void)osal_task_attributes_init(&attr);
+
+    if ((status = osal_task_create(&g_input_task_id, "cmd_input",
+                         hq_cmd_input_task, NULL, NULL,
+                         (size_t)CONFIG_CMD_INPUT_TASK_STACK_SIZE,
+                         (osal_priority_t)CONFIG_CMD_INPUT_TASK_PRIORITY,
+                         &attr)) != OSAL_SUCCESS)
+    {
+        osal_log_error("Failed to create input task %s", osal_get_status_name(status));
+        osal_bin_sem_delete(g_stop_sem);
+        embeddedCliFree(g_cli);
+        g_cli = NULL;
+        return -1;
+    }
 
     return 0;
 }
@@ -62,8 +121,31 @@ void hq_cmd_deinit(void)
         return;
     }
 
+    g_input_running = false;
+    (void)osal_bin_sem_take(g_stop_sem);
+    (void)osal_bin_sem_delete(g_stop_sem);
+
     embeddedCliFree(g_cli);
     g_cli = NULL;
+}
+
+void hq_cmd_stop(void)
+{
+    g_input_running = false;
+}
+
+void hq_cmd_wait(void)
+{
+    if (g_cli == NULL)
+    {
+        return;
+    }
+
+    /* Block until the input task signals it has stopped. */
+    (void)osal_bin_sem_take(g_stop_sem);
+
+    /* Re-give so deinit can also take it. */
+    (void)osal_bin_sem_give(g_stop_sem);
 }
 
 void hq_cmd_process(void)
@@ -124,7 +206,34 @@ int32_t hq_cmd_register(const hq_cmd_binding_t *binding)
     return hq_cmd_register_internal(&cli_binding);
 }
 
-EmbeddedCli *hq_cmd_get_cli(void)
+hq_cmd_cli_t *hq_cmd_get_cli(void)
 {
     return g_cli;
+}
+
+/* ── Argument helper wrappers ──────────────────────────────────────── */
+
+void hq_cmd_tokenize_args(char *args)
+{
+    embeddedCliTokenizeArgs(args);
+}
+
+uint16_t hq_cmd_get_token_count(const char *args)
+{
+    return embeddedCliGetTokenCount(args);
+}
+
+const char *hq_cmd_get_token(const char *args, uint16_t pos)
+{
+    return embeddedCliGetToken(args, pos);
+}
+
+char *hq_cmd_get_token_variable(char *args, uint16_t pos)
+{
+    return embeddedCliGetTokenVariable(args, pos);
+}
+
+uint16_t hq_cmd_find_token(const char *args, const char *token)
+{
+    return embeddedCliFindToken(args, token);
 }

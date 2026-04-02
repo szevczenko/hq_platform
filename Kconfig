@@ -48,6 +48,57 @@ endmenu
 
 menu "Command Line"
 
+choice
+  prompt "ESP32 CMD output interface"
+  depends on HQ_PLATFORM_ESP
+  default CMD_ESP_OUTPUT_CONSOLE
+
+config CMD_ESP_OUTPUT_CONSOLE
+  bool "Use ESP-IDF console (stdout)"
+  help
+    CMD output goes through putchar()/stdout.
+    Requires ESP-IDF console UART to be configured in menuconfig:
+      Component Config -> ESP System Settings -> Console Output
+        CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+        CONFIG_ESP_CONSOLE_UART_NUM=<port>
+        CONFIG_ESP_CONSOLE_UART_BAUDRATE=<baud>
+
+config CMD_ESP_OUTPUT_UART
+  bool "Use direct UART driver"
+  help
+    CMD output goes directly to a UART peripheral.
+    Does not use or conflict with the ESP-IDF console.
+    Output only, no input handling.
+
+endchoice
+
+config CMD_ESP_UART_NUM
+  int "UART port number"
+  depends on CMD_ESP_OUTPUT_UART
+  default 1
+  range 0 2
+  help
+    UART peripheral for CMD output (0, 1, or 2).
+    Avoid the port used by ESP-IDF console (usually 0).
+
+config CMD_ESP_UART_BAUDRATE
+  int "UART baudrate"
+  depends on CMD_ESP_OUTPUT_UART
+  default 115200
+  help
+    Baudrate for the CMD UART output.
+
+config CMD_INPUT_TASK_STACK_SIZE
+  int "Input task stack size (bytes)"
+  default 16384 if HQ_PLATFORM_POSIX
+  default 4096
+  range 1024 65536
+
+config CMD_INPUT_TASK_PRIORITY
+  int "Input task priority"
+  default 5
+  range 1 25
+
 config CMD_RX_BUFFER_SIZE
   int "CLI RX buffer size"
   default 256

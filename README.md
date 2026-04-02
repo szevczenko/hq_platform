@@ -61,13 +61,20 @@ Available config options:
 |--------|--------|-------------|
 | `CONFIG_HQ_PLATFORM_POSIX` | y/n | Enable POSIX backend |
 | `CONFIG_HQ_PLATFORM_ESP` | y/n | Enable ESP backend |
+| `CONFIG_CMD_ESP_OUTPUT_CONSOLE` | y/n | CMD output via ESP-IDF console UART |
+| `CONFIG_CMD_ESP_OUTPUT_UART` | y/n | CMD output via direct UART driver |
+| `CONFIG_CMD_ESP_UART_NUM` | 0-2 | UART port for direct UART mode |
+| `CONFIG_CMD_ESP_UART_BAUDRATE` | int | UART baudrate for direct UART mode |
 | `CONFIG_OSAL_LOG_LEVEL` | 0-4 | OSAL log verbosity |
 | `CONFIG_MONGOOSE_LOG_LEVEL` | 0-4 | Mongoose log verbosity |
+
+For ESP-IDF settings required by each CMD output mode, see [ESP_UART_Configuration.md](docs/ESP_UART_Configuration.md).
 
 ## Documentation
 
 - [OSAL_SPECIFICATION.md](docs/OSAL_SPECIFICATION.md) - OSAL API specification
 - [HQ_PLATFORM_BUILD_SYSTEM.md](docs/HQ_PLATFORM_BUILD_SYSTEM.md) - Build system details
+- [ESP_UART_Configuration.md](docs/ESP_UART_Configuration.md) - ESP CMD output configuration
 - [OSAL_Task_Management.md](docs/OSAL_Task_Management.md) - Task API
 - [OSAL_Semaphore_API.md](docs/OSAL_Semaphore_API.md) - Semaphore API
 - [OSAL_Queue_API.md](docs/OSAL_Queue_API.md) - Queue API
