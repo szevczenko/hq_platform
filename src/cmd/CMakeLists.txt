@@ -56,5 +56,5 @@ else()
     PUBLIC ${CMD_PUBLIC_INCLUDES}
     PRIVATE ${CMD_PRIVATE_INCLUDES} ${CMD_PLATFORM_INCLUDES}
   )
-  target_link_libraries(hq_cmd PUBLIC hq_osal)
+  target_link_libraries(hq_cmd PUBLIC hq_osal hq_wifi)
 endif()
