@@ -22,7 +22,7 @@ static void hq_cmd_hello_handler(hq_cmd_cli_t *cli, char *args, void *context)
     }
 }
 
-void hq_cmd_register_builtin_commands(void)
+void hq_cmd_hello_register(void)
 {
     hq_cmd_binding_t hello_binding = {
         .name = "hello",

@@ -92,9 +92,9 @@ config CMD_ESP_UART_BAUDRATE
 
 config CMD_INPUT_TASK_STACK_SIZE
   int "Input task stack size (bytes)"
-  default 16384 if HQ_PLATFORM_POSIX
+  default 65536 if HQ_PLATFORM_POSIX
   default 4096
-  range 1024 65536
+  range 1024 131072
 
 config CMD_INPUT_TASK_PRIORITY
   int "Input task priority"

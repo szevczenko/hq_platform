@@ -18,7 +18,7 @@ static void osal_log_v(const char *level, const char *format, va_list args)
 {
     osal_printf("[%s]: ", level);
     osal_impl_printf(format, args);
-    osal_printf("\n");
+    osal_printf("\r\n");
     fflush(stdout);
 }
 
