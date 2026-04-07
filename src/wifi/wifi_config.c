@@ -26,8 +26,11 @@
 
 static osal_status_t _read_file( const char* path, char** out_buf )
 {
+  osal_log_debug( "wifi_config_read_file: path=%s", path ? path : "(null)" );
+
   if ( !path || !out_buf )
   {
+    osal_log_error( "wifi_config_read_file: invalid args path=%p out_buf=%p", (void*) path, (void*) out_buf );
     return OSAL_INVALID_POINTER;
   }
 
@@ -35,17 +38,20 @@ static osal_status_t _read_file( const char* path, char** out_buf )
   int32_t stat_rc = osal_stat( path, &stat );
   if ( stat_rc != OSAL_SUCCESS )
   {
+    osal_log_error( "wifi_config_read_file: osal_stat failed rc=%d", (int) stat_rc );
     return (osal_status_t) stat_rc;
   }
 
   if ( stat.file_size == 0 || stat.file_size > WIFI_CONFIG_MAX_JSON_SIZE )
   {
+    osal_log_error( "wifi_config_read_file: invalid file size=%u", (unsigned) stat.file_size );
     return OSAL_ERR_OUTPUT_TOO_LARGE;
   }
 
   osal_file_id_t fd = osal_open_create( path, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY );
   if ( fd < 0 )
   {
+    osal_log_error( "wifi_config_read_file: osal_open_create failed rc=%d", (int) fd );
     return (osal_status_t) fd;
   }
 
@@ -53,6 +59,7 @@ static osal_status_t _read_file( const char* path, char** out_buf )
   if ( !buf )
   {
     (void) osal_close( fd );
+    osal_log_error( "wifi_config_read_file: calloc failed for size=%u", (unsigned) ( stat.file_size + 1u ) );
     return OSAL_ERROR;
   }
 
@@ -61,11 +68,13 @@ static osal_status_t _read_file( const char* path, char** out_buf )
   if ( read_rc < 0 )
   {
     free( buf );
+    osal_log_error( "wifi_config_read_file: osal_read failed rc=%d", (int) read_rc );
     return (osal_status_t) read_rc;
   }
 
   buf[read_rc] = '\0';
   *out_buf = buf;
+  osal_log_debug( "wifi_config_read_file: success bytes=%d", (int) read_rc );
   return OSAL_SUCCESS;
 }
 
@@ -167,8 +176,11 @@ static void _renumber( wifi_config_list_t* list )
 
 osal_status_t wifi_config_load( wifi_config_list_t* list )
 {
+  osal_log_debug( "wifi_config_load: path=%s", WIFI_CONFIG_FILE_PATH );
+
   if ( !list )
   {
+    osal_log_error( "wifi_config_load: list is NULL" );
     return OSAL_INVALID_POINTER;
   }
 
@@ -178,6 +190,7 @@ osal_status_t wifi_config_load( wifi_config_list_t* list )
   osal_status_t status = _read_file( WIFI_CONFIG_FILE_PATH, &content );
   if ( status != OSAL_SUCCESS )
   {
+    osal_log_error( "wifi_config_load: read failed rc=%d", (int) status );
     return status;
   }
 
@@ -185,6 +198,7 @@ osal_status_t wifi_config_load( wifi_config_list_t* list )
   free( content );
   if ( !root )
   {
+    osal_log_error( "wifi_config_load: invalid JSON" );
     return OSAL_ERROR;
   }
 
@@ -238,25 +252,36 @@ osal_status_t wifi_config_load( wifi_config_list_t* list )
   }
 
   cJSON_Delete( root );
+  osal_log_debug( "wifi_config_load: loaded credentials=%u, last_use=%u",
+                  (unsigned) list->count,
+                  (unsigned) list->last_use );
   return OSAL_SUCCESS;
 }
 
 osal_status_t wifi_config_save( const wifi_config_list_t* list )
 {
+  osal_log_debug( "wifi_config_save: path=%s, credentials=%u, last_use=%u",
+                  WIFI_CONFIG_FILE_PATH,
+                  (unsigned) ( list ? list->count : 0 ),
+                  (unsigned) ( list ? list->last_use : 0 ) );
+
   if ( !list )
   {
+    osal_log_error( "wifi_config_save: list is NULL" );
     return OSAL_INVALID_POINTER;
   }
 
   cJSON* root = cJSON_CreateObject();
   if ( !root )
   {
+    osal_log_error( "wifi_config_save: cJSON_CreateObject failed" );
     return OSAL_ERROR;
   }
 
   if ( !cJSON_AddNumberToObject( root, "last_use", list->last_use ) )
   {
     cJSON_Delete( root );
+    osal_log_error( "wifi_config_save: failed to add last_use" );
     return OSAL_ERROR;
   }
 
@@ -264,6 +289,7 @@ osal_status_t wifi_config_save( const wifi_config_list_t* list )
   if ( !arr )
   {
     cJSON_Delete( root );
+    osal_log_error( "wifi_config_save: failed to add credentials array" );
     return OSAL_ERROR;
   }
 
@@ -273,6 +299,7 @@ osal_status_t wifi_config_save( const wifi_config_list_t* list )
     if ( !item )
     {
       cJSON_Delete( root );
+      osal_log_error( "wifi_config_save: failed to create credential object idx=%u", (unsigned) i );
       return OSAL_ERROR;
     }
 
@@ -282,6 +309,7 @@ osal_status_t wifi_config_save( const wifi_config_list_t* list )
     {
       cJSON_Delete( item );
       cJSON_Delete( root );
+      osal_log_error( "wifi_config_save: failed to fill credential idx=%u", (unsigned) i );
       return OSAL_ERROR;
     }
 
@@ -292,11 +320,20 @@ osal_status_t wifi_config_save( const wifi_config_list_t* list )
   cJSON_Delete( root );
   if ( !json )
   {
+    osal_log_error( "wifi_config_save: cJSON_PrintUnformatted failed" );
     return OSAL_ERROR;
   }
 
   osal_status_t st = _write_file( WIFI_CONFIG_FILE_PATH, json, strlen( json ) );
   free( json );
+  if ( st != OSAL_SUCCESS )
+  {
+    osal_log_error( "wifi_config_save: write failed rc=%d", (int) st );
+  }
+  else
+  {
+    osal_log_debug( "wifi_config_save: success" );
+  }
   return st;
 }
 

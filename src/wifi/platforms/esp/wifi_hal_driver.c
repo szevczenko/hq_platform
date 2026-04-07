@@ -23,6 +23,7 @@ typedef struct
 } wifi_hal_ctx_t;
 
 static wifi_hal_ctx_t g_wifi_hal_ctx = { 0 };
+static wifi_ap_record_t scan_ap_records[64] = { 0 };
 
 static osal_status_t _esp_to_status( esp_err_t err )
 {
@@ -97,7 +98,8 @@ static void _copy_sta_config( wifi_config_t* out, const wifi_hal_sta_config_t* i
   memset( out, 0, sizeof( *out ) );
   strncpy( (char*) out->sta.ssid, in->ssid, sizeof( out->sta.ssid ) - 1 );
   strncpy( (char*) out->sta.password, in->password, sizeof( out->sta.password ) - 1 );
-  out->sta.threshold.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+  /* Accept open APs when password is empty; otherwise allow WPA2 and stronger. */
+  out->sta.threshold.authmode = ( in->password[0] == '\0' ) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
   out->sta.pmf_cfg.capable = true;
 }
 
@@ -278,7 +280,56 @@ osal_status_t wifi_hal_set_ap_config( const wifi_hal_ap_config_t* config )
 
 osal_status_t wifi_hal_connect( void )
 {
-  return _esp_to_status( esp_wifi_connect() );
+  size_t pass_len = strlen( g_wifi_hal_ctx.sta_cfg.password );
+  osal_log_debug( "[wifi-hal] connect requested: ssid='%s', pass_len=%u",
+                  g_wifi_hal_ctx.sta_cfg.ssid,
+                  (unsigned) pass_len );
+
+  wifi_mode_t mode = WIFI_MODE_NULL;
+  esp_err_t err = esp_wifi_get_mode( &mode );
+  if ( err != ESP_OK )
+  {
+    osal_log_error( "[wifi-hal] esp_wifi_get_mode failed: %s (0x%x)",
+                    esp_err_to_name( err ),
+                    (unsigned) err );
+    return OSAL_ERROR;
+  }
+
+  osal_log_debug( "[wifi-hal] current mode=%d", (int) mode );
+
+  if ( mode != WIFI_MODE_STA && mode != WIFI_MODE_APSTA )
+  {
+    osal_log_error( "[wifi-hal] invalid mode for connect: %d", (int) mode );
+    return OSAL_ERROR;
+  }
+
+  /* Always apply the latest credentials before attempting a connection. */
+  wifi_config_t sta_cfg;
+  _copy_sta_config( &sta_cfg, &g_wifi_hal_ctx.sta_cfg );
+  err = esp_wifi_set_config( WIFI_IF_STA, &sta_cfg );
+  if ( err != ESP_OK )
+  {
+    osal_log_error( "[wifi-hal] esp_wifi_set_config failed for ssid='%s': %s (0x%x)",
+                    g_wifi_hal_ctx.sta_cfg.ssid,
+                    esp_err_to_name( err ),
+                    (unsigned) err );
+    return OSAL_ERROR;
+  }
+
+  osal_log_debug( "[wifi-hal] STA config applied, connecting..." );
+
+  err = esp_wifi_connect();
+  if ( err != ESP_OK )
+  {
+    osal_log_error( "[wifi-hal] esp_wifi_connect failed: %s (0x%x)",
+                    esp_err_to_name( err ),
+                    (unsigned) err );
+    return OSAL_ERROR;
+  }
+
+  osal_log_debug( "[wifi-hal] esp_wifi_connect accepted" );
+
+  return OSAL_SUCCESS;
 }
 
 osal_status_t wifi_hal_disconnect( void )
@@ -299,14 +350,13 @@ osal_status_t wifi_hal_get_scanned_ap( wifi_hal_ap_record_t* records, uint16_t* 
     return OSAL_INVALID_POINTER;
   }
 
-  wifi_ap_record_t ap_records[64] = { 0 };
   uint16_t count = *in_out_count;
   if ( count > 64 )
   {
     count = 64;
   }
 
-  esp_err_t err = esp_wifi_scan_get_ap_records( &count, ap_records );
+  esp_err_t err = esp_wifi_scan_get_ap_records( &count, scan_ap_records );
   if ( err != ESP_OK )
   {
     return OSAL_ERROR;
@@ -315,10 +365,10 @@ osal_status_t wifi_hal_get_scanned_ap( wifi_hal_ap_record_t* records, uint16_t* 
   for ( uint16_t i = 0; i < count; ++i )
   {
     memset( &records[i], 0, sizeof( records[i] ) );
-    strncpy( records[i].ssid, (const char*) ap_records[i].ssid, WIFI_HAL_SSID_MAX_LEN );
-    records[i].channel = ap_records[i].primary;
-    records[i].rssi = ap_records[i].rssi;
-    records[i].authmode = ap_records[i].authmode;
+    strncpy( records[i].ssid, (const char*) scan_ap_records[i].ssid, WIFI_HAL_SSID_MAX_LEN );
+    records[i].channel = scan_ap_records[i].primary;
+    records[i].rssi = scan_ap_records[i].rssi;
+    records[i].authmode = scan_ap_records[i].authmode;
   }
 
   *in_out_count = count;

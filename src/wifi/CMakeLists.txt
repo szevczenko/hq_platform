@@ -34,7 +34,8 @@ if(ESP_PLATFORM)
   idf_component_register(SRCS ${WIFI_ALL_SOURCES} ${HQ_CJSON_SOURCES}
                          INCLUDE_DIRS ${WIFI_PUBLIC_INCLUDES} ${HQ_CJSON_INCLUDE_DIRS}
                          PRIV_INCLUDE_DIRS ${WIFI_PLATFORM_INCLUDES}
-                         REQUIRES osal)
+                         REQUIRES osal
+                         PRIV_REQUIRES esp_event esp_netif esp_wifi)
 else()
   add_library(hq_wifi STATIC ${WIFI_ALL_SOURCES})
   target_include_directories(hq_wifi
