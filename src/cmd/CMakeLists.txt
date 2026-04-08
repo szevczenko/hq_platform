@@ -41,7 +41,7 @@ set(CMD_ALL_SOURCES
 )
 
 if(ESP_PLATFORM)
-  set(CMD_REQUIRES osal wifi)
+  set(CMD_REQUIRES osal wifi mongoose)
   if(CONFIG_CMD_ESP_OUTPUT_UART)
     list(APPEND CMD_REQUIRES driver)
   endif()
@@ -56,5 +56,5 @@ else()
     PUBLIC ${CMD_PUBLIC_INCLUDES}
     PRIVATE ${CMD_PRIVATE_INCLUDES} ${CMD_PLATFORM_INCLUDES}
   )
-  target_link_libraries(hq_cmd PUBLIC hq_osal hq_wifi)
+  target_link_libraries(hq_cmd PUBLIC hq_osal hq_wifi hq_mongoose)
 endif()

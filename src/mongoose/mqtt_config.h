@@ -2,22 +2,22 @@
  *******************************************************************************
  * @file    mqtt_config.h
  * @author  Dmytro Shevchenko
- * @brief   MQTT modules configuration header file
+ * @brief   MQTT module configuration header file
  *******************************************************************************
  */
 
-/* Define to prevent recursive inclusion ------------------------------------*/
-
-#ifndef _MQTT_CONFIG_H
-#define _MQTT_CONFIG_H
+#ifndef MQTT_CONFIG_H
+#define MQTT_CONFIG_H
 
 #include <stdbool.h>
 #include <stddef.h>
 
 /* Public macros -------------------------------------------------------------*/
 
-#define MQTT_CONFIG_STR_SIZE 64
-#define MQTT_CERT_MAX_SIZE   5120
+#define MQTT_CONFIG_STR_SIZE   128
+#define MQTT_CERT_MAX_SIZE     5120
+#define MQTT_CONFIG_FILE_PATH  "mqtt.json"
+#define MQTT_CERT_FILE_PATH    "mqtt_cert.pem"
 
 /* Public types --------------------------------------------------------------*/
 
@@ -38,9 +38,6 @@ typedef void ( *mqtt_apply_config_cb )( void );
 
 /* Public functions ----------------------------------------------------------*/
 
-/**
- * @brief   Init mqtt config.
- */
 void MQTTConfig_Init( void );
 
 bool MQTTConfig_SetInt( int value, mqtt_config_value_t config_value );

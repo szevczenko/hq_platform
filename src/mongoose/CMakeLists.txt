@@ -18,7 +18,7 @@ endif()
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${MONGOOSE_COMMON_SOURCES}
                          INCLUDE_DIRS ${MONGOOSE_PUBLIC_INCLUDES} ${MONGOOSE_PLATFORM_INCLUDES}
-                         REQUIRES osal esp_partition vfs app_update esp_timer mbedtls)
+                         REQUIRES osal esp_partition vfs app_update esp_timer mbedtls json)
 else()
   add_library(hq_mongoose STATIC ${MONGOOSE_COMMON_SOURCES})
   target_include_directories(hq_mongoose
@@ -26,7 +26,8 @@ else()
     PRIVATE ${MONGOOSE_PLATFORM_INCLUDES}
             ${CMAKE_CURRENT_SOURCE_DIR}/../osal/include
             ${MONGOOSE_OSAL_PLATFORM_INCLUDE}
+            ${HQ_CJSON_INCLUDE_DIRS}
   )
   target_compile_definitions(hq_mongoose PRIVATE MG_ARCH=MG_ARCH_CUSTOM)
-  target_link_libraries(hq_mongoose PUBLIC hq_osal)
+  target_link_libraries(hq_mongoose PUBLIC hq_osal hq_cjson)
 endif()
