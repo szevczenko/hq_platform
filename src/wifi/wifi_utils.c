@@ -57,12 +57,18 @@ osal_status_t wifi_utils_ap_list_to_json( const wifi_mgmt_ap_list_t* list,
     return OSAL_ERROR;
   }
 
-  for ( uint16_t i = 0; i < list->count; ++i )
+  uint16_t ap_count = list->count;
+  if ( ap_count > WIFI_DRV_MAX_SCAN_AP )
+  {
+    ap_count = WIFI_DRV_MAX_SCAN_AP;
+  }
+  for ( uint16_t i = 0; i < ap_count; ++i )
   {
     cJSON* ap = cJSON_CreateObject();
     if ( !ap )
     {
-      continue;
+      cJSON_Delete( root );
+      return OSAL_ERROR;
     }
 
     (void) cJSON_AddStringToObject( ap, "ssid", list->items[i].ssid );

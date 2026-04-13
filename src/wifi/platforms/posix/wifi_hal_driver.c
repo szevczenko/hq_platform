@@ -174,6 +174,7 @@ typedef struct
 
   /* AP client count (soft-AP simulation) */
   uint32_t              client_cnt;
+  pthread_mutex_t       state_mutex; /* Protects shared state (connected, active_ap, flags) */
 } sim_state_t;
 
 static sim_state_t g_sim = { 0 };
@@ -196,9 +197,14 @@ static const sim_ap_t* _find_ap( const char* ssid )
 
 static void _fire_event( wifi_hal_event_t event, const wifi_hal_event_data_t* data )
 {
-  if ( g_sim.event_cb )
+  pthread_mutex_lock( &g_sim.state_mutex );
+  wifi_hal_event_cb_t cb = g_sim.event_cb;
+  void* user = g_sim.user_data;
+  pthread_mutex_unlock( &g_sim.state_mutex );
+
+  if ( cb )
   {
-    g_sim.event_cb( event, data, g_sim.user_data );
+    cb( event, data, user );
   }
 }
 
@@ -234,36 +240,52 @@ static void* _disconnect_thread( void* arg )
     }
   }
 
-  bool should_fire = !g_sim.disc_cancel && g_sim.connected;
+  bool disc_cancelled = g_sim.disc_cancel;
   pthread_mutex_unlock( &g_sim.disc_mutex );
+
+  pthread_mutex_lock( &g_sim.state_mutex );
+  bool connected = g_sim.connected;
+  pthread_mutex_unlock( &g_sim.state_mutex );
+
+  bool should_fire = !disc_cancelled && connected;
 
   if ( should_fire )
   {
     osal_log_info( "[wifi-sim] timed disconnect after %u ms", (unsigned) ms );
+    pthread_mutex_lock( &g_sim.state_mutex );
     g_sim.connected = false;
     g_sim.active_ap = NULL;
+    pthread_mutex_unlock( &g_sim.state_mutex );
 
     wifi_hal_event_data_t evt = { .disconnect_reason = 8 /* ASSOC_LEAVE */ };
     _fire_event( WIFI_HAL_EVT_STA_DISCONNECTED, &evt );
   }
 
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.disc_thread_active = false;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   return NULL;
 }
 
 static void _stop_disconnect_timer_if_active( void )
 {
+  pthread_mutex_lock( &g_sim.state_mutex );
   if ( !g_sim.disc_thread_active )
   {
+    pthread_mutex_unlock( &g_sim.state_mutex );
     return;
   }
+  pthread_mutex_unlock( &g_sim.state_mutex );
 
   pthread_mutex_lock( &g_sim.disc_mutex );
   g_sim.disc_cancel = true;
   pthread_cond_signal( &g_sim.disc_cond );
   pthread_mutex_unlock( &g_sim.disc_mutex );
   pthread_join( g_sim.disc_thread, NULL );
+
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.disc_thread_active = false;
+  pthread_mutex_unlock( &g_sim.state_mutex );
 }
 
 static void _start_disconnect_timer( uint32_t delay_ms )
@@ -273,8 +295,11 @@ static void _start_disconnect_timer( uint32_t delay_ms )
   pthread_mutex_lock( &g_sim.disc_mutex );
   g_sim.disc_cancel       = false;
   g_sim.disc_delay_ms     = delay_ms;
-  g_sim.disc_thread_active = true;
   pthread_mutex_unlock( &g_sim.disc_mutex );
+
+  pthread_mutex_lock( &g_sim.state_mutex );
+  g_sim.disc_thread_active = true;
+  pthread_mutex_unlock( &g_sim.state_mutex );
 
   pthread_create( &g_sim.disc_thread, NULL, _disconnect_thread, NULL );
 }
@@ -312,7 +337,9 @@ static void* _slow_connect_thread( void* arg )
   if ( should_fire )
   {
     osal_log_info( "[wifi-sim] slow connect completed after %u ms", (unsigned) ms );
+    pthread_mutex_lock( &g_sim.state_mutex );
     g_sim.connected = true;
+    pthread_mutex_unlock( &g_sim.state_mutex );
 
     wifi_hal_event_data_t evt = { 0 };
     strncpy( evt.ip_info.ip,      SIM_IP,      sizeof( evt.ip_info.ip ) - 1 );
@@ -321,23 +348,31 @@ static void* _slow_connect_thread( void* arg )
     _fire_event( WIFI_HAL_EVT_STA_GOT_IP, &evt );
   }
 
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.conn_thread_active = false;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   return NULL;
 }
 
 static void _stop_connect_timer_if_active( void )
 {
+  pthread_mutex_lock( &g_sim.state_mutex );
   if ( !g_sim.conn_thread_active )
   {
+    pthread_mutex_unlock( &g_sim.state_mutex );
     return;
   }
+  pthread_mutex_unlock( &g_sim.state_mutex );
 
   pthread_mutex_lock( &g_sim.conn_mutex );
   g_sim.conn_cancel = true;
   pthread_cond_signal( &g_sim.conn_cond );
   pthread_mutex_unlock( &g_sim.conn_mutex );
   pthread_join( g_sim.conn_thread, NULL );
+
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.conn_thread_active = false;
+  pthread_mutex_unlock( &g_sim.state_mutex );
 }
 
 static void _start_slow_connect( uint32_t delay_ms )
@@ -347,8 +382,11 @@ static void _start_slow_connect( uint32_t delay_ms )
   pthread_mutex_lock( &g_sim.conn_mutex );
   g_sim.conn_cancel        = false;
   g_sim.conn_delay_ms      = delay_ms;
-  g_sim.conn_thread_active = true;
   pthread_mutex_unlock( &g_sim.conn_mutex );
+
+  pthread_mutex_lock( &g_sim.state_mutex );
+  g_sim.conn_thread_active = true;
+  pthread_mutex_unlock( &g_sim.state_mutex );
 
   pthread_create( &g_sim.conn_thread, NULL, _slow_connect_thread, NULL );
 }
@@ -369,10 +407,13 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
   pthread_cond_init( &g_sim.disc_cond, NULL );
   pthread_mutex_init( &g_sim.conn_mutex, NULL );
   pthread_cond_init( &g_sim.conn_cond, NULL );
+  pthread_mutex_init( &g_sim.state_mutex, NULL );
 
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.event_cb    = init->event_cb;
   g_sim.user_data   = init->user_data;
   g_sim.initialized = true;
+  pthread_mutex_unlock( &g_sim.state_mutex );
 
   osal_log_info( "[wifi-sim] HAL initialized (%zu simulated APs)", SIM_AP_COUNT );
   return OSAL_SUCCESS;
@@ -387,11 +428,14 @@ osal_status_t wifi_hal_deinit( void )
   pthread_cond_destroy( &g_sim.disc_cond );
   pthread_mutex_destroy( &g_sim.conn_mutex );
   pthread_cond_destroy( &g_sim.conn_cond );
+  pthread_mutex_destroy( &g_sim.state_mutex );
 
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.initialized = false;
   g_sim.started     = false;
   g_sim.connected   = false;
   g_sim.active_ap   = NULL;
+  pthread_mutex_unlock( &g_sim.state_mutex );
 
   osal_log_info( "[wifi-sim] HAL deinitialized" );
   return OSAL_SUCCESS;
@@ -404,8 +448,10 @@ osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
     return OSAL_ERROR;
   }
 
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.mode    = mode;
   g_sim.started = true;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   osal_log_info( "[wifi-sim] started, mode=%d", (int) mode );
   return OSAL_SUCCESS;
 }
@@ -415,9 +461,11 @@ osal_status_t wifi_hal_stop( void )
   _stop_disconnect_timer_if_active();
   _stop_connect_timer_if_active();
 
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.started   = false;
   g_sim.connected = false;
   g_sim.active_ap = NULL;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   osal_log_info( "[wifi-sim] stopped" );
   return OSAL_SUCCESS;
 }
@@ -429,7 +477,9 @@ osal_status_t wifi_hal_set_sta_config( const wifi_hal_sta_config_t* config )
     return OSAL_INVALID_POINTER;
   }
 
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.sta_cfg = *config;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   osal_log_debug( "[wifi-sim] STA config: ssid=\"%s\"", config->ssid );
   return OSAL_SUCCESS;
 }
@@ -441,24 +491,36 @@ osal_status_t wifi_hal_set_ap_config( const wifi_hal_ap_config_t* config )
     return OSAL_INVALID_POINTER;
   }
 
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.ap_cfg = *config;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   osal_log_debug( "[wifi-sim] AP config: ssid=\"%s\"", config->ssid );
   return OSAL_SUCCESS;
 }
 
 osal_status_t wifi_hal_connect( void )
 {
-  if ( !g_sim.started )
+  bool started;
+  char ssid_local[WIFI_HAL_SSID_MAX_LEN] = {0};
+  char pass_local[WIFI_HAL_PASSWORD_MAX_LEN] = {0};
+
+  pthread_mutex_lock( &g_sim.state_mutex );
+  started = g_sim.started;
+  strncpy( ssid_local, g_sim.sta_cfg.ssid, sizeof( ssid_local ) - 1 );
+  strncpy( pass_local, g_sim.sta_cfg.password, sizeof( pass_local ) - 1 );
+  pthread_mutex_unlock( &g_sim.state_mutex );
+
+  if ( !started )
   {
     osal_log_warning( "[wifi-sim] connect called but not started" );
     return OSAL_ERROR;
   }
 
-  const sim_ap_t* ap = _find_ap( g_sim.sta_cfg.ssid );
+  const sim_ap_t* ap = _find_ap( ssid_local );
   if ( !ap )
   {
     osal_log_warning( "[wifi-sim] SSID \"%s\" not found in simulated environment",
-                      g_sim.sta_cfg.ssid );
+                      ssid_local );
     return OSAL_ERROR;
   }
 
@@ -472,7 +534,7 @@ osal_status_t wifi_hal_connect( void )
       return OSAL_ERROR;
 
     case AP_BEHAV_WRONG_PASSWORD:
-      if ( strncmp( g_sim.sta_cfg.password, ap->password,
+      if ( strncmp( pass_local, ap->password,
                     WIFI_HAL_PASSWORD_MAX_LEN ) != 0 )
       {
         osal_log_info( "[wifi-sim] \"%s\" — wrong password", ap->ssid );
@@ -483,8 +545,10 @@ osal_status_t wifi_hal_connect( void )
 
     case AP_BEHAV_NORMAL:
     {
+      pthread_mutex_lock( &g_sim.state_mutex );
       g_sim.connected = true;
       g_sim.active_ap = ap;
+      pthread_mutex_unlock( &g_sim.state_mutex );
 
       wifi_hal_event_data_t evt = { 0 };
       strncpy( evt.ip_info.ip,      SIM_IP,      sizeof( evt.ip_info.ip ) - 1 );
@@ -498,8 +562,10 @@ osal_status_t wifi_hal_connect( void )
 
     case AP_BEHAV_DISCONNECT:
     {
+      pthread_mutex_lock( &g_sim.state_mutex );
       g_sim.connected = true;
       g_sim.active_ap = ap;
+      pthread_mutex_unlock( &g_sim.state_mutex );
 
       wifi_hal_event_data_t evt = { 0 };
       strncpy( evt.ip_info.ip,      SIM_IP,      sizeof( evt.ip_info.ip ) - 1 );
@@ -517,7 +583,9 @@ osal_status_t wifi_hal_connect( void )
 
     case AP_BEHAV_SLOW_CONNECT:
     {
+      pthread_mutex_lock( &g_sim.state_mutex );
       g_sim.active_ap = ap;
+      pthread_mutex_unlock( &g_sim.state_mutex );
 
       osal_log_info( "[wifi-sim] \"%s\" — slow connect, IP in %u ms",
                      ap->ssid, (unsigned) ap->param_ms );
@@ -535,15 +603,18 @@ osal_status_t wifi_hal_disconnect( void )
 {
   _stop_disconnect_timer_if_active();
   _stop_connect_timer_if_active();
-
-  if ( g_sim.connected )
+  pthread_mutex_lock( &g_sim.state_mutex );
+  bool was_connected = g_sim.connected;
+  const sim_ap_t* was_ap = g_sim.active_ap;
+  if ( was_connected )
   {
     osal_log_info( "[wifi-sim] disconnected from \"%s\"",
-                   g_sim.active_ap ? g_sim.active_ap->ssid : "?" );
+                   was_ap ? was_ap->ssid : "?" );
   }
 
   g_sim.connected = false;
   g_sim.active_ap = NULL;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   return OSAL_SUCCESS;
 }
 
@@ -587,7 +658,11 @@ osal_status_t wifi_hal_get_sta_ip_info( wifi_hal_ip_info_t* out_info )
     return OSAL_INVALID_POINTER;
   }
 
-  if ( !g_sim.connected )
+  pthread_mutex_lock( &g_sim.state_mutex );
+  bool connected = g_sim.connected;
+  pthread_mutex_unlock( &g_sim.state_mutex );
+
+  if ( !connected )
   {
     memset( out_info, 0, sizeof( *out_info ) );
     return OSAL_ERROR;
@@ -605,20 +680,26 @@ osal_status_t wifi_hal_get_sta_rssi( int* out_rssi )
   {
     return OSAL_INVALID_POINTER;
   }
+  pthread_mutex_lock( &g_sim.state_mutex );
+  bool connected = g_sim.connected;
+  const sim_ap_t* ap = g_sim.active_ap;
+  pthread_mutex_unlock( &g_sim.state_mutex );
 
-  if ( !g_sim.connected || !g_sim.active_ap )
+  if ( !connected || !ap )
   {
     *out_rssi = 0;
     return OSAL_ERROR;
   }
 
-  *out_rssi = g_sim.active_ap->rssi;
+  *out_rssi = ap->rssi;
   return OSAL_SUCCESS;
 }
 
 osal_status_t wifi_hal_set_power_save( bool enabled )
 {
+  pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.power_save = enabled;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   osal_log_debug( "[wifi-sim] power save %s", enabled ? "ON" : "OFF" );
   return OSAL_SUCCESS;
 }
@@ -646,7 +727,8 @@ osal_status_t wifi_hal_get_client_count( uint32_t* out_client_count )
   {
     return OSAL_INVALID_POINTER;
   }
-
+  pthread_mutex_lock( &g_sim.state_mutex );
   *out_client_count = g_sim.client_cnt;
+  pthread_mutex_unlock( &g_sim.state_mutex );
   return OSAL_SUCCESS;
 }

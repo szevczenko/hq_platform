@@ -6,6 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* TODO: Security - plaintext password storage
+ * This module persists Wi-Fi passwords in plaintext JSON under
+ * WIFI_CONFIG_FILE_PATH ("password" field). On real targets this
+ * exposes credentials to anyone with filesystem access. Consider:
+ * - Using a secure storage mechanism (e.g., ESP NVS with encryption,
+ *   platform keychain, or hardware-backed secure storage).
+ * - Encrypting credentials at rest and protecting keys appropriately.
+ * - Documenting the threat model and why plaintext storage is acceptable
+ *   if that's an intentional design decision.
+ */
+
 #define WIFI_CONFIG_MAX_JSON_SIZE 4096
 #define WIFI_CONFIG_NB_MAX        255
 
@@ -194,25 +205,32 @@ osal_status_t wifi_config_load( wifi_config_list_t* list )
         break;
       }
 
-      wifi_config_entry_t* e = &list->entries[list->count];
-
       cJSON* nb   = cJSON_GetObjectItemCaseSensitive( item, "nb" );
       cJSON* ssid = cJSON_GetObjectItemCaseSensitive( item, "ssid" );
       cJSON* pass = cJSON_GetObjectItemCaseSensitive( item, "password" );
+
+      /* Require a non-empty SSID string; skip invalid/partial entries. */
+      if ( !cJSON_IsString( ssid ) || !ssid->valuestring || ssid->valuestring[0] == '\0' )
+      {
+        continue;
+      }
+
+      wifi_config_entry_t* e = &list->entries[list->count];
+      memset( e, 0, sizeof( *e ) );
 
       if ( cJSON_IsNumber( nb ) )
       {
         e->nb = (uint8_t) nb->valueint;
       }
 
-      if ( cJSON_IsString( ssid ) && ssid->valuestring )
-      {
-        strncpy( e->ssid, ssid->valuestring, WIFI_CONFIG_SSID_MAX_LEN );
-      }
+      /* Copy strings and ensure NUL-termination. */
+      strncpy( e->ssid, ssid->valuestring, WIFI_CONFIG_SSID_MAX_LEN );
+      e->ssid[WIFI_CONFIG_SSID_MAX_LEN] = '\0';
 
       if ( cJSON_IsString( pass ) && pass->valuestring )
       {
         strncpy( e->password, pass->valuestring, WIFI_CONFIG_PASSWORD_MAX_LEN );
+        e->password[WIFI_CONFIG_PASSWORD_MAX_LEN] = '\0';
       }
 
       list->count++;

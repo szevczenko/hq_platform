@@ -5,3 +5,4 @@
 .kconfig-venv/
 .config
 .config.old
+*.code-workspace

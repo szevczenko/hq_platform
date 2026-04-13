@@ -10,6 +10,8 @@
 
 #define CALLBACKS_LIST_SIZE        8
 #define DEFAULT_SCAN_LIST_SIZE     WIFI_DRV_MAX_SCAN_AP
+/* Blocking scan timeout (ms) when callers expect results synchronously. */
+#define WIFI_SCAN_TIMEOUT_MS 10000
 
 #ifndef NORMALPRIO
 #define NORMALPRIO 1u
@@ -52,7 +54,7 @@ typedef struct
   bool              disconnect_req;
   bool              connect_req;
   bool              read_wifi_data;
-  bool              is_scanned;
+  bool              scan_in_progress;
   uint32_t          connect_attempts;
   uint32_t          reason_disconnect;
   uint32_t          client_cnt;
@@ -67,6 +69,7 @@ typedef struct
   char                  ip_addr[16];
 
   osal_bin_sem_id_t ip_sem;
+  osal_bin_sem_id_t scan_sem;
 
   callback_list_t on_connect_cb;
   callback_list_t on_disconnect_cb;
@@ -211,7 +214,9 @@ static void _hal_event_cb( wifi_hal_event_t              event,
         {
           g_ctx.scanned_ap_num = ap_num;
         }
-        g_ctx.is_scanned = false;
+        g_ctx.scan_in_progress = false;
+        /* Notify any waiter that scan completed. */
+        (void) osal_bin_sem_give( g_ctx.scan_sem );
       }
       break;
 
@@ -331,7 +336,7 @@ static osal_status_t _start_mode( wifi_hal_mode_t mode )
 static void _state_init( void )
 {
   osal_log_debug( "[wifi] _state_init enter" );
-  g_ctx.is_scanned = false;
+  g_ctx.scan_in_progress = false;
 
   wifi_hal_init_t init = {
     .ap_ip      = DEFAULT_AP_IP,
@@ -528,7 +533,7 @@ static void _state_deinit( void )
   g_ctx.reason_disconnect = 0;
   g_ctx.client_cnt        = 0;
   g_ctx.scanned_ap_num    = 0;
-  g_ctx.is_scanned        = false;
+  g_ctx.scan_in_progress  = false;
 
   _update_ip_info( UPDATE_LOST_CONNECTION );
 
@@ -592,6 +597,7 @@ void wifi_mgmt_init( void )
   _init_list( &g_ctx.on_disconnect_cb );
 
   (void) osal_bin_sem_create( &g_ctx.ip_sem, "wifi_ip", OSAL_SEM_FULL );
+  (void) osal_bin_sem_create( &g_ctx.scan_sem, "wifi_scan", OSAL_SEM_EMPTY );
 
   _load_saved_config();
   _update_ip_info( UPDATE_LOST_CONNECTION );
@@ -644,7 +650,7 @@ void wifi_mgmt_start( void )
 
 static bool _scan( bool block )
 {
-  if ( g_wifi_type == T_WIFI_TYPE_SERVER || g_ctx.is_scanned )
+  if ( g_wifi_type == T_WIFI_TYPE_SERVER || g_ctx.scan_in_progress )
   {
     return false;
   }
@@ -654,11 +660,23 @@ static bool _scan( bool block )
     return false;
   }
 
-  g_ctx.is_scanned = true;
+  g_ctx.scan_in_progress = true;
+
   if ( wifi_hal_start_scan( block ) != OSAL_SUCCESS )
   {
-    g_ctx.is_scanned = false;
+    g_ctx.scan_in_progress = false;
     return false;
+  }
+
+  if ( block )
+  {
+    /* Wait for the SCAN_DONE callback to signal completion. */
+    if ( osal_bin_sem_timed_wait( g_ctx.scan_sem, WIFI_SCAN_TIMEOUT_MS ) != OSAL_SUCCESS )
+    {
+      /* Timed out waiting for results; clear flag and report failure. */
+      g_ctx.scan_in_progress = false;
+      return false;
+    }
   }
 
   return true;
@@ -690,6 +708,7 @@ bool wifi_mgmt_get_name_from_scanned_list( uint8_t number, char* name )
   }
 
   strncpy( name, g_ctx.scan_list[number].ssid, MAX_SSID_SIZE );
+  name[MAX_SSID_SIZE] = '\0';
   return true;
 }
 
@@ -725,6 +744,7 @@ bool wifi_mgmt_get_ap_name( char* name )
   }
 
   strncpy( name, g_ctx.sta_cfg.ssid, MAX_SSID_SIZE );
+  name[MAX_SSID_SIZE] = '\0';
   return true;
 }
 
