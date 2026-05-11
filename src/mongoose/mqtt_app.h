@@ -13,15 +13,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef void ( *mqtt_message_callback_t )( const char* topic, const char* message, size_t message_len );
+typedef void (*mqtt_message_callback_t)(const char *topic, const char *message,
+					size_t message_len);
 
-void MqttApp_Init( void );
-void MqttApp_Deinit( void );
+void mqtt_app_init(void);
+void mqtt_app_deinit(void);
 
-bool MqttApp_PostData( const char* topic, const char* message, int qos );
-bool MqttApp_IsConnected( void );
+bool mqtt_app_post_data(const char *topic, const char *message, int qos);
+bool mqtt_app_is_connected(void);
 
-bool MqttApp_Subscribe( const char* topic, int qos, mqtt_message_callback_t callback, uint32_t timeout_ms );
-bool MqttApp_Unsubscribe( const char* topic, uint32_t timeout_ms );
+bool mqtt_app_subscribe(const char *topic, int qos,
+			mqtt_message_callback_t callback, uint32_t timeout_ms);
+bool mqtt_app_unsubscribe(const char *topic, uint32_t timeout_ms);
 
 #endif

@@ -6,391 +6,487 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "hq_config.h"
 #include "osal_file.h"
 #include "osal_log.h"
 
-#define MQTT_CONFIG_MAX_JSON_SIZE 4096
+#define MQTT_CONFIG_MAX_JSON_SIZE	4096
 
-typedef struct
-{
-  char address[MQTT_CONFIG_STR_SIZE];
-  char topic_prefix[MQTT_CONFIG_STR_SIZE];
-  char post_data_topic[MQTT_CONFIG_STR_SIZE];
-  char username[MQTT_CONFIG_STR_SIZE];
-  char password[MQTT_CONFIG_STR_SIZE];
-  char client_id[MQTT_CONFIG_STR_SIZE];
-  char cert[MQTT_CERT_MAX_SIZE];
-  uint8_t use_ssl;
+#ifndef CONFIG_MQTT_DEFAULT_ADDRESS
+#define CONFIG_MQTT_DEFAULT_ADDRESS	"mqtt://192.168.1.169:1883"
+#endif
+
+#ifndef CONFIG_MQTT_DEFAULT_TOPIC_PREFIX
+#define CONFIG_MQTT_DEFAULT_TOPIC_PREFIX	"/config/"
+#endif
+
+#ifndef CONFIG_MQTT_DEFAULT_POST_TOPIC
+#define CONFIG_MQTT_DEFAULT_POST_TOPIC	"/post_data/"
+#endif
+
+#ifndef CONFIG_MQTT_DEFAULT_USERNAME
+#define CONFIG_MQTT_DEFAULT_USERNAME	""
+#endif
+
+#ifndef CONFIG_MQTT_DEFAULT_PASSWORD
+#define CONFIG_MQTT_DEFAULT_PASSWORD	""
+#endif
+
+#ifndef CONFIG_MQTT_DEFAULT_CLIENT_ID
+#define CONFIG_MQTT_DEFAULT_CLIENT_ID	"hq_"
+#endif
+
+#ifndef CONFIG_MQTT_DEFAULT_SSL
+#define CONFIG_MQTT_DEFAULT_SSL	0
+#endif
+
+typedef struct {
+	char address[MQTT_CONFIG_STR_SIZE];
+	char topic_prefix[MQTT_CONFIG_STR_SIZE];
+	char post_data_topic[MQTT_CONFIG_STR_SIZE];
+	char username[MQTT_CONFIG_STR_SIZE];
+	char password[MQTT_CONFIG_STR_SIZE];
+	char client_id[MQTT_CONFIG_STR_SIZE];
+	char client_cert[MQTT_CERT_MAX_SIZE];
+	char client_key[MQTT_CERT_MAX_SIZE];
+	char cert[MQTT_CERT_MAX_SIZE];
+	uint8_t use_ssl;
+	uint8_t skip_verify;
 } config_data_t;
 
-static mqtt_apply_config_cb g_apply_config_callback = NULL;
-static config_data_t g_config_data;
+static mqtt_apply_config_cb apply_cb;
+static config_data_t config;
 
-static const char* g_default_address = "mqtt://192.168.1.169:1883";
-static const char* g_default_prefix = "/config/";
-static const char* g_default_post_topic = "/post_data/";
-static const uint8_t g_default_ssl = 0;
-
-static void _str_copy_safe( char* dst, size_t dst_size, const char* src )
+static void str_copy_safe(char *dst, size_t dst_size, const char *src)
 {
-  if ( !dst || dst_size == 0 )
-  {
-    return;
-  }
+	if (!dst || dst_size == 0)
+		return;
 
-  if ( !src )
-  {
-    dst[0] = '\0';
-    return;
-  }
+	if (!src) {
+		dst[0] = '\0';
+		return;
+	}
 
-  strncpy( dst, src, dst_size - 1 );
-  dst[dst_size - 1] = '\0';
+	strncpy(dst, src, dst_size - 1);
+	dst[dst_size - 1] = '\0';
 }
 
-static void _set_defaults( void )
+static void set_defaults(void)
 {
-  memset( &g_config_data, 0, sizeof( g_config_data ) );
-  _str_copy_safe( g_config_data.address, sizeof( g_config_data.address ), g_default_address );
-  _str_copy_safe( g_config_data.topic_prefix, sizeof( g_config_data.topic_prefix ), g_default_prefix );
-  _str_copy_safe( g_config_data.post_data_topic, sizeof( g_config_data.post_data_topic ), g_default_post_topic );
-  g_config_data.use_ssl = g_default_ssl;
+	memset(&config, 0, sizeof(config));
+	str_copy_safe(config.address, sizeof(config.address),
+		      CONFIG_MQTT_DEFAULT_ADDRESS);
+	str_copy_safe(config.topic_prefix, sizeof(config.topic_prefix),
+		      CONFIG_MQTT_DEFAULT_TOPIC_PREFIX);
+	str_copy_safe(config.post_data_topic, sizeof(config.post_data_topic),
+		      CONFIG_MQTT_DEFAULT_POST_TOPIC);
+	str_copy_safe(config.username, sizeof(config.username),
+		      CONFIG_MQTT_DEFAULT_USERNAME);
+	str_copy_safe(config.password, sizeof(config.password),
+		      CONFIG_MQTT_DEFAULT_PASSWORD);
+	str_copy_safe(config.client_id, sizeof(config.client_id),
+		      CONFIG_MQTT_DEFAULT_CLIENT_ID);
+	config.use_ssl = CONFIG_MQTT_DEFAULT_SSL ? 1u : 0u;
+	config.skip_verify = 0;
 }
 
-static bool _read_file_to_buffer( const char* path, char** out_buf )
+static bool read_file_to_buf(const char *path, char **out_buf)
 {
-  if ( !path || !out_buf )
-  {
-    return false;
-  }
+	osal_fstat_t st = { 0 };
+	osal_file_id_t fd;
+	char *buffer;
+	int32_t n;
 
-  *out_buf = NULL;
+	if (!path || !out_buf)
+		return false;
 
-  osal_fstat_t st = { 0 };
-  if ( osal_stat( path, &st ) != OSAL_SUCCESS )
-  {
-    return false;
-  }
+	*out_buf = NULL;
 
-  if ( st.file_size == 0 || st.file_size > MQTT_CONFIG_MAX_JSON_SIZE )
-  {
-    return false;
-  }
+	if (osal_stat(path, &st) != OSAL_SUCCESS)
+		return false;
 
-  osal_file_id_t fd = osal_open_create( path, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY );
-  if ( fd < 0 )
-  {
-    return false;
-  }
+	if (st.file_size == 0 || st.file_size > MQTT_CONFIG_MAX_JSON_SIZE)
+		return false;
 
-  char* buffer = (char*) calloc( 1u, st.file_size + 1u );
-  if ( !buffer )
-  {
-    (void) osal_close( fd );
-    return false;
-  }
+	fd = osal_open_create(path, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
+	if (fd < 0)
+		return false;
 
-  int32_t read_rc = osal_read( fd, buffer, st.file_size );
-  (void) osal_close( fd );
-  if ( read_rc < 0 )
-  {
-    free( buffer );
-    return false;
-  }
+	buffer = (char *)calloc(1u, st.file_size + 1u);
+	if (!buffer) {
+		(void)osal_close(fd);
+		return false;
+	}
 
-  buffer[read_rc] = '\0';
-  *out_buf = buffer;
-  return true;
+	n = osal_read(fd, buffer, st.file_size);
+	(void)osal_close(fd);
+
+	if (n < 0) {
+		free(buffer);
+		return false;
+	}
+
+	buffer[n] = '\0';
+	*out_buf = buffer;
+	return true;
 }
 
-static bool _write_buffer_to_file( const char* path, const char* data, size_t len )
+static bool write_file_from_buf(const char *path, const char *data, size_t len)
 {
-  osal_file_id_t fd = osal_open_create( path,
-                                        OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
-                                        OSAL_WRITE_ONLY );
-  if ( fd < 0 )
-  {
-    return false;
-  }
+	osal_file_id_t fd;
+	int32_t n;
 
-  int32_t write_rc = osal_write( fd, data, len );
-  (void) osal_close( fd );
-  return write_rc >= 0 && (size_t) write_rc == len;
+	fd = osal_open_create(
+		path, OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
+		OSAL_WRITE_ONLY);
+	if (fd < 0)
+		return false;
+
+	n = osal_write(fd, data, len);
+	(void)osal_close(fd);
+	return n >= 0 && (size_t)n == len;
 }
 
-static bool _load_cert_from_file( void )
+static bool load_blob(const char *path, char *dst, size_t dst_size)
 {
-  osal_fstat_t st = { 0 };
-  if ( osal_stat( MQTT_CERT_FILE_PATH, &st ) != OSAL_SUCCESS || st.file_size == 0 )
-  {
-    g_config_data.cert[0] = '\0';
-    return false;
-  }
+	osal_fstat_t st = { 0 };
+	osal_file_id_t fd;
+	size_t to_read;
+	int32_t n;
 
-  osal_file_id_t fd = osal_open_create( MQTT_CERT_FILE_PATH, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY );
-  if ( fd < 0 )
-  {
-    g_config_data.cert[0] = '\0';
-    return false;
-  }
+	if (!path || !dst || dst_size == 0)
+		return false;
 
-  size_t max_read = sizeof( g_config_data.cert ) - 1;
-  size_t to_read = st.file_size < max_read ? st.file_size : max_read;
-  int32_t read_rc = osal_read( fd, g_config_data.cert, to_read );
-  (void) osal_close( fd );
+	if (osal_stat(path, &st) != OSAL_SUCCESS || st.file_size == 0) {
+		dst[0] = '\0';
+		return false;
+	}
 
-  if ( read_rc < 0 )
-  {
-    g_config_data.cert[0] = '\0';
-    return false;
-  }
+	fd = osal_open_create(path, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
+	if (fd < 0) {
+		dst[0] = '\0';
+		return false;
+	}
 
-  g_config_data.cert[read_rc] = '\0';
-  return true;
+	to_read = st.file_size < dst_size - 1 ? st.file_size : dst_size - 1;
+	n = osal_read(fd, dst, to_read);
+	(void)osal_close(fd);
+
+	if (n < 0) {
+		dst[0] = '\0';
+		return false;
+	}
+
+	dst[n] = '\0';
+	return true;
 }
 
-static bool _save_cert_to_file( void )
+static bool save_blob(const char *path, const char *blob, size_t blob_max_size)
 {
-  size_t cert_len = strnlen( g_config_data.cert, sizeof( g_config_data.cert ) );
-  if ( cert_len == 0 )
-  {
-    (void) osal_remove( MQTT_CERT_FILE_PATH );
-    return true;
-  }
+	size_t len;
 
-  return _write_buffer_to_file( MQTT_CERT_FILE_PATH, g_config_data.cert, cert_len );
+	if (!path || !blob)
+		return false;
+
+	len = strnlen(blob, blob_max_size);
+	if (len == 0) {
+		(void)osal_remove(path);
+		return true;
+	}
+
+	return write_file_from_buf(path, blob, len);
 }
 
-static bool _load_json_config( void )
+static bool load_certs(void)
 {
-  char* content = NULL;
-  if ( !_read_file_to_buffer( MQTT_CONFIG_FILE_PATH, &content ) )
-  {
-    return false;
-  }
-
-  cJSON* root = cJSON_Parse( content );
-  free( content );
-  if ( !root )
-  {
-    return false;
-  }
-
-  cJSON* item = NULL;
-
-  item = cJSON_GetObjectItemCaseSensitive( root, "address" );
-  if ( cJSON_IsString( item ) && item->valuestring )
-  {
-    _str_copy_safe( g_config_data.address, sizeof( g_config_data.address ), item->valuestring );
-  }
-
-  item = cJSON_GetObjectItemCaseSensitive( root, "ssl" );
-  if ( cJSON_IsBool( item ) )
-  {
-    g_config_data.use_ssl = cJSON_IsTrue( item ) ? 1 : 0;
-  }
-
-  item = cJSON_GetObjectItemCaseSensitive( root, "prefix" );
-  if ( cJSON_IsString( item ) && item->valuestring )
-  {
-    _str_copy_safe( g_config_data.topic_prefix, sizeof( g_config_data.topic_prefix ), item->valuestring );
-  }
-
-  item = cJSON_GetObjectItemCaseSensitive( root, "post" );
-  if ( cJSON_IsString( item ) && item->valuestring )
-  {
-    _str_copy_safe( g_config_data.post_data_topic, sizeof( g_config_data.post_data_topic ), item->valuestring );
-  }
-
-  item = cJSON_GetObjectItemCaseSensitive( root, "user" );
-  if ( cJSON_IsString( item ) && item->valuestring )
-  {
-    _str_copy_safe( g_config_data.username, sizeof( g_config_data.username ), item->valuestring );
-  }
-
-  item = cJSON_GetObjectItemCaseSensitive( root, "pass" );
-  if ( cJSON_IsString( item ) && item->valuestring )
-  {
-    _str_copy_safe( g_config_data.password, sizeof( g_config_data.password ), item->valuestring );
-  }
-
-  item = cJSON_GetObjectItemCaseSensitive( root, "client_id" );
-  if ( cJSON_IsString( item ) && item->valuestring )
-  {
-    _str_copy_safe( g_config_data.client_id, sizeof( g_config_data.client_id ), item->valuestring );
-  }
-
-  cJSON_Delete( root );
-  return true;
+	bool ok = load_blob(MQTT_CERT_FILE_PATH, config.cert,
+			    sizeof(config.cert));
+	(void)load_blob(MQTT_CLIENT_CERT_FILE_PATH, config.client_cert,
+			sizeof(config.client_cert));
+	(void)load_blob(MQTT_CLIENT_KEY_FILE_PATH, config.client_key,
+			sizeof(config.client_key));
+	return ok;
 }
 
-static bool _save_json_config( void )
+static bool save_certs(void)
 {
-  cJSON* root = cJSON_CreateObject();
-  if ( !root )
-  {
-    return false;
-  }
+	bool ok;
 
-  bool ok = cJSON_AddStringToObject( root, "address", g_config_data.address ) != NULL;
-  ok = ok && cJSON_AddBoolToObject( root, "ssl", g_config_data.use_ssl != 0 ) != NULL;
-  ok = ok && cJSON_AddStringToObject( root, "prefix", g_config_data.topic_prefix ) != NULL;
-  ok = ok && cJSON_AddStringToObject( root, "post", g_config_data.post_data_topic ) != NULL;
-  ok = ok && cJSON_AddStringToObject( root, "user", g_config_data.username ) != NULL;
-  ok = ok && cJSON_AddStringToObject( root, "pass", g_config_data.password ) != NULL;
-  ok = ok && cJSON_AddStringToObject( root, "client_id", g_config_data.client_id ) != NULL;
-
-  if ( !ok )
-  {
-    cJSON_Delete( root );
-    return false;
-  }
-
-  char* json = cJSON_PrintUnformatted( root );
-  cJSON_Delete( root );
-  if ( !json )
-  {
-    return false;
-  }
-
-  bool write_ok = _write_buffer_to_file( MQTT_CONFIG_FILE_PATH, json, strlen( json ) );
-  free( json );
-  return write_ok;
+	ok = save_blob(MQTT_CERT_FILE_PATH, config.cert, sizeof(config.cert));
+	ok = ok && save_blob(MQTT_CLIENT_CERT_FILE_PATH, config.client_cert,
+			     sizeof(config.client_cert));
+	ok = ok && save_blob(MQTT_CLIENT_KEY_FILE_PATH, config.client_key,
+			     sizeof(config.client_key));
+	return ok;
 }
 
-void MQTTConfig_Init( void )
+static bool load_json_config(void)
 {
-  _set_defaults();
-  (void) _load_json_config();
-  (void) _load_cert_from_file();
+	cJSON *root;
+	cJSON *item;
+	char *content = NULL;
+
+	if (!read_file_to_buf(MQTT_CONFIG_FILE_PATH, &content))
+		return false;
+
+	root = cJSON_Parse(content);
+	free(content);
+	if (!root)
+		return false;
+
+	item = cJSON_GetObjectItemCaseSensitive(root, "address");
+	if (cJSON_IsString(item) && item->valuestring)
+		str_copy_safe(config.address, sizeof(config.address),
+			      item->valuestring);
+
+	item = cJSON_GetObjectItemCaseSensitive(root, "ssl");
+	if (cJSON_IsBool(item))
+		config.use_ssl = cJSON_IsTrue(item) ? 1 : 0;
+
+	item = cJSON_GetObjectItemCaseSensitive(root, "skip_verify");
+	if (cJSON_IsBool(item))
+		config.skip_verify = cJSON_IsTrue(item) ? 1 : 0;
+
+	item = cJSON_GetObjectItemCaseSensitive(root, "prefix");
+	if (cJSON_IsString(item) && item->valuestring)
+		str_copy_safe(config.topic_prefix, sizeof(config.topic_prefix),
+			      item->valuestring);
+
+	item = cJSON_GetObjectItemCaseSensitive(root, "post");
+	if (cJSON_IsString(item) && item->valuestring)
+		str_copy_safe(config.post_data_topic,
+			      sizeof(config.post_data_topic),
+			      item->valuestring);
+
+	item = cJSON_GetObjectItemCaseSensitive(root, "user");
+	if (cJSON_IsString(item) && item->valuestring)
+		str_copy_safe(config.username, sizeof(config.username),
+			      item->valuestring);
+
+	item = cJSON_GetObjectItemCaseSensitive(root, "pass");
+	if (cJSON_IsString(item) && item->valuestring)
+		str_copy_safe(config.password, sizeof(config.password),
+			      item->valuestring);
+
+	item = cJSON_GetObjectItemCaseSensitive(root, "client_id");
+	if (cJSON_IsString(item) && item->valuestring)
+		str_copy_safe(config.client_id, sizeof(config.client_id),
+			      item->valuestring);
+
+	cJSON_Delete(root);
+	return true;
 }
 
-bool MQTTConfig_SetInt( int value, mqtt_config_value_t config_value )
+static bool save_json_config(void)
 {
-  (void) value;
-  (void) config_value;
-  return false;
+	cJSON *root;
+	char *json;
+	bool ok;
+
+	root = cJSON_CreateObject();
+	if (!root)
+		return false;
+
+	ok = cJSON_AddStringToObject(root, "address", config.address) != NULL;
+	ok = ok && cJSON_AddBoolToObject(root, "ssl",
+					 config.use_ssl != 0) != NULL;
+	ok = ok && cJSON_AddBoolToObject(root, "skip_verify",
+					 config.skip_verify != 0) != NULL;
+	ok = ok && cJSON_AddStringToObject(root, "prefix",
+					   config.topic_prefix) != NULL;
+	ok = ok && cJSON_AddStringToObject(root, "post",
+					   config.post_data_topic) != NULL;
+	ok = ok && cJSON_AddStringToObject(root, "user",
+					   config.username) != NULL;
+	ok = ok && cJSON_AddStringToObject(root, "pass",
+					   config.password) != NULL;
+	ok = ok && cJSON_AddStringToObject(root, "client_id",
+					   config.client_id) != NULL;
+
+	if (!ok) {
+		cJSON_Delete(root);
+		return false;
+	}
+
+	json = cJSON_PrintUnformatted(root);
+	cJSON_Delete(root);
+	if (!json)
+		return false;
+
+	ok = write_file_from_buf(MQTT_CONFIG_FILE_PATH, json, strlen(json));
+	free(json);
+	return ok;
 }
 
-bool MQTTConfig_SetBool( bool value, mqtt_config_value_t config_value )
+void mqtt_config_init(void)
 {
-  if ( config_value == MQTT_CONFIG_VALUE_SSL )
-  {
-    g_config_data.use_ssl = value ? 1u : 0u;
-    return true;
-  }
-  return false;
+	set_defaults();
+	(void)load_json_config();
+	(void)load_certs();
 }
 
-bool MQTTConfig_SetCert( const char* cert, size_t cert_len, size_t offset, mqtt_config_value_t config_value )
+bool mqtt_config_set_int(int value, mqtt_config_value_t key)
 {
-  if ( !cert || config_value != MQTT_CONFIG_VALUE_CERT )
-  {
-    return false;
-  }
-
-  if ( offset >= sizeof( g_config_data.cert ) || cert_len > sizeof( g_config_data.cert ) - offset - 1u )
-  {
-    return false;
-  }
-
-  memcpy( &g_config_data.cert[offset], cert, cert_len );
-  g_config_data.cert[offset + cert_len] = '\0';
-  return true;
+	(void)value;
+	(void)key;
+	return false;
 }
 
-bool MQTTConfig_SetString( const char* string, mqtt_config_value_t config_value )
+bool mqtt_config_set_bool(bool value, mqtt_config_value_t key)
 {
-  if ( !string )
-  {
-    return false;
-  }
-
-  switch ( config_value )
-  {
-    case MQTT_CONFIG_VALUE_ADDRESS:
-      _str_copy_safe( g_config_data.address, sizeof( g_config_data.address ), string );
-      return true;
-    case MQTT_CONFIG_VALUE_TOPIC_PREFIX:
-      _str_copy_safe( g_config_data.topic_prefix, sizeof( g_config_data.topic_prefix ), string );
-      return true;
-    case MQTT_CONFIG_VALUE_POST_DATA_TOPIC:
-      _str_copy_safe( g_config_data.post_data_topic, sizeof( g_config_data.post_data_topic ), string );
-      return true;
-    case MQTT_CONFIG_VALUE_USERNAME:
-      _str_copy_safe( g_config_data.username, sizeof( g_config_data.username ), string );
-      return true;
-    case MQTT_CONFIG_VALUE_PASSWORD:
-      _str_copy_safe( g_config_data.password, sizeof( g_config_data.password ), string );
-      return true;
-    case MQTT_CONFIG_VALUE_CLIENT_ID:
-      _str_copy_safe( g_config_data.client_id, sizeof( g_config_data.client_id ), string );
-      return true;
-    default:
-      return false;
-  }
+	switch (key) {
+	case MQTT_CONFIG_VALUE_SSL:
+		config.use_ssl = value ? 1u : 0u;
+		return true;
+	case MQTT_CONFIG_VALUE_SKIP_VERIFY:
+		config.skip_verify = value ? 1u : 0u;
+		return true;
+	default:
+		return false;
+	}
 }
 
-bool MQTTConfig_GetInt( int* value, mqtt_config_value_t config_value )
+bool mqtt_config_set_cert(const char *cert, size_t cert_len, size_t offset,
+			  mqtt_config_value_t key)
 {
-  (void) value;
-  (void) config_value;
-  return false;
+	char *target;
+	size_t target_size;
+
+	if (!cert)
+		return false;
+
+	switch (key) {
+	case MQTT_CONFIG_VALUE_CERT:
+		target = config.cert;
+		target_size = sizeof(config.cert);
+		break;
+	case MQTT_CONFIG_VALUE_CLIENT_CERT:
+		target = config.client_cert;
+		target_size = sizeof(config.client_cert);
+		break;
+	case MQTT_CONFIG_VALUE_CLIENT_KEY:
+		target = config.client_key;
+		target_size = sizeof(config.client_key);
+		break;
+	default:
+		return false;
+	}
+
+	if (offset >= target_size || cert_len > target_size - offset - 1u)
+		return false;
+
+	memcpy(&target[offset], cert, cert_len);
+	target[offset + cert_len] = '\0';
+	return true;
 }
 
-bool MQTTConfig_GetBool( bool* value, mqtt_config_value_t config_value )
+bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
 {
-  if ( !value )
-  {
-    return false;
-  }
+	if (!string)
+		return false;
 
-  if ( config_value == MQTT_CONFIG_VALUE_SSL )
-  {
-    *value = g_config_data.use_ssl != 0;
-    return true;
-  }
-  return false;
+	switch (key) {
+	case MQTT_CONFIG_VALUE_ADDRESS:
+		str_copy_safe(config.address, sizeof(config.address), string);
+		return true;
+	case MQTT_CONFIG_VALUE_TOPIC_PREFIX:
+		str_copy_safe(config.topic_prefix, sizeof(config.topic_prefix),
+			      string);
+		return true;
+	case MQTT_CONFIG_VALUE_POST_DATA_TOPIC:
+		str_copy_safe(config.post_data_topic,
+			      sizeof(config.post_data_topic), string);
+		return true;
+	case MQTT_CONFIG_VALUE_USERNAME:
+		str_copy_safe(config.username, sizeof(config.username), string);
+		return true;
+	case MQTT_CONFIG_VALUE_PASSWORD:
+		str_copy_safe(config.password, sizeof(config.password), string);
+		return true;
+	case MQTT_CONFIG_VALUE_CLIENT_ID:
+		str_copy_safe(config.client_id, sizeof(config.client_id),
+			      string);
+		return true;
+	default:
+		return false;
+	}
 }
 
-const char* MQTTConfig_GetString( mqtt_config_value_t config_value )
+bool mqtt_config_get_int(int *value, mqtt_config_value_t key)
 {
-  switch ( config_value )
-  {
-    case MQTT_CONFIG_VALUE_ADDRESS: return g_config_data.address;
-    case MQTT_CONFIG_VALUE_TOPIC_PREFIX: return g_config_data.topic_prefix;
-    case MQTT_CONFIG_VALUE_POST_DATA_TOPIC: return g_config_data.post_data_topic;
-    case MQTT_CONFIG_VALUE_USERNAME: return g_config_data.username;
-    case MQTT_CONFIG_VALUE_PASSWORD: return g_config_data.password;
-    case MQTT_CONFIG_VALUE_CLIENT_ID: return g_config_data.client_id;
-    default: return NULL;
-  }
+	(void)value;
+	(void)key;
+	return false;
 }
 
-const char* MQTTConfig_GetCert( mqtt_config_value_t config_value )
+bool mqtt_config_get_bool(bool *value, mqtt_config_value_t key)
 {
-  if ( config_value == MQTT_CONFIG_VALUE_CERT )
-  {
-    return g_config_data.cert;
-  }
-  return NULL;
+	if (!value)
+		return false;
+
+	switch (key) {
+	case MQTT_CONFIG_VALUE_SSL:
+		*value = config.use_ssl != 0;
+		return true;
+	case MQTT_CONFIG_VALUE_SKIP_VERIFY:
+		*value = config.skip_verify != 0;
+		return true;
+	default:
+		return false;
+	}
 }
 
-bool MQTTConfig_Save( void )
+const char *mqtt_config_get_string(mqtt_config_value_t key)
 {
-  bool ok = _save_json_config() && _save_cert_to_file();
-  if ( ok && g_apply_config_callback )
-  {
-    g_apply_config_callback();
-  }
-  if ( !ok )
-  {
-    osal_log_error( "mqtt config save failed" );
-  }
-  return ok;
+	switch (key) {
+	case MQTT_CONFIG_VALUE_ADDRESS:
+		return config.address;
+	case MQTT_CONFIG_VALUE_TOPIC_PREFIX:
+		return config.topic_prefix;
+	case MQTT_CONFIG_VALUE_POST_DATA_TOPIC:
+		return config.post_data_topic;
+	case MQTT_CONFIG_VALUE_USERNAME:
+		return config.username;
+	case MQTT_CONFIG_VALUE_PASSWORD:
+		return config.password;
+	case MQTT_CONFIG_VALUE_CLIENT_ID:
+		return config.client_id;
+	default:
+		return NULL;
+	}
 }
 
-void MQTTConfig_SetCallback( mqtt_apply_config_cb cb )
+const char *mqtt_config_get_cert(mqtt_config_value_t key)
 {
-  g_apply_config_callback = cb;
+	switch (key) {
+	case MQTT_CONFIG_VALUE_CERT:
+		return config.cert;
+	case MQTT_CONFIG_VALUE_CLIENT_CERT:
+		return config.client_cert;
+	case MQTT_CONFIG_VALUE_CLIENT_KEY:
+		return config.client_key;
+	default:
+		return NULL;
+	}
+}
+
+bool mqtt_config_save(void)
+{
+	bool ok;
+
+	ok = save_json_config() && save_certs();
+	if (!ok) {
+		osal_log_error("mqtt config save failed");
+		return false;
+	}
+
+	if (apply_cb)
+		apply_cb();
+
+	return true;
+}
+
+void mqtt_config_set_callback(mqtt_apply_config_cb cb)
+{
+	apply_cb = cb;
 }

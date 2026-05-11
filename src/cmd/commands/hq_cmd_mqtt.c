@@ -19,242 +19,265 @@
 static bool g_mqtt_initialized = false;
 static char g_out[512];
 
-static void _print_line( const char* fmt, ... )
+static void print_line(const char *fmt, ...)
 {
   va_list ap;
-  va_start( ap, fmt );
-  (void) vsnprintf( g_out, sizeof( g_out ), fmt, ap );
-  va_end( ap );
-  hq_cmd_print( g_out );
+  va_start(ap, fmt);
+  (void)vsnprintf(g_out, sizeof(g_out), fmt, ap);
+  va_end(ap);
+  hq_cmd_print(g_out);
 }
 
-static const char* _find_option_value( const char* args, const char* option )
+static const char *find_option_value(const char *args, const char *option)
 {
-  uint16_t count = hq_cmd_get_token_count( args );
-  for ( uint16_t i = 1; i <= count; ++i )
-  {
-    const char* tok = hq_cmd_get_token( args, i );
-    if ( tok && strcmp( tok, option ) == 0 )
-    {
-      if ( i < count )
-      {
-        return hq_cmd_get_token( args, (uint16_t) ( i + 1 ) );
-      }
+  uint16_t count = hq_cmd_get_token_count(args);
+  for (uint16_t i = 1; i <= count; ++i) {
+    const char *tok = hq_cmd_get_token(args, i);
+    if (tok && strcmp(tok, option) == 0) {
+      if (i < count)
+        return hq_cmd_get_token(args, (uint16_t)(i + 1));
       return NULL;
     }
   }
   return NULL;
 }
 
-static bool _has_option( const char* args, const char* option )
+static bool has_option(const char *args, const char *option)
 {
-  return hq_cmd_find_token( args, option ) != 0;
+  return hq_cmd_find_token(args, option) != 0;
 }
 
-static void _cmd_help( void )
+static bool read_cert_from_file(const char *path, char *buf, size_t buf_size)
 {
-  hq_cmd_print( "MQTT commands:" );
-  hq_cmd_print( "  mqtt --start                                  Init/start MQTT app" );
-  hq_cmd_print( "  mqtt --stop                                   Deinit MQTT app" );
-  hq_cmd_print( "  mqtt --status                                 Show connection status" );
-  hq_cmd_print( "  mqtt --show                                   Show current config" );
-  hq_cmd_print( "  mqtt --pub <topic> --msg <payload> [--qos n] Publish message" );
-  hq_cmd_print( "  mqtt --set-address <url>                      Set broker url" );
-  hq_cmd_print( "  mqtt --set-user <name>                        Set username" );
-  hq_cmd_print( "  mqtt --set-pass <pass>                        Set password" );
-  hq_cmd_print( "  mqtt --set-client-id <id>                     Set client id" );
-  hq_cmd_print( "  mqtt --set-prefix <topic>                     Set prefix topic" );
-  hq_cmd_print( "  mqtt --set-post-topic <topic>                 Set post topic" );
-  hq_cmd_print( "  mqtt --set-ssl <0|1>                          Set SSL usage" );
-  hq_cmd_print( "  mqtt --set-cert <pem-text>                    Set certificate in memory" );
-  hq_cmd_print( "  mqtt --save                                   Save mqtt.json + cert file" );
+  FILE *fp;
+  size_t n;
+
+  if (!path || !buf || buf_size < 2)
+    return false;
+
+  fp = fopen(path, "rb");
+  if (!fp)
+    return false;
+
+  n = fread(buf, 1, buf_size - 1, fp);
+  (void)fclose(fp);
+
+  if (n == 0)
+    return false;
+
+  buf[n] = '\0';
+  return true;
 }
 
-static void _cmd_show( void )
+static void cmd_help(void)
+{
+  hq_cmd_print("MQTT commands:");
+  hq_cmd_print("  mqtt --start                                  Init/start MQTT app");
+  hq_cmd_print("  mqtt --stop                                   Deinit MQTT app");
+  hq_cmd_print("  mqtt --status                                 Show connection status");
+  hq_cmd_print("  mqtt --show                                   Show current config");
+  hq_cmd_print("  mqtt --pub <topic> --msg <payload> [--qos n] Publish message");
+  hq_cmd_print("  mqtt --set-address <url>                      Set broker url");
+  hq_cmd_print("  mqtt --set-user <name>                        Set username");
+  hq_cmd_print("  mqtt --set-pass <pass>                        Set password");
+  hq_cmd_print("  mqtt --set-client-id <id>                     Set client id");
+  hq_cmd_print("  mqtt --set-prefix <topic>                     Set prefix topic");
+  hq_cmd_print("  mqtt --set-post-topic <topic>                 Set post topic");
+  hq_cmd_print("  mqtt --set-ssl <0|1>                          Set SSL usage");
+  hq_cmd_print("  mqtt --set-skip-verify <0|1>                  Skip TLS cert verification");
+  hq_cmd_print("  mqtt --set-cert <filepath>                    Load CA cert from file");
+  hq_cmd_print("  mqtt --set-client-cert <filepath>             Load client cert from file");
+  hq_cmd_print("  mqtt --set-client-key <filepath>              Load client key from file");
+  hq_cmd_print("  mqtt --save                                   Save mqtt.json + cert file");
+}
+
+static void cmd_show(void)
 {
   bool ssl = false;
-  (void) MQTTConfig_GetBool( &ssl, MQTT_CONFIG_VALUE_SSL );
+  bool skip_verify = false;
 
-  _print_line( "address:    %s", MQTTConfig_GetString( MQTT_CONFIG_VALUE_ADDRESS ) );
-  _print_line( "username:   %s", MQTTConfig_GetString( MQTT_CONFIG_VALUE_USERNAME ) );
-  _print_line( "password:   %s", strlen( MQTTConfig_GetString( MQTT_CONFIG_VALUE_PASSWORD ) ) > 0 ? "****" : "(empty)" );
-  _print_line( "client_id:  %s", MQTTConfig_GetString( MQTT_CONFIG_VALUE_CLIENT_ID ) );
-  _print_line( "prefix:     %s", MQTTConfig_GetString( MQTT_CONFIG_VALUE_TOPIC_PREFIX ) );
-  _print_line( "post topic: %s", MQTTConfig_GetString( MQTT_CONFIG_VALUE_POST_DATA_TOPIC ) );
-  _print_line( "ssl:        %s", ssl ? "enabled" : "disabled" );
-  _print_line( "cert:       %s", strlen( MQTTConfig_GetCert( MQTT_CONFIG_VALUE_CERT ) ) > 0 ? "loaded" : "empty" );
+  (void)mqtt_config_get_bool(&ssl, MQTT_CONFIG_VALUE_SSL);
+  (void)mqtt_config_get_bool(&skip_verify, MQTT_CONFIG_VALUE_SKIP_VERIFY);
+
+  print_line("address:     %s", mqtt_config_get_string(MQTT_CONFIG_VALUE_ADDRESS));
+  print_line("username:    %s", mqtt_config_get_string(MQTT_CONFIG_VALUE_USERNAME));
+  print_line("password:    %s",
+             strlen(mqtt_config_get_string(MQTT_CONFIG_VALUE_PASSWORD)) > 0
+               ? "****" : "(empty)");
+  print_line("client_id:   %s", mqtt_config_get_string(MQTT_CONFIG_VALUE_CLIENT_ID));
+  print_line("prefix:      %s", mqtt_config_get_string(MQTT_CONFIG_VALUE_TOPIC_PREFIX));
+  print_line("post topic:  %s", mqtt_config_get_string(MQTT_CONFIG_VALUE_POST_DATA_TOPIC));
+  print_line("ssl:         %s", ssl ? "enabled" : "disabled");
+  print_line("skip_verify: %s", skip_verify ? "yes" : "no");
+  print_line("cert:        %s",
+             strlen(mqtt_config_get_cert(MQTT_CONFIG_VALUE_CERT)) > 0
+               ? "loaded" : "empty");
 }
 
-static void _cmd_set( const char* args )
+static void cmd_set_cert_from_file(const char *path, mqtt_config_value_t key,
+                                   const char *label)
 {
-  const char* value = NULL;
+  static char cert_buf[MQTT_CERT_MAX_SIZE];
 
-  if ( ( value = _find_option_value( args, "--set-address" ) ) )
-  {
-    (void) MQTTConfig_SetString( value, MQTT_CONFIG_VALUE_ADDRESS );
-    hq_cmd_print( "MQTT address updated." );
+  if (!read_cert_from_file(path, cert_buf, sizeof(cert_buf))) {
+    print_line("Failed to read file: %s", path);
     return;
   }
-  if ( ( value = _find_option_value( args, "--set-user" ) ) )
-  {
-    (void) MQTTConfig_SetString( value, MQTT_CONFIG_VALUE_USERNAME );
-    hq_cmd_print( "MQTT user updated." );
-    return;
-  }
-  if ( ( value = _find_option_value( args, "--set-pass" ) ) )
-  {
-    (void) MQTTConfig_SetString( value, MQTT_CONFIG_VALUE_PASSWORD );
-    hq_cmd_print( "MQTT password updated." );
-    return;
-  }
-  if ( ( value = _find_option_value( args, "--set-client-id" ) ) )
-  {
-    (void) MQTTConfig_SetString( value, MQTT_CONFIG_VALUE_CLIENT_ID );
-    hq_cmd_print( "MQTT client id updated." );
-    return;
-  }
-  if ( ( value = _find_option_value( args, "--set-prefix" ) ) )
-  {
-    (void) MQTTConfig_SetString( value, MQTT_CONFIG_VALUE_TOPIC_PREFIX );
-    hq_cmd_print( "MQTT prefix updated." );
-    return;
-  }
-  if ( ( value = _find_option_value( args, "--set-post-topic" ) ) )
-  {
-    (void) MQTTConfig_SetString( value, MQTT_CONFIG_VALUE_POST_DATA_TOPIC );
-    hq_cmd_print( "MQTT post topic updated." );
-    return;
-  }
-  if ( ( value = _find_option_value( args, "--set-ssl" ) ) )
-  {
-    bool en = ( strcmp( value, "1" ) == 0 || strcmp( value, "true" ) == 0 );
-    (void) MQTTConfig_SetBool( en, MQTT_CONFIG_VALUE_SSL );
-    hq_cmd_print( "MQTT SSL flag updated." );
-    return;
-  }
-  if ( ( value = _find_option_value( args, "--set-cert" ) ) )
-  {
-    (void) MQTTConfig_SetCert( value, strlen( value ), 0, MQTT_CONFIG_VALUE_CERT );
-    hq_cmd_print( "MQTT cert updated in memory." );
-    return;
-  }
-
-  hq_cmd_print( "No MQTT set option found." );
+  (void)mqtt_config_set_cert(cert_buf, strlen(cert_buf), 0, key);
+  print_line("%s loaded from %s", label, path);
 }
 
-static void _cmd_publish( const char* args )
+static void cmd_set(const char *args)
 {
-  const char* topic = _find_option_value( args, "--pub" );
-  const char* msg = _find_option_value( args, "--msg" );
-  const char* qos_str = _find_option_value( args, "--qos" );
+  const char *value = NULL;
 
-  if ( topic && !msg )
-  {
-    uint16_t pub_pos = hq_cmd_find_token( args, "--pub" );
-    if ( pub_pos != 0 )
-    {
-      const char* shorthand_msg = hq_cmd_get_token( args, (uint16_t) ( pub_pos + 2 ) );
-      if ( shorthand_msg && strncmp( shorthand_msg, "--", 2 ) != 0 )
-      {
+  if ((value = find_option_value(args, "--set-address"))) {
+    (void)mqtt_config_set_string(value, MQTT_CONFIG_VALUE_ADDRESS);
+    hq_cmd_print("MQTT address updated.");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-user"))) {
+    (void)mqtt_config_set_string(value, MQTT_CONFIG_VALUE_USERNAME);
+    hq_cmd_print("MQTT user updated.");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-pass"))) {
+    (void)mqtt_config_set_string(value, MQTT_CONFIG_VALUE_PASSWORD);
+    hq_cmd_print("MQTT password updated.");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-client-id"))) {
+    (void)mqtt_config_set_string(value, MQTT_CONFIG_VALUE_CLIENT_ID);
+    hq_cmd_print("MQTT client id updated.");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-prefix"))) {
+    (void)mqtt_config_set_string(value, MQTT_CONFIG_VALUE_TOPIC_PREFIX);
+    hq_cmd_print("MQTT prefix updated.");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-post-topic"))) {
+    (void)mqtt_config_set_string(value, MQTT_CONFIG_VALUE_POST_DATA_TOPIC);
+    hq_cmd_print("MQTT post topic updated.");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-ssl"))) {
+    bool en = (strcmp(value, "1") == 0 || strcmp(value, "true") == 0);
+    (void)mqtt_config_set_bool(en, MQTT_CONFIG_VALUE_SSL);
+    hq_cmd_print("MQTT SSL flag updated.");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-skip-verify"))) {
+    bool en = (strcmp(value, "1") == 0 || strcmp(value, "true") == 0);
+    (void)mqtt_config_set_bool(en, MQTT_CONFIG_VALUE_SKIP_VERIFY);
+    hq_cmd_print("MQTT skip-verify flag updated.");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-cert"))) {
+    cmd_set_cert_from_file(value, MQTT_CONFIG_VALUE_CERT, "CA cert");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-client-cert"))) {
+    cmd_set_cert_from_file(value, MQTT_CONFIG_VALUE_CLIENT_CERT, "Client cert");
+    return;
+  }
+  if ((value = find_option_value(args, "--set-client-key"))) {
+    cmd_set_cert_from_file(value, MQTT_CONFIG_VALUE_CLIENT_KEY, "Client key");
+    return;
+  }
+
+  hq_cmd_print("No MQTT set option found.");
+}
+
+static void cmd_publish(const char *args)
+{
+  const char *topic = find_option_value(args, "--pub");
+  const char *msg = find_option_value(args, "--msg");
+  const char *qos_str = find_option_value(args, "--qos");
+  int qos = 0;
+
+  if (topic && !msg) {
+    uint16_t pub_pos = hq_cmd_find_token(args, "--pub");
+    if (pub_pos != 0) {
+      const char *shorthand_msg =
+        hq_cmd_get_token(args, (uint16_t)(pub_pos + 2));
+      if (shorthand_msg && strncmp(shorthand_msg, "--", 2) != 0)
         msg = shorthand_msg;
-      }
     }
   }
 
-  if ( !topic || !msg )
-  {
-    hq_cmd_print( "Usage: mqtt --pub <topic> --msg <payload> [--qos n]" );
-    hq_cmd_print( "   or: mqtt --pub <topic> <payload> [--qos n]" );
+  if (!topic || !msg) {
+    hq_cmd_print("Usage: mqtt --pub <topic> --msg <payload> [--qos n]");
+    hq_cmd_print("   or: mqtt --pub <topic> <payload> [--qos n]");
     return;
   }
 
-  int qos = 0;
-  if ( qos_str )
-  {
-    qos = atoi( qos_str );
-    if ( qos < 0 || qos > 2 )
-    {
-      hq_cmd_print( "Invalid QoS. Use 0, 1, or 2." );
+  if (qos_str) {
+    qos = atoi(qos_str);
+    if (qos < 0 || qos > 2) {
+      hq_cmd_print("Invalid QoS. Use 0, 1, or 2.");
       return;
     }
   }
 
-  if ( !MqttApp_PostData( topic, msg, qos ) )
-  {
-    hq_cmd_print( "Publish queue failed." );
+  if (!mqtt_app_post_data(topic, msg, qos)) {
+    hq_cmd_print("Publish queue failed.");
     return;
   }
 
-  hq_cmd_print( "Message queued." );
+  hq_cmd_print("Message queued.");
 }
 
-static void hq_cmd_mqtt_handler( hq_cmd_cli_t* cli, char* args, void* context )
+static void hq_cmd_mqtt_handler(hq_cmd_cli_t *cli, char *args, void *context)
 {
-  (void) cli;
-  (void) context;
+  (void)cli;
+  (void)context;
 
-  if ( args == NULL || hq_cmd_get_token_count( args ) == 0
-       || _has_option( args, "--help" ) || _has_option( args, "help" ) )
-  {
-    _cmd_help();
+  if (args == NULL || hq_cmd_get_token_count(args) == 0
+      || has_option(args, "--help") || has_option(args, "help")) {
+    cmd_help();
     return;
   }
 
-  if ( _has_option( args, "--start" ) )
-  {
-    MQTTConfig_Init();
-    MqttApp_Init();
+  if (has_option(args, "--start")) {
+    mqtt_config_init();
+    mqtt_app_init();
     g_mqtt_initialized = true;
-    hq_cmd_print( "MQTT started." );
-  }
-  else if ( _has_option( args, "--stop" ) )
-  {
-    MqttApp_Deinit();
+    hq_cmd_print("MQTT started.");
+  } else if (has_option(args, "--stop")) {
+    mqtt_app_deinit();
     g_mqtt_initialized = false;
-    hq_cmd_print( "MQTT stopped." );
-  }
-  else if ( _has_option( args, "--status" ) )
-  {
-    _print_line( "Initialized: %s", g_mqtt_initialized ? "yes" : "no" );
-    _print_line( "Connected:   %s", MqttApp_IsConnected() ? "yes" : "no" );
-  }
-  else if ( _has_option( args, "--show" ) )
-  {
-    _cmd_show();
-  }
-  else if ( _has_option( args, "--save" ) )
-  {
-    if ( MQTTConfig_Save() )
-    {
-      hq_cmd_print( "MQTT config saved." );
-    }
+    hq_cmd_print("MQTT stopped.");
+  } else if (has_option(args, "--status")) {
+    print_line("Initialized: %s", g_mqtt_initialized ? "yes" : "no");
+    print_line("Connected:   %s", mqtt_app_is_connected() ? "yes" : "no");
+  } else if (has_option(args, "--show")) {
+    cmd_show();
+  } else if (has_option(args, "--save")) {
+    if (mqtt_config_save())
+      hq_cmd_print("MQTT config saved.");
     else
-    {
-      hq_cmd_print( "MQTT config save failed." );
-    }
-  }
-  else if ( _has_option( args, "--pub" ) )
-  {
-    _cmd_publish( args );
-  }
-  else if ( _has_option( args, "--set-address" )
-            || _has_option( args, "--set-user" )
-            || _has_option( args, "--set-pass" )
-            || _has_option( args, "--set-client-id" )
-            || _has_option( args, "--set-prefix" )
-            || _has_option( args, "--set-post-topic" )
-            || _has_option( args, "--set-ssl" )
-            || _has_option( args, "--set-cert" ) )
-  {
-    _cmd_set( args );
-  }
-  else
-  {
-    hq_cmd_print( "Unknown option. Type 'mqtt' for help." );
+      hq_cmd_print("MQTT config save failed.");
+  } else if (has_option(args, "--pub")) {
+    cmd_publish(args);
+  } else if (has_option(args, "--set-address")
+             || has_option(args, "--set-user")
+             || has_option(args, "--set-pass")
+             || has_option(args, "--set-client-id")
+             || has_option(args, "--set-prefix")
+             || has_option(args, "--set-post-topic")
+             || has_option(args, "--set-ssl")
+             || has_option(args, "--set-skip-verify")
+             || has_option(args, "--set-cert")
+             || has_option(args, "--set-client-cert")
+             || has_option(args, "--set-client-key")) {
+    cmd_set(args);
+  } else {
+    hq_cmd_print("Unknown option. Type 'mqtt' for help.");
   }
 }
 
-void hq_cmd_mqtt_register( void )
+void hq_cmd_mqtt_register(void)
 {
   hq_cmd_binding_t binding = {
     .name = "mqtt",
@@ -264,5 +287,5 @@ void hq_cmd_mqtt_register( void )
     .handler = hq_cmd_mqtt_handler,
   };
 
-  (void) hq_cmd_register( &binding );
+  (void)hq_cmd_register(&binding);
 }

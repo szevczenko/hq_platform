@@ -21,6 +21,11 @@ if(ESP_PLATFORM)
                          REQUIRES osal esp_partition vfs app_update esp_timer mbedtls json)
 else()
   add_library(hq_mongoose STATIC ${MONGOOSE_COMMON_SOURCES})
+
+  find_library(MBEDTLS_LIB mbedtls REQUIRED)
+  find_library(MBEDCRYPTO_LIB mbedcrypto REQUIRED)
+  find_library(MBEDX509_LIB mbedx509 REQUIRED)
+
   target_include_directories(hq_mongoose
     PUBLIC ${MONGOOSE_PUBLIC_INCLUDES}
     PRIVATE ${MONGOOSE_PLATFORM_INCLUDES}
@@ -28,6 +33,12 @@ else()
             ${MONGOOSE_OSAL_PLATFORM_INCLUDE}
             ${HQ_CJSON_INCLUDE_DIRS}
   )
-  target_compile_definitions(hq_mongoose PRIVATE MG_ARCH=MG_ARCH_CUSTOM)
-  target_link_libraries(hq_mongoose PUBLIC hq_osal hq_cjson)
+  target_compile_definitions(hq_mongoose PRIVATE
+    MG_ARCH=MG_ARCH_CUSTOM
+    MG_TLS=MG_TLS_MBED
+  )
+  target_link_libraries(hq_mongoose
+    PUBLIC hq_osal hq_cjson
+    PRIVATE ${MBEDTLS_LIB} ${MBEDCRYPTO_LIB} ${MBEDX509_LIB}
+  )
 endif()

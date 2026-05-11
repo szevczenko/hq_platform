@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 
+#include "mongoose_process.h"
 #include "mqtt_app.h"
 #include "mqtt_config.h"
 #include "osal_file.h"
@@ -17,10 +18,12 @@ void app_main(void)
 
     ESP_LOGI(TAG, "HQ platform firmware started");
 
+    MongooseProcess_Init();
+
     osal_fstat_t st = { 0 };
     if (osal_stat(MQTT_CONFIG_FILE_PATH, &st) == OSAL_SUCCESS && st.file_size > 0)
     {
-        MqttApp_Init();
+        mqtt_app_init();
         mqtt_started = true;
         ESP_LOGI(TAG, "MQTT app initialized (config found)");
     }
@@ -31,9 +34,9 @@ void app_main(void)
 
     while (1)
     {
-        if (mqtt_started && MqttApp_IsConnected())
+        if (mqtt_started && mqtt_app_is_connected())
         {
-            const char *topic = MQTTConfig_GetString(MQTT_CONFIG_VALUE_POST_DATA_TOPIC);
+            const char *topic = mqtt_config_get_string(MQTT_CONFIG_VALUE_POST_DATA_TOPIC);
             if (topic == NULL || topic[0] == '\0')
             {
                 topic = "/kawalerski/test/periodic";
@@ -41,7 +44,7 @@ void app_main(void)
 
             char payload[64];
             (void)snprintf(payload, sizeof(payload), "{\"counter\":%lu}", (unsigned long)test_counter++);
-            (void)MqttApp_PostData(topic, payload, 0);
+            (void)mqtt_app_post_data(topic, payload, 0);
         }
 
         vTaskDelay(pdMS_TO_TICKS(1000));

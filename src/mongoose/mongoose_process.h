@@ -5,14 +5,7 @@
 
 extern struct mg_mgr mgr;
 
-/**
- * @brief Initializes the mongoose process and manager.
- */
-void MongooseProcess_Init( void );
+void MongooseProcess_Init(void);
+void MongooseProcess_Deinit(void);
 
-/**
- * @brief Deinitializes the mongoose process and manager.
- */
-void MongooseProcess_Deinit( void );
-
-#endif    // MONGOOSE_PROCESS_H
+#endif    /* MONGOOSE_PROCESS_H */
