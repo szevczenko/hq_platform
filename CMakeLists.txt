@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 if(DEFINED ENV{IDF_PATH} AND ESP_PLATFORM)
   # Tell ESP-IDF where to find components
-  set(EXTRA_COMPONENT_DIRS src/osal src/mongoose src/cmd src/wifi main)
+  set(EXTRA_COMPONENT_DIRS src/osal src/mongoose src/cmd src/wifi)
   include($ENV{IDF_PATH}/tools/cmake/project.cmake)
   project(hq_platform)
 else()
@@ -16,6 +16,7 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/modules.cmake)
 
 option(HQ_BUILD_TESTS "Build tests" OFF)
 option(HQ_BUILD_EXAMPLES "Build examples" OFF)
+option(HQ_BUILD_TOOLS "Build host tools" OFF)
 set(HQ_DEFCONFIG "" CACHE FILEPATH "Path to defconfig file")
 
 if(NOT ESP_PLATFORM)
@@ -57,5 +58,9 @@ else()
 
   if(HQ_BUILD_EXAMPLES)
     add_subdirectory(examples)
+  endif()
+
+  if(HQ_BUILD_TOOLS)
+    add_subdirectory(tools)
   endif()
 endif()
