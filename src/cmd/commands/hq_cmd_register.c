@@ -4,10 +4,12 @@
 extern void hq_cmd_hello_register( void );
 extern void hq_cmd_wifi_register( void );
 extern void hq_cmd_mqtt_register( void );
+extern void hq_cmd_fs_register( void );
 
 void hq_cmd_register_builtin_commands( void )
 {
     hq_cmd_hello_register();
     hq_cmd_wifi_register();
     hq_cmd_mqtt_register();
+    hq_cmd_fs_register();
 }
