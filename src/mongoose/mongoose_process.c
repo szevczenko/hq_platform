@@ -35,6 +35,7 @@ void MongooseProcess_Init(void)
 
 	s_stop_requested = false;
 	mg_mgr_init(&mgr);
+	mg_wakeup_init(&mgr);
 	mg_log_set(CONFIG_MONGOOSE_LOG_LEVEL);
 
 	if (osal_bin_sem_create(&s_stopped_sem, "mg_stopped",
