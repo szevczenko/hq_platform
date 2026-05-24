@@ -6,3 +6,4 @@
 .config
 .config.old
 *.code-workspace
+**/.vscode
