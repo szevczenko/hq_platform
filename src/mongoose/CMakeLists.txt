@@ -22,10 +22,6 @@ if(ESP_PLATFORM)
 else()
   add_library(hq_mongoose STATIC ${MONGOOSE_COMMON_SOURCES})
 
-  find_library(MBEDTLS_LIB mbedtls REQUIRED)
-  find_library(MBEDCRYPTO_LIB mbedcrypto REQUIRED)
-  find_library(MBEDX509_LIB mbedx509 REQUIRED)
-
   target_include_directories(hq_mongoose
     PUBLIC ${MONGOOSE_PUBLIC_INCLUDES}
     PRIVATE ${MONGOOSE_PLATFORM_INCLUDES}
@@ -39,6 +35,6 @@ else()
   )
   target_link_libraries(hq_mongoose
     PUBLIC hq_osal hq_cjson
-    PRIVATE ${MBEDTLS_LIB} ${MBEDCRYPTO_LIB} ${MBEDX509_LIB}
+    PRIVATE MbedTLS::mbedtls
   )
 endif()
