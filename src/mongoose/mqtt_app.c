@@ -765,26 +765,42 @@ static bool create_sync_objects(void)
 	if (osal_queue_create(&mqtt_sync.cmd_queue, "mqtt_cmd_q",
 			      COMMAND_QUEUE_SIZE,
 			      sizeof(mqtt_cmd_t)) != OSAL_SUCCESS)
-		return false;
+		goto fail;
 	if (osal_bin_sem_create(&mqtt_sync.puback, "mqtt_puback_sem",
 				OSAL_SEM_EMPTY) != OSAL_SUCCESS)
-		return false;
+		goto fail_cmd_queue;
 	if (osal_bin_sem_create(&mqtt_sync.suback, "mqtt_suback_sem",
 				OSAL_SEM_EMPTY) != OSAL_SUCCESS)
-		return false;
+		goto fail_puback;
 	if (osal_bin_sem_create(&mqtt_sync.unsuback, "mqtt_unsuback_sem",
 				OSAL_SEM_EMPTY) != OSAL_SUCCESS)
-		return false;
+		goto fail_suback;
 	if (osal_bin_sem_create(&mqtt_sync.shutdown_sem, "mqtt_shutdown_sem",
 				OSAL_SEM_EMPTY) != OSAL_SUCCESS)
-		return false;
+		goto fail_unsuback;
 	if (osal_bin_sem_create(&mqtt_sync.init_sem, "mqtt_init_sem",
 				OSAL_SEM_EMPTY) != OSAL_SUCCESS)
-		return false;
+		goto fail_shutdown_sem;
 	if (osal_mutex_create(&mqtt_sync.subscriptions_lock,
 			      "mqtt_subscriptions_lock") != OSAL_SUCCESS)
-		return false;
+		goto fail_init_sem;
 	return true;
+
+fail_init_sem:
+	(void)osal_bin_sem_delete(mqtt_sync.init_sem);
+fail_shutdown_sem:
+	(void)osal_bin_sem_delete(mqtt_sync.shutdown_sem);
+fail_unsuback:
+	(void)osal_bin_sem_delete(mqtt_sync.unsuback);
+fail_suback:
+	(void)osal_bin_sem_delete(mqtt_sync.suback);
+fail_puback:
+	(void)osal_bin_sem_delete(mqtt_sync.puback);
+fail_cmd_queue:
+	(void)osal_queue_delete(mqtt_sync.cmd_queue);
+fail:
+	memset(&mqtt_sync, 0, sizeof(mqtt_sync));
+	return false;
 }
 
 static void destroy_sync_objects(void)
@@ -905,6 +921,14 @@ bool mqtt_app_subscribe(const char *topic, int qos,
 	sub->active = true;
 	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
 
+	/*
+	 * Drain stale SUBACK signals and clear ACK flag so the wait below tracks
+	 * only this SUBSCRIBE request.
+	 */
+	while (osal_bin_sem_timed_wait(mqtt_sync.suback, 0) == OSAL_SUCCESS) {
+	}
+	mqtt_acks.suback_received = false;
+
 	/* Queue SUBSCRIBE command and wake Mongoose thread */
 	cmd.type = MQTT_CMD_TYPE_SUBSCRIBE;
 	cmd.qos = qos;
@@ -949,6 +973,14 @@ bool mqtt_app_unsubscribe(const char *topic, uint32_t timeout_ms)
 		return false;
 	}
 	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
+
+	/*
+	 * Drain any stale UNSUBACK signal from previous operations so this wait
+	 * reflects only the current UNSUBSCRIBE transaction.
+	 */
+	while (osal_bin_sem_timed_wait(mqtt_sync.unsuback, 0) == OSAL_SUCCESS) {
+	}
+	mqtt_acks.unsuback_received = false;
 
 	/* Queue UNSUBSCRIBE command and wake Mongoose thread */
 	cmd.type = MQTT_CMD_TYPE_UNSUBSCRIBE;

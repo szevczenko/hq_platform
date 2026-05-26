@@ -1,0 +1,281 @@
+/**
+ *******************************************************************************
+ * @file    mqtt_app_mock.c
+ * @brief   Mock implementation of mqtt_app for ThingsBoard unit tests
+ *******************************************************************************
+ */
+
+#include "mqtt_app.h"
+#include "mqtt_app_mock.h"
+#include "mqtt_config.h"
+
+#include <string.h>
+#include <stdio.h>
+
+/* Mock state */
+mock_publish_record_t mock_publishes[MOCK_MAX_PUBLISHES];
+int mock_publish_count = 0;
+mock_subscribe_record_t mock_subscribes[MOCK_MAX_PUBLISHES];
+int mock_subscribe_count = 0;
+bool mock_connected = false;
+
+static mqtt_connect_callback_t s_connect_cb = NULL;
+static mqtt_disconnect_callback_t s_disconnect_cb = NULL;
+
+#define MOCK_MAX_SUBS 16
+static struct {
+    char topic[MOCK_MAX_TOPIC_LEN];
+    mqtt_message_callback_t callback;
+    bool active;
+} s_subscriptions[MOCK_MAX_SUBS];
+
+void mqtt_app_mock_reset(void)
+{
+    mock_publish_count = 0;
+    mock_subscribe_count = 0;
+    mock_connected = false;
+    s_connect_cb = NULL;
+    s_disconnect_cb = NULL;
+    memset(mock_publishes, 0, sizeof(mock_publishes));
+    memset(mock_subscribes, 0, sizeof(mock_subscribes));
+    memset(s_subscriptions, 0, sizeof(s_subscriptions));
+}
+
+void mqtt_app_mock_deliver_message(const char *topic, const char *payload,
+                                   size_t payload_len)
+{
+    for (int i = 0; i < MOCK_MAX_SUBS; i++) {
+        if (!s_subscriptions[i].active) {
+            continue;
+        }
+        /* Simple wildcard matching for MQTT '+' */
+        const char *sub = s_subscriptions[i].topic;
+        const char *t = topic;
+
+        bool match = true;
+        while (*sub && *t) {
+            if (*sub == '+') {
+                /* Skip one level in topic */
+                while (*t && *t != '/') {
+                    t++;
+                }
+                sub++;
+                continue;
+            }
+            if (*sub != *t) {
+                match = false;
+                break;
+            }
+            sub++;
+            t++;
+        }
+        if (*sub == '+' && !*t) {
+            sub++;
+        }
+        if (*sub || *t) {
+            match = false;
+        }
+
+        if (match && s_subscriptions[i].callback != NULL) {
+            s_subscriptions[i].callback(topic, payload, payload_len);
+        }
+    }
+}
+
+/* --- mqtt_app.h mock implementation --- */
+
+void mqtt_app_init(void)
+{
+    mock_connected = true;
+    if (s_connect_cb) {
+        s_connect_cb();
+    }
+}
+
+void mqtt_app_deinit(void)
+{
+    mock_connected = false;
+    if (s_disconnect_cb) {
+        s_disconnect_cb();
+    }
+}
+
+bool mqtt_app_post_data(const char *topic, const char *message, int qos)
+{
+    if (!mock_connected) {
+        return false;
+    }
+    if (mock_publish_count >= MOCK_MAX_PUBLISHES) {
+        return false;
+    }
+
+    mock_publish_record_t *rec = &mock_publishes[mock_publish_count++];
+    strncpy(rec->topic, topic, MOCK_MAX_TOPIC_LEN - 1);
+    strncpy(rec->message, message, MOCK_MAX_MSG_LEN - 1);
+    rec->qos = qos;
+    return true;
+}
+
+bool mqtt_app_is_connected(void)
+{
+    return mock_connected;
+}
+
+bool mqtt_app_subscribe(const char *topic, int qos,
+                        mqtt_message_callback_t callback, uint32_t timeout_ms)
+{
+    (void)qos;
+    (void)timeout_ms;
+
+    for (int i = 0; i < MOCK_MAX_SUBS; i++) {
+        if (!s_subscriptions[i].active) {
+            strncpy(s_subscriptions[i].topic, topic, MOCK_MAX_TOPIC_LEN - 1);
+            s_subscriptions[i].callback = callback;
+            s_subscriptions[i].active = true;
+
+            if (mock_subscribe_count < MOCK_MAX_PUBLISHES) {
+                strncpy(mock_subscribes[mock_subscribe_count].topic, topic,
+                        MOCK_MAX_TOPIC_LEN - 1);
+                mock_subscribe_count++;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+bool mqtt_app_unsubscribe(const char *topic, uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    for (int i = 0; i < MOCK_MAX_SUBS; i++) {
+        if (s_subscriptions[i].active &&
+            strcmp(s_subscriptions[i].topic, topic) == 0) {
+            s_subscriptions[i].active = false;
+            return true;
+        }
+    }
+    return false;
+}
+
+void mqtt_app_set_connect_callback(mqtt_connect_callback_t cb)
+{
+    s_connect_cb = cb;
+}
+
+void mqtt_app_set_disconnect_callback(mqtt_disconnect_callback_t cb)
+{
+    s_disconnect_cb = cb;
+}
+
+/* --- mqtt_config.h mock implementation --- */
+
+static char s_cfg_address[256] = {0};
+static char s_cfg_username[128] = {0};
+static char s_cfg_password[128] = {0};
+static char s_cfg_client_id[128] = {0};
+
+void mqtt_config_init(void)
+{
+    memset(s_cfg_address, 0, sizeof(s_cfg_address));
+    memset(s_cfg_username, 0, sizeof(s_cfg_username));
+    memset(s_cfg_password, 0, sizeof(s_cfg_password));
+    memset(s_cfg_client_id, 0, sizeof(s_cfg_client_id));
+}
+
+bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
+{
+    switch (key) {
+    case MQTT_CONFIG_VALUE_ADDRESS:
+        strncpy(s_cfg_address, string, sizeof(s_cfg_address) - 1);
+        return true;
+    case MQTT_CONFIG_VALUE_USERNAME:
+        strncpy(s_cfg_username, string, sizeof(s_cfg_username) - 1);
+        return true;
+    case MQTT_CONFIG_VALUE_PASSWORD:
+        strncpy(s_cfg_password, string, sizeof(s_cfg_password) - 1);
+        return true;
+    case MQTT_CONFIG_VALUE_CLIENT_ID:
+        strncpy(s_cfg_client_id, string, sizeof(s_cfg_client_id) - 1);
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool mqtt_config_set_int(int value, mqtt_config_value_t key)
+{
+    (void)value;
+    (void)key;
+    return true;
+}
+
+bool mqtt_config_set_bool(bool value, mqtt_config_value_t key)
+{
+    (void)value;
+    (void)key;
+    return true;
+}
+
+bool mqtt_config_set_cert_source(mqtt_cert_source_t source, const char *value,
+                                 mqtt_config_value_t key)
+{
+    (void)source;
+    (void)value;
+    (void)key;
+    return true;
+}
+
+bool mqtt_config_get_int(int *value, mqtt_config_value_t key)
+{
+    (void)value;
+    (void)key;
+    return false;
+}
+
+bool mqtt_config_get_bool(bool *value, mqtt_config_value_t key)
+{
+    (void)value;
+    (void)key;
+    return false;
+}
+
+const char *mqtt_config_get_string(mqtt_config_value_t key)
+{
+    switch (key) {
+    case MQTT_CONFIG_VALUE_ADDRESS:
+        return s_cfg_address;
+    case MQTT_CONFIG_VALUE_USERNAME:
+        return s_cfg_username;
+    case MQTT_CONFIG_VALUE_PASSWORD:
+        return s_cfg_password;
+    case MQTT_CONFIG_VALUE_CLIENT_ID:
+        return s_cfg_client_id;
+    default:
+        return "";
+    }
+}
+
+const char *mqtt_config_get_cert(mqtt_config_value_t key)
+{
+    (void)key;
+    return "";
+}
+
+bool mqtt_config_get_cert_source(mqtt_cert_source_t *source, const char **value,
+                                 mqtt_config_value_t key)
+{
+    (void)source;
+    (void)value;
+    (void)key;
+    return false;
+}
+
+bool mqtt_config_save(void)
+{
+    return true;
+}
+
+void mqtt_config_set_callback(mqtt_apply_config_cb cb)
+{
+    (void)cb;
+}
