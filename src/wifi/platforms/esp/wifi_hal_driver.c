@@ -4,6 +4,7 @@
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
+#include "esp_wifi_default.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
 #include "osal_log.h"
@@ -182,6 +183,21 @@ osal_status_t wifi_hal_deinit( void )
   (void) esp_event_handler_unregister( IP_EVENT, IP_EVENT_STA_GOT_IP, &_wifi_event_handler );
   (void) esp_wifi_stop();
   (void) esp_wifi_deinit();
+
+  /* Default Wi-Fi netifs must be destroyed explicitly before next init.
+   * Otherwise esp_netif keeps duplicate keys and esp_netif_create_default_wifi_ap() asserts.
+   */
+  if ( g_wifi_hal_ctx.netif_sta )
+  {
+    esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_sta );
+    g_wifi_hal_ctx.netif_sta = NULL;
+  }
+
+  if ( g_wifi_hal_ctx.netif_ap )
+  {
+    esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_ap );
+    g_wifi_hal_ctx.netif_ap = NULL;
+  }
 
   memset( &g_wifi_hal_ctx, 0, sizeof( g_wifi_hal_ctx ) );
   return OSAL_SUCCESS;
