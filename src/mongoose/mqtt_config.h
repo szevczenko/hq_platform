@@ -48,12 +48,10 @@ typedef void (*mqtt_apply_config_cb)(void);
 
 void mqtt_config_init(void);
 
-bool mqtt_config_set_int(int value, mqtt_config_value_t key);
 bool mqtt_config_set_bool(bool value, mqtt_config_value_t key);
 bool mqtt_config_set_string(const char *string, mqtt_config_value_t key);
 bool mqtt_config_set_cert_source(mqtt_cert_source_t source, const char *value,
 				 mqtt_config_value_t key);
-bool mqtt_config_get_int(int *value, mqtt_config_value_t key);
 bool mqtt_config_get_bool(bool *value, mqtt_config_value_t key);
 const char *mqtt_config_get_string(mqtt_config_value_t key);
 const char *mqtt_config_get_cert(mqtt_config_value_t key);

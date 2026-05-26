@@ -62,6 +62,7 @@ typedef struct {
 
 static mqtt_apply_config_cb apply_cb;
 static config_data_t config;
+static bool config_initialized;
 
 static void str_copy_safe(char *dst, size_t dst_size, const char *src)
 {
@@ -395,21 +396,18 @@ static bool save_json_config(void)
 		return false;
 
 	ok = write_file_from_buf(MQTT_CONFIG_FILE_PATH, json, strlen(json));
-	free(json);
+	cJSON_free(json);
 	return ok;
 }
 
 void mqtt_config_init(void)
 {
+	if (config_initialized)
+		return;
+
 	set_defaults();
 	(void)load_json_config();
-}
-
-bool mqtt_config_set_int(int value, mqtt_config_value_t key)
-{
-	(void)value;
-	(void)key;
-	return false;
+	config_initialized = true;
 }
 
 bool mqtt_config_set_bool(bool value, mqtt_config_value_t key)
@@ -480,13 +478,6 @@ bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
 	default:
 		return false;
 	}
-}
-
-bool mqtt_config_get_int(int *value, mqtt_config_value_t key)
-{
-	(void)value;
-	(void)key;
-	return false;
 }
 
 bool mqtt_config_get_bool(bool *value, mqtt_config_value_t key)

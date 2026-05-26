@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 if(DEFINED ENV{IDF_PATH} AND ESP_PLATFORM)
   # Tell ESP-IDF where to find components
-  set(EXTRA_COMPONENT_DIRS src/osal src/mongoose src/cmd src/wifi)
+  set(EXTRA_COMPONENT_DIRS main src/osal src/mongoose src/cmd src/wifi)
   include($ENV{IDF_PATH}/tools/cmake/project.cmake)
   project(hq_platform)
 else()

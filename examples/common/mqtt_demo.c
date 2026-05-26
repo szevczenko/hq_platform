@@ -3,6 +3,8 @@
 #include <string.h>
 
 #include "mqtt_app.h"
+#include "mqtt_config.h"
+#include "mongoose_process.h"
 
 #define MQTT_DEMO_CMD_BUF_SIZE 768
 #define MQTT_DEMO_TIMEOUT_MS 2000
@@ -33,6 +35,8 @@ int main(void)
 	printf("              MQTT Demo Application          \n");
 	printf("=============================================\n");
 
+	MongooseProcess_Init();
+	mqtt_config_init();
 	mqtt_app_init();
 	mqtt_demo_print_help();
 
@@ -110,5 +114,6 @@ int main(void)
 	}
 
 	mqtt_app_deinit();
+	MongooseProcess_Deinit();
 	return 0;
 }

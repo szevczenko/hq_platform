@@ -666,6 +666,12 @@ static bool _scan( bool block )
     return false;
   }
 
+  /* Clear stale SCAN_DONE semaphore state from previous scans.
+   * This prevents a new blocking scan from returning immediately. */
+  while ( osal_bin_sem_timed_wait( g_ctx.scan_sem, 0 ) == OSAL_SUCCESS )
+  {
+  }
+
   g_ctx.scan_in_progress = true;
 
   if ( wifi_hal_start_scan( block ) != OSAL_SUCCESS )

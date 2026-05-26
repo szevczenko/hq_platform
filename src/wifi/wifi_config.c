@@ -325,7 +325,7 @@ osal_status_t wifi_config_save( const wifi_config_list_t* list )
   }
 
   osal_status_t st = _write_file( WIFI_CONFIG_FILE_PATH, json, strlen( json ) );
-  free( json );
+  cJSON_free( json );
   if ( st != OSAL_SUCCESS )
   {
     osal_log_error( "wifi_config_save: write failed rc=%d", (int) st );

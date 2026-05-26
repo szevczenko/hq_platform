@@ -516,7 +516,7 @@ static int lfs_ctx_open(lfs_ctx_t *ctx, const cli_opts_t *opts,
     ctx->lookahead_buffer = calloc(1, opts->lookahead_size);
     if (!ctx->read_buffer || !ctx->prog_buffer || !ctx->lookahead_buffer) {
         fprintf(stderr, "Out of memory allocating LFS buffers\n");
-        return -1;
+        goto error;
     }
 
     ctx->bd_cfg.read_size = opts->read_size;
@@ -528,11 +528,18 @@ static int lfs_ctx_open(lfs_ctx_t *ctx, const cli_opts_t *opts,
     } else {
         if (file_size_bytes(image_path, &image_size) != 0) {
             fprintf(stderr, "Cannot stat image: %s\n", image_path);
-            return -1;
+            goto error;
         }
         if (opts->block_size == 0 || image_size < opts->block_size) {
             fprintf(stderr, "Invalid image size or block size\n");
-            return -1;
+            goto error;
+        }
+        if ((image_size % opts->block_size) != 0) {
+            fprintf(stderr,
+                    "Image size (%llu) must be a multiple of block size (%u)\n",
+                    (unsigned long long)image_size,
+                    (unsigned)opts->block_size);
+            goto error;
         }
         ctx->bd_cfg.erase_count = (lfs_size_t)(image_size / opts->block_size);
     }
@@ -557,7 +564,7 @@ static int lfs_ctx_open(lfs_ctx_t *ctx, const cli_opts_t *opts,
     err = lfs_filebd_create(&ctx->cfg, image_path, &ctx->bd_cfg);
     if (err != 0) {
         fprintf(stderr, "lfs_filebd_create failed: %d\n", err);
-        return -1;
+        goto error;
     }
 
     if (for_pack) {
@@ -565,11 +572,15 @@ static int lfs_ctx_open(lfs_ctx_t *ctx, const cli_opts_t *opts,
             (off_t)ctx->bd_cfg.erase_size * (off_t)ctx->bd_cfg.erase_count;
         if (ftruncate(ctx->bd.fd, full_size) != 0) {
             fprintf(stderr, "ftruncate failed for image: %s\n", image_path);
-            return -1;
+            goto error;
         }
     }
 
     return 0;
+
+error:
+    lfs_ctx_close(ctx);
+    return -1;
 }
 
 static void lfs_ctx_close(lfs_ctx_t *ctx)

@@ -146,19 +146,35 @@ static void clear_subscription(mqtt_subscription_t *sub)
 
 static void resubscribe_all(void)
 {
+	osal_status_t lock_rc;
+	char topics[MAX_SUBSCRIPTIONS][MQTT_APP_TOPIC_MAX_LEN] = { 0 };
+	int topic_count = 0;
+
 	if (!mqtt_state.nc)
+		return;
+
+	lock_rc = osal_mutex_take(mqtt_sync.subscriptions_lock);
+	if (lock_rc != OSAL_SUCCESS)
 		return;
 
 	for (int i = 0; i < MAX_SUBSCRIPTIONS; i++) {
 		if (mqtt_state.subscriptions[i].active) {
-			mg_mqtt_sub(mqtt_state.nc,
-				    &(struct mg_mqtt_opts){
-					    .topic = mg_str(
-						    mqtt_state.subscriptions[i]
-							    .topic),
-					    .qos = 0,
-				    });
+			strncpy(topics[topic_count], mqtt_state.subscriptions[i].topic,
+				sizeof(topics[topic_count]) - 1);
+			topics[topic_count][sizeof(topics[topic_count]) - 1] =
+				'\0';
+			topic_count++;
 		}
+	}
+
+	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
+
+	for (int i = 0; i < topic_count; i++) {
+		mg_mqtt_sub(mqtt_state.nc,
+			    &(struct mg_mqtt_opts){
+				    .topic = mg_str(topics[i]),
+				    .qos = 0,
+			    });
 	}
 }
 
@@ -542,6 +558,7 @@ static void drain_command_queue(void)
 static void handle_mqtt_message(struct mg_mqtt_message *mm)
 {
 	char topic_str[129] = { 0 };
+	mqtt_message_callback_t callback = NULL;
 	size_t topic_len = mm->topic.len < sizeof(topic_str) - 1 ?
 				   mm->topic.len :
 				   sizeof(topic_str) - 1;
@@ -552,17 +569,25 @@ static void handle_mqtt_message(struct mg_mqtt_message *mm)
 		      (unsigned)mm->data.len, (int)payload_preview_len,
 		      mm->data.buf ? mm->data.buf : "");
 
-	for (int i = 0; i < MAX_SUBSCRIPTIONS; i++) {
-		if (mqtt_state.subscriptions[i].active &&
-		    mqtt_state.subscriptions[i].callback) {
-			if (mg_match(mg_str(topic_str),
-				     mg_str(mqtt_state.subscriptions[i].topic),
-				     NULL)) {
-				mqtt_state.subscriptions[i].callback(
-					topic_str, mm->data.buf, mm->data.len);
-				break;
+	if (osal_mutex_take(mqtt_sync.subscriptions_lock) == OSAL_SUCCESS) {
+		for (int i = 0; i < MAX_SUBSCRIPTIONS; i++) {
+			if (mqtt_state.subscriptions[i].active &&
+			    mqtt_state.subscriptions[i].callback) {
+				if (mg_match(mg_str(topic_str),
+					     mg_str(mqtt_state.subscriptions[i]
+						    .topic),
+					     NULL)) {
+					callback =
+						mqtt_state.subscriptions[i].callback;
+					break;
+				}
 			}
 		}
+		(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
+	}
+
+	if (callback) {
+		callback(topic_str, mm->data.buf, mm->data.len);
 	}
 }
 
@@ -692,25 +717,37 @@ static bool create_timers(void)
 	if (osal_timer_create(&mqtt_timers.puback, "mqtt_puback",
 			      TIMEOUT_DEFAULT_MS, true, puback_timer_callback,
 			      NULL, NULL, 0) != OSAL_SUCCESS)
-		return false;
+		goto fail;
 	if (osal_timer_create(&mqtt_timers.suback, "mqtt_suback",
 			      TIMEOUT_DEFAULT_MS, false, suback_timer_callback,
 			      NULL, NULL, 0) != OSAL_SUCCESS)
-		return false;
+		goto fail_puback;
 	if (osal_timer_create(&mqtt_timers.unsuback, "mqtt_unsuback",
 			      TIMEOUT_DEFAULT_MS, false,
 			      unsuback_timer_callback, NULL, NULL,
 			      0) != OSAL_SUCCESS)
-		return false;
+		goto fail_suback;
 	if (osal_timer_create(&mqtt_timers.reconnect, "mqtt_reconnect",
 			      RECONNECT_DELAY_MS, false, reconnect_timer_cb,
 			      NULL, NULL, 0) != OSAL_SUCCESS)
-		return false;
+		goto fail_unsuback;
 	if (osal_timer_create(&mqtt_timers.ping, "mqtt_ping",
 			      PING_INTERVAL_MS, true, ping_timer_cb,
 			      NULL, NULL, 0) != OSAL_SUCCESS)
-		return false;
+		goto fail_reconnect;
 	return true;
+
+fail_reconnect:
+	(void)osal_timer_delete(mqtt_timers.reconnect, 0);
+fail_unsuback:
+	(void)osal_timer_delete(mqtt_timers.unsuback, 0);
+fail_suback:
+	(void)osal_timer_delete(mqtt_timers.suback, 0);
+fail_puback:
+	(void)osal_timer_delete(mqtt_timers.puback, 0);
+fail:
+	memset(&mqtt_timers, 0, sizeof(mqtt_timers));
+	return false;
 }
 
 static void destroy_timers(void)
@@ -768,6 +805,10 @@ void mqtt_app_init(void)
 {
 	if (mqtt_state.initialized)
 		return;
+
+	/* Ensure defaults + persisted config are loaded even if caller did not
+	 * explicitly invoke mqtt_config_init() before mqtt_app_init(). */
+	mqtt_config_init();
 
 	mqtt_config_set_callback(config_update_callback);
 
@@ -833,6 +874,7 @@ bool mqtt_app_subscribe(const char *topic, int qos,
 			mqtt_message_callback_t callback, uint32_t timeout_ms)
 {
 	osal_status_t lock_rc;
+	mqtt_cmd_t cmd = { 0 };
 
 	if (!mqtt_state.initialized || !mqtt_state.connected || !topic ||
 	    !callback) {
@@ -861,9 +903,9 @@ bool mqtt_app_subscribe(const char *topic, int qos,
 	sub->topic[sizeof(sub->topic) - 1] = '\0';
 	sub->callback = callback;
 	sub->active = true;
+	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
 
 	/* Queue SUBSCRIBE command and wake Mongoose thread */
-	mqtt_cmd_t cmd = { 0 };
 	cmd.type = MQTT_CMD_TYPE_SUBSCRIBE;
 	cmd.qos = qos;
 	strncpy(cmd.topic, topic, sizeof(cmd.topic) - 1);
@@ -876,18 +918,23 @@ bool mqtt_app_subscribe(const char *topic, int qos,
 
 	if (osal_bin_sem_timed_wait(mqtt_sync.suback, timeout_ms + 100) !=
 	    OSAL_SUCCESS || !mqtt_acks.suback_received) {
-		clear_subscription(sub);
-		(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
+		if (osal_mutex_take(mqtt_sync.subscriptions_lock) == OSAL_SUCCESS) {
+			mqtt_subscription_t *failed_sub =
+				find_subscription(topic);
+			if (failed_sub)
+				clear_subscription(failed_sub);
+			(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
+		}
 		return false;
 	}
 
-	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
 	return true;
 }
 
 bool mqtt_app_unsubscribe(const char *topic, uint32_t timeout_ms)
 {
 	osal_status_t lock_rc;
+	mqtt_cmd_t cmd = { 0 };
 
 	if (!mqtt_state.initialized || !mqtt_state.connected || !topic)
 		return false;
@@ -901,9 +948,9 @@ bool mqtt_app_unsubscribe(const char *topic, uint32_t timeout_ms)
 		(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
 		return false;
 	}
+	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
 
 	/* Queue UNSUBSCRIBE command and wake Mongoose thread */
-	mqtt_cmd_t cmd = { 0 };
 	cmd.type = MQTT_CMD_TYPE_UNSUBSCRIBE;
 	strncpy(cmd.topic, topic, sizeof(cmd.topic) - 1);
 	cmd.topic[sizeof(cmd.topic) - 1] = '\0';
@@ -915,12 +962,15 @@ bool mqtt_app_unsubscribe(const char *topic, uint32_t timeout_ms)
 
 	if (osal_bin_sem_timed_wait(mqtt_sync.unsuback, timeout_ms + 100) !=
 	    OSAL_SUCCESS || !mqtt_acks.unsuback_received) {
-		(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
 		return false;
 	}
 
-	clear_subscription(sub);
-	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
+	if (osal_mutex_take(mqtt_sync.subscriptions_lock) == OSAL_SUCCESS) {
+		mqtt_subscription_t *done_sub = find_subscription(topic);
+		if (done_sub)
+			clear_subscription(done_sub);
+		(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
+	}
 	return true;
 }
 
