@@ -41,15 +41,21 @@
 #endif
 
 typedef struct {
+	mqtt_cert_source_t source;
+	char value[MQTT_CONFIG_STR_SIZE];
+	char resolved[MQTT_CERT_MAX_SIZE];
+} cert_entry_t;
+
+typedef struct {
 	char address[MQTT_CONFIG_STR_SIZE];
 	char topic_prefix[MQTT_CONFIG_STR_SIZE];
 	char post_data_topic[MQTT_CONFIG_STR_SIZE];
 	char username[MQTT_CONFIG_STR_SIZE];
 	char password[MQTT_CONFIG_STR_SIZE];
 	char client_id[MQTT_CONFIG_STR_SIZE];
-	char client_cert[MQTT_CERT_MAX_SIZE];
-	char client_key[MQTT_CERT_MAX_SIZE];
-	char cert[MQTT_CERT_MAX_SIZE];
+	cert_entry_t cert;
+	cert_entry_t client_cert;
+	cert_entry_t client_key;
 	uint8_t use_ssl;
 	uint8_t skip_verify;
 } config_data_t;
@@ -147,77 +153,144 @@ static bool write_file_from_buf(const char *path, const char *data, size_t len)
 	return n >= 0 && (size_t)n == len;
 }
 
-static bool load_blob(const char *path, char *dst, size_t dst_size)
+static const char *source_to_str(mqtt_cert_source_t source)
+{
+	switch (source) {
+	case MQTT_CERT_SOURCE_FILE_PATH:
+		return "file_path";
+	case MQTT_CERT_SOURCE_RAW:
+		return "raw";
+	default:
+		return "none";
+	}
+}
+
+static mqtt_cert_source_t str_to_source(const char *str)
+{
+	if (!str)
+		return MQTT_CERT_SOURCE_NONE;
+	if (strcmp(str, "file_path") == 0)
+		return MQTT_CERT_SOURCE_FILE_PATH;
+	if (strcmp(str, "raw") == 0)
+		return MQTT_CERT_SOURCE_RAW;
+	return MQTT_CERT_SOURCE_NONE;
+}
+
+static bool resolve_cert_entry(cert_entry_t *entry)
 {
 	osal_fstat_t st = { 0 };
 	osal_file_id_t fd;
 	size_t to_read;
 	int32_t n;
 
-	if (!path || !dst || dst_size == 0)
-		return false;
+	entry->resolved[0] = '\0';
 
-	if (osal_stat(path, &st) != OSAL_SUCCESS || st.file_size == 0) {
-		dst[0] = '\0';
-		return false;
-	}
+	switch (entry->source) {
+	case MQTT_CERT_SOURCE_FILE_PATH:
+		if (entry->value[0] == '\0')
+			return false;
 
-	fd = osal_open_create(path, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
-	if (fd < 0) {
-		dst[0] = '\0';
-		return false;
-	}
+		if (osal_stat(entry->value, &st) != OSAL_SUCCESS ||
+		    st.file_size == 0)
+			return false;
 
-	to_read = st.file_size < dst_size - 1 ? st.file_size : dst_size - 1;
-	n = osal_read(fd, dst, to_read);
-	(void)osal_close(fd);
+		fd = osal_open_create(entry->value, OSAL_FILE_FLAG_NONE,
+				      OSAL_READ_ONLY);
+		if (fd < 0)
+			return false;
 
-	if (n < 0) {
-		dst[0] = '\0';
-		return false;
-	}
+		to_read = st.file_size < sizeof(entry->resolved) - 1
+				  ? st.file_size
+				  : sizeof(entry->resolved) - 1;
+		n = osal_read(fd, entry->resolved, to_read);
+		(void)osal_close(fd);
 
-	dst[n] = '\0';
-	return true;
-}
-
-static bool save_blob(const char *path, const char *blob, size_t blob_max_size)
-{
-	size_t len;
-
-	if (!path || !blob)
-		return false;
-
-	len = strnlen(blob, blob_max_size);
-	if (len == 0) {
-		(void)osal_remove(path);
+		if (n < 0) {
+			entry->resolved[0] = '\0';
+			return false;
+		}
+		entry->resolved[n] = '\0';
 		return true;
+
+	case MQTT_CERT_SOURCE_RAW:
+		str_copy_safe(entry->resolved, sizeof(entry->resolved),
+			      entry->value);
+		return entry->value[0] != '\0';
+
+	default:
+		return false;
+	}
+}
+
+static cert_entry_t *get_cert_entry(mqtt_config_value_t key)
+{
+	switch (key) {
+	case MQTT_CONFIG_VALUE_CERT:
+		return &config.cert;
+	case MQTT_CONFIG_VALUE_CLIENT_CERT:
+		return &config.client_cert;
+	case MQTT_CONFIG_VALUE_CLIENT_KEY:
+		return &config.client_key;
+	default:
+		return NULL;
+	}
+}
+
+static void load_cert_from_json(cJSON *root, const char *field_name,
+				cert_entry_t *entry)
+{
+	cJSON *obj;
+	cJSON *source_item;
+	cJSON *value_item;
+
+	obj = cJSON_GetObjectItemCaseSensitive(root, field_name);
+	if (!cJSON_IsObject(obj))
+		return;
+
+	source_item = cJSON_GetObjectItemCaseSensitive(obj, "source");
+	value_item = cJSON_GetObjectItemCaseSensitive(obj, "value");
+
+	if (!cJSON_IsString(source_item) || !source_item->valuestring)
+		return;
+
+	entry->source = str_to_source(source_item->valuestring);
+
+	if (cJSON_IsString(value_item) && value_item->valuestring)
+		str_copy_safe(entry->value, sizeof(entry->value),
+			      value_item->valuestring);
+
+	(void)resolve_cert_entry(entry);
+}
+
+static bool save_cert_to_json(cJSON *root, const char *field_name,
+			      const cert_entry_t *entry)
+{
+	cJSON *obj;
+
+	if (entry->source == MQTT_CERT_SOURCE_NONE)
+		return true;
+
+	obj = cJSON_CreateObject();
+	if (!obj)
+		return false;
+
+	if (!cJSON_AddStringToObject(obj, "source",
+				     source_to_str(entry->source))) {
+		cJSON_Delete(obj);
+		return false;
 	}
 
-	return write_file_from_buf(path, blob, len);
-}
+	if (!cJSON_AddStringToObject(obj, "value", entry->value)) {
+		cJSON_Delete(obj);
+		return false;
+	}
 
-static bool load_certs(void)
-{
-	bool ok = load_blob(MQTT_CERT_FILE_PATH, config.cert,
-			    sizeof(config.cert));
-	(void)load_blob(MQTT_CLIENT_CERT_FILE_PATH, config.client_cert,
-			sizeof(config.client_cert));
-	(void)load_blob(MQTT_CLIENT_KEY_FILE_PATH, config.client_key,
-			sizeof(config.client_key));
-	return ok;
-}
+	if (!cJSON_AddItemToObject(root, field_name, obj)) {
+		cJSON_Delete(obj);
+		return false;
+	}
 
-static bool save_certs(void)
-{
-	bool ok;
-
-	ok = save_blob(MQTT_CERT_FILE_PATH, config.cert, sizeof(config.cert));
-	ok = ok && save_blob(MQTT_CLIENT_CERT_FILE_PATH, config.client_cert,
-			     sizeof(config.client_cert));
-	ok = ok && save_blob(MQTT_CLIENT_KEY_FILE_PATH, config.client_key,
-			     sizeof(config.client_key));
-	return ok;
+	return true;
 }
 
 static bool load_json_config(void)
@@ -273,6 +346,10 @@ static bool load_json_config(void)
 		str_copy_safe(config.client_id, sizeof(config.client_id),
 			      item->valuestring);
 
+	load_cert_from_json(root, "cert", &config.cert);
+	load_cert_from_json(root, "client_cert", &config.client_cert);
+	load_cert_from_json(root, "client_key", &config.client_key);
+
 	cJSON_Delete(root);
 	return true;
 }
@@ -303,6 +380,10 @@ static bool save_json_config(void)
 	ok = ok && cJSON_AddStringToObject(root, "client_id",
 					   config.client_id) != NULL;
 
+	ok = ok && save_cert_to_json(root, "cert", &config.cert);
+	ok = ok && save_cert_to_json(root, "client_cert", &config.client_cert);
+	ok = ok && save_cert_to_json(root, "client_key", &config.client_key);
+
 	if (!ok) {
 		cJSON_Delete(root);
 		return false;
@@ -322,7 +403,6 @@ void mqtt_config_init(void)
 {
 	set_defaults();
 	(void)load_json_config();
-	(void)load_certs();
 }
 
 bool mqtt_config_set_int(int value, mqtt_config_value_t key)
@@ -346,38 +426,28 @@ bool mqtt_config_set_bool(bool value, mqtt_config_value_t key)
 	}
 }
 
-bool mqtt_config_set_cert(const char *cert, size_t cert_len, size_t offset,
-			  mqtt_config_value_t key)
+bool mqtt_config_set_cert_source(mqtt_cert_source_t source, const char *value,
+				 mqtt_config_value_t key)
 {
-	char *target;
-	size_t target_size;
+	cert_entry_t *entry;
 
-	if (!cert)
+	entry = get_cert_entry(key);
+	if (!entry)
 		return false;
 
-	switch (key) {
-	case MQTT_CONFIG_VALUE_CERT:
-		target = config.cert;
-		target_size = sizeof(config.cert);
-		break;
-	case MQTT_CONFIG_VALUE_CLIENT_CERT:
-		target = config.client_cert;
-		target_size = sizeof(config.client_cert);
-		break;
-	case MQTT_CONFIG_VALUE_CLIENT_KEY:
-		target = config.client_key;
-		target_size = sizeof(config.client_key);
-		break;
-	default:
-		return false;
+	if (source == MQTT_CERT_SOURCE_NONE) {
+		entry->source = MQTT_CERT_SOURCE_NONE;
+		entry->value[0] = '\0';
+		entry->resolved[0] = '\0';
+		return true;
 	}
 
-	if (offset >= target_size || cert_len > target_size - offset - 1u)
+	if (!value)
 		return false;
 
-	memcpy(&target[offset], cert, cert_len);
-	target[offset + cert_len] = '\0';
-	return true;
+	entry->source = source;
+	str_copy_safe(entry->value, sizeof(entry->value), value);
+	return resolve_cert_entry(entry);
 }
 
 bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
@@ -458,23 +528,36 @@ const char *mqtt_config_get_string(mqtt_config_value_t key)
 
 const char *mqtt_config_get_cert(mqtt_config_value_t key)
 {
-	switch (key) {
-	case MQTT_CONFIG_VALUE_CERT:
-		return config.cert;
-	case MQTT_CONFIG_VALUE_CLIENT_CERT:
-		return config.client_cert;
-	case MQTT_CONFIG_VALUE_CLIENT_KEY:
-		return config.client_key;
-	default:
+	cert_entry_t *entry;
+
+	entry = get_cert_entry(key);
+	if (!entry)
 		return NULL;
-	}
+
+	return entry->resolved;
+}
+
+bool mqtt_config_get_cert_source(mqtt_cert_source_t *source, const char **value,
+				 mqtt_config_value_t key)
+{
+	cert_entry_t *entry;
+
+	entry = get_cert_entry(key);
+	if (!entry)
+		return false;
+
+	if (source)
+		*source = entry->source;
+	if (value)
+		*value = entry->value;
+	return true;
 }
 
 bool mqtt_config_save(void)
 {
 	bool ok;
 
-	ok = save_json_config() && save_certs();
+	ok = save_json_config();
 	if (!ok) {
 		osal_log_error("mqtt config save failed");
 		return false;

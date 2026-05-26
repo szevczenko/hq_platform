@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "mqtt_config.h"
+#include "osal_file.h"
 #include "osal_mount.h"
 
 #ifdef ESP_PLATFORM
@@ -75,6 +76,23 @@ static void mqtt_test_fs_teardown(void)
 	(void)osal_rmfs(MQTT_TEST_IMAGE_PATH);
 }
 
+static bool write_test_file(const char *path, const char *content)
+{
+	osal_file_id_t fd;
+	size_t len = strlen(content);
+	int32_t n;
+
+	fd = osal_open_create(
+		path, OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
+		OSAL_WRITE_ONLY);
+	if (fd < 0)
+		return false;
+
+	n = osal_write(fd, content, len);
+	(void)osal_close(fd);
+	return n >= 0 && (size_t)n == len;
+}
+
 static void test_defaults_loaded(void)
 {
 	bool ssl_enabled = true;
@@ -121,6 +139,139 @@ static void test_save_triggers_callback(void)
 	TEST_END();
 }
 
+static void test_cert_source_file_path(void)
+{
+	const char *cert_content;
+	mqtt_cert_source_t source;
+	const char *value;
+	const char *test_pem = "-----BEGIN CERTIFICATE-----\nTESTDATA\n"
+			       "-----END CERTIFICATE-----\n";
+	const char *test_file = "test_ca.pem";
+
+	TEST_START("Cert Source file_path");
+
+	mqtt_config_init();
+
+	TEST_ASSERT(write_test_file(test_file, test_pem),
+		    "Test PEM file created");
+
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+						test_file,
+						MQTT_CONFIG_VALUE_CERT),
+		    "Set cert source file_path succeeds");
+
+	cert_content = mqtt_config_get_cert(MQTT_CONFIG_VALUE_CERT);
+	TEST_ASSERT(cert_content != NULL && strcmp(cert_content, test_pem) == 0,
+		    "Cert content resolved from file");
+
+	TEST_ASSERT(mqtt_config_get_cert_source(&source, &value,
+						MQTT_CONFIG_VALUE_CERT),
+		    "Get cert source succeeds");
+	TEST_ASSERT(source == MQTT_CERT_SOURCE_FILE_PATH,
+		    "Source is file_path");
+	TEST_ASSERT(value != NULL && strcmp(value, test_file) == 0,
+		    "Value is the file path");
+
+	(void)osal_remove(test_file);
+	TEST_END();
+}
+
+static void test_cert_source_raw(void)
+{
+	const char *cert_content;
+	mqtt_cert_source_t source;
+	const char *value;
+	const char *raw_pem = "-----BEGIN CERTIFICATE-----\nRAWDATA\n"
+			      "-----END CERTIFICATE-----\n";
+
+	TEST_START("Cert Source raw");
+
+	mqtt_config_init();
+
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_RAW, raw_pem,
+						MQTT_CONFIG_VALUE_CLIENT_CERT),
+		    "Set cert source raw succeeds");
+
+	cert_content = mqtt_config_get_cert(MQTT_CONFIG_VALUE_CLIENT_CERT);
+	TEST_ASSERT(cert_content != NULL && strcmp(cert_content, raw_pem) == 0,
+		    "Cert content is raw value");
+
+	TEST_ASSERT(mqtt_config_get_cert_source(&source, &value,
+						MQTT_CONFIG_VALUE_CLIENT_CERT),
+		    "Get cert source succeeds");
+	TEST_ASSERT(source == MQTT_CERT_SOURCE_RAW, "Source is raw");
+
+	TEST_END();
+}
+
+static void test_cert_source_none(void)
+{
+	const char *cert_content;
+
+	TEST_START("Cert Source none (clear)");
+
+	mqtt_config_init();
+
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_RAW, "data",
+						MQTT_CONFIG_VALUE_CLIENT_KEY),
+		    "Set cert source raw first");
+
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_NONE, NULL,
+						MQTT_CONFIG_VALUE_CLIENT_KEY),
+		    "Clear cert source succeeds");
+
+	cert_content = mqtt_config_get_cert(MQTT_CONFIG_VALUE_CLIENT_KEY);
+	TEST_ASSERT(cert_content != NULL && cert_content[0] == '\0',
+		    "Cert content is empty after clear");
+
+	TEST_END();
+}
+
+static void test_cert_save_load_roundtrip(void)
+{
+	const char *cert_content;
+	mqtt_cert_source_t source;
+	const char *value;
+	const char *test_pem = "-----BEGIN CERTIFICATE-----\nROUNDTRIP\n"
+			       "-----END CERTIFICATE-----\n";
+	const char *test_file = "test_roundtrip.pem";
+
+	TEST_START("Cert Save/Load Roundtrip");
+
+	mqtt_config_init();
+
+	TEST_ASSERT(write_test_file(test_file, test_pem),
+		    "Test PEM file created");
+
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+						test_file,
+						MQTT_CONFIG_VALUE_CERT),
+		    "Set cert source file_path");
+	TEST_ASSERT(mqtt_config_set_string("mqtt://10.0.0.1:8883",
+					   MQTT_CONFIG_VALUE_ADDRESS),
+		    "Set address");
+
+	TEST_ASSERT(mqtt_config_save(), "Save config");
+
+	/* Re-init to simulate restart */
+	mqtt_config_init();
+
+	TEST_ASSERT(mqtt_config_get_cert_source(&source, &value,
+						MQTT_CONFIG_VALUE_CERT),
+		    "Get cert source after reload");
+	TEST_ASSERT(source == MQTT_CERT_SOURCE_FILE_PATH,
+		    "Source persisted as file_path");
+	TEST_ASSERT(value != NULL && strcmp(value, test_file) == 0,
+		    "File path persisted");
+
+	cert_content = mqtt_config_get_cert(MQTT_CONFIG_VALUE_CERT);
+	TEST_ASSERT(cert_content != NULL && strcmp(cert_content, test_pem) == 0,
+		    "Cert content re-resolved from file after reload");
+
+	(void)osal_remove(test_file);
+	TEST_END();
+}
+
 static void mqtt_config_tests_reset(void)
 {
 	tests_run = 0;
@@ -145,6 +296,10 @@ int mqtt_config_tests_run(void)
 
 	test_defaults_loaded();
 	test_save_triggers_callback();
+	test_cert_source_file_path();
+	test_cert_source_raw();
+	test_cert_source_none();
+	test_cert_save_load_roundtrip();
 
 	printf("\n");
 	printf("==================================================\n");

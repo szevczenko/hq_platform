@@ -79,41 +79,79 @@ static void teardown_fs(void)
 	(void)osal_rmfs(TEST_IMAGE_PATH);
 }
 
-static bool load_host_file_to_buffer(const char *path, char *buffer,
-				     size_t max_len)
+static bool osal_write_file(const char *path, const char *data, size_t len)
 {
-	FILE *fp;
-	size_t read_len;
+	osal_file_id_t fd;
+	int32_t n;
 
-	if (!path || !buffer || max_len < 2) {
+	fd = osal_open_create(
+		path, OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
+		OSAL_WRITE_ONLY);
+	if (fd < 0)
 		return false;
-	}
 
-	fp = fopen(path, "rb");
-	if (!fp) {
+	n = osal_write(fd, data, len);
+	(void)osal_close(fd);
+	return n >= 0 && (size_t)n == len;
+}
+
+static bool osal_read_file(const char *path, char *buffer, size_t max_len)
+{
+	osal_fstat_t st = { 0 };
+	osal_file_id_t fd;
+	size_t to_read;
+	int32_t n;
+
+	if (!path || !buffer || max_len < 2)
 		return false;
-	}
 
-	read_len = fread(buffer, 1, max_len - 1, fp);
-	(void)fclose(fp);
-	if (read_len == 0) {
+	if (osal_stat(path, &st) != OSAL_SUCCESS || st.file_size == 0)
 		return false;
-	}
 
-	buffer[read_len] = '\0';
+	fd = osal_open_create(path, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
+	if (fd < 0)
+		return false;
+
+	to_read = st.file_size < max_len - 1 ? st.file_size : max_len - 1;
+	n = osal_read(fd, buffer, to_read);
+	(void)osal_close(fd);
+
+	if (n < 0)
+		return false;
+
+	buffer[n] = '\0';
 	return true;
 }
 
-static bool load_cert_file(const char *name, char *buffer, size_t max_len)
+static bool provision_cert_from_host(const char *host_path,
+				     const char *osal_path)
+{
+	FILE *fp;
+	char buf[MQTT_CERT_MAX_SIZE];
+	size_t n;
+
+	fp = fopen(host_path, "rb");
+	if (!fp)
+		return false;
+
+	n = fread(buf, 1, sizeof(buf) - 1, fp);
+	(void)fclose(fp);
+	if (n == 0)
+		return false;
+
+	buf[n] = '\0';
+	return osal_write_file(osal_path, buf, n);
+}
+
+static bool provision_cert_file(const char *name, const char *osal_dest)
 {
 	char path[256] = { 0 };
 	const char *prefixes[] = { "cert/", "../cert/", "../../cert/" };
 
 	for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
 		(void)snprintf(path, sizeof(path), "%s%s", prefixes[i], name);
-		if (load_host_file_to_buffer(path, buffer, max_len)) {
+		if (provision_cert_from_host(path, osal_dest))
 			return true;
-		}
 	}
 
 	return false;
@@ -167,22 +205,19 @@ static void on_mqtt_message(const char *topic, const char *message,
 
 static void test_connect_sub_pub_unsub_and_reconfigure(void)
 {
-	char ca_buf[MQTT_CERT_MAX_SIZE] = { 0 };
-	char client_cert_buf[MQTT_CERT_MAX_SIZE] = { 0 };
-	char client_key_buf[MQTT_CERT_MAX_SIZE] = { 0 };
 	int initial_count;
 
 	TEST_START("Connect, subscribe, publish, unsubscribe, reconfigure");
 
-	TEST_ASSERT(load_cert_file("ca.crt", ca_buf, sizeof(ca_buf)),
-		    "CA cert loaded");
-	TEST_ASSERT(load_cert_file("client.crt", client_cert_buf,
-				   sizeof(client_cert_buf)),
-		    "Client cert loaded");
-	TEST_ASSERT(load_cert_file("client.key", client_key_buf,
-				   sizeof(client_key_buf)),
-		    "Client key loaded");
+	/* Provision cert files from host FS into OSAL FS */
+	TEST_ASSERT(provision_cert_file("ca.crt", "ca.crt"),
+		    "CA cert provisioned to OSAL FS");
+	TEST_ASSERT(provision_cert_file("client.crt", "client.crt"),
+		    "Client cert provisioned to OSAL FS");
+	TEST_ASSERT(provision_cert_file("client.key", "client.key"),
+		    "Client key provisioned to OSAL FS");
 
+	mqtt_config_init();
 	TEST_ASSERT(mqtt_config_set_string("mqtts://127.0.0.1:8883",
 					   MQTT_CONFIG_VALUE_ADDRESS),
 		    "MQTT address set to TLS broker");
@@ -193,15 +228,17 @@ static void test_connect_sub_pub_unsub_and_reconfigure(void)
 		    "MQTT SSL flag enabled");
 	TEST_ASSERT(mqtt_config_set_bool(true, MQTT_CONFIG_VALUE_SKIP_VERIFY),
 		    "MQTT skip verify enabled for local test broker");
-	TEST_ASSERT(mqtt_config_set_cert(ca_buf, strlen(ca_buf), 0,
-					 MQTT_CONFIG_VALUE_CERT),
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+						"ca.crt",
+						MQTT_CONFIG_VALUE_CERT),
 		    "CA cert configured");
-	TEST_ASSERT(mqtt_config_set_cert(client_cert_buf,
-					 strlen(client_cert_buf), 0,
-					 MQTT_CONFIG_VALUE_CLIENT_CERT),
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+						"client.crt",
+						MQTT_CONFIG_VALUE_CLIENT_CERT),
 		    "Client cert configured");
-	TEST_ASSERT(mqtt_config_set_cert(client_key_buf, strlen(client_key_buf),
-					 0, MQTT_CONFIG_VALUE_CLIENT_KEY),
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+						"client.key",
+						MQTT_CONFIG_VALUE_CLIENT_KEY),
 		    "Client key configured");
 
 	mqtt_app_init();
