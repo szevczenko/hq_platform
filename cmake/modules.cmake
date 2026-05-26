@@ -1,8 +1,17 @@
 set(HQ_CJSON_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/cJSON)
 set(HQ_CJSON_SOURCES ${HQ_CJSON_DIR}/cJSON.c)
 set(HQ_CJSON_INCLUDE_DIRS ${HQ_CJSON_DIR})
+set(HQ_MBEDTLS_DIR ${CMAKE_CURRENT_LIST_DIR}/../third_party/mbedtls)
 
 if(NOT ESP_PLATFORM)
   add_library(hq_cjson STATIC ${HQ_CJSON_SOURCES})
   target_include_directories(hq_cjson PUBLIC ${HQ_CJSON_INCLUDE_DIRS})
+
+  if(CONFIG_HQ_PLATFORM_POSIX)
+    set(ENABLE_PROGRAMS OFF CACHE BOOL "Build Mbed TLS programs" FORCE)
+    set(ENABLE_TESTING OFF CACHE BOOL "Build Mbed TLS tests" FORCE)
+    set(DISABLE_PACKAGE_CONFIG_AND_INSTALL ON CACHE BOOL "Disable Mbed TLS install rules" FORCE)
+    set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "Do not treat Mbed TLS warnings as errors" FORCE)
+    add_subdirectory(${HQ_MBEDTLS_DIR} ${CMAKE_BINARY_DIR}/third_party/mbedtls EXCLUDE_FROM_ALL)
+  endif()
 endif()

@@ -3,7 +3,12 @@ set(CMD_PUBLIC_INCLUDES
   ${HQ_CONFIG_DIR}
 )
 
+get_filename_component(HQ_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
+
 set(CMD_EMBEDDED_CLI_DIR ${CMAKE_CURRENT_LIST_DIR}/../../third_party/embedded-cli)
+set(CMD_LITTLEFS_DIR ${HQ_REPO_ROOT}/third_party/littlefs)
+set(CMD_OSAL_POSIX_DIR ${HQ_REPO_ROOT}/src/osal/posix)
+set(CMD_OSAL_ESP_DIR ${HQ_REPO_ROOT}/src/osal/esp)
 
 set(CMD_PRIVATE_INCLUDES
   ${CMD_EMBEDDED_CLI_DIR}/lib/include
@@ -23,6 +28,9 @@ if(CONFIG_HQ_PLATFORM_POSIX)
   )
   set(CMD_PLATFORM_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/posix
+    ${CMD_OSAL_POSIX_DIR}
+    ${CMD_LITTLEFS_DIR}
+    ${CMD_LITTLEFS_DIR}/bd
   )
 elseif(CONFIG_HQ_PLATFORM_ESP OR ESP_PLATFORM)
   file(GLOB CMD_PLATFORM_SOURCES
@@ -30,6 +38,8 @@ elseif(CONFIG_HQ_PLATFORM_ESP OR ESP_PLATFORM)
   )
   set(CMD_PLATFORM_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/platforms/esp
+    ${CMD_OSAL_ESP_DIR}
+    ${CMD_LITTLEFS_DIR}
   )
 endif()
 
@@ -41,7 +51,7 @@ set(CMD_ALL_SOURCES
 )
 
 if(ESP_PLATFORM)
-  set(CMD_REQUIRES osal)
+  set(CMD_REQUIRES osal wifi mongoose)
   if(CONFIG_CMD_ESP_OUTPUT_UART)
     list(APPEND CMD_REQUIRES driver)
   endif()
@@ -56,5 +66,5 @@ else()
     PUBLIC ${CMD_PUBLIC_INCLUDES}
     PRIVATE ${CMD_PRIVATE_INCLUDES} ${CMD_PLATFORM_INCLUDES}
   )
-  target_link_libraries(hq_cmd PUBLIC hq_osal hq_wifi)
+  target_link_libraries(hq_cmd PUBLIC hq_osal hq_wifi hq_mongoose)
 endif()

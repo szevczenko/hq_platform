@@ -35,3 +35,22 @@ target_link_libraries(cmd_demo
 set_target_properties(cmd_demo PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
+
+add_executable(mqtt_demo
+  ${CMAKE_CURRENT_LIST_DIR}/../common/mqtt_demo.c
+)
+
+target_include_directories(mqtt_demo
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/mongoose
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/include
+  PRIVATE ${HQ_CONFIG_DIR}
+)
+
+target_link_libraries(mqtt_demo
+  hq_mongoose
+  pthread
+)
+
+set_target_properties(mqtt_demo PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)

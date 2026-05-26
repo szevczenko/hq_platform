@@ -424,18 +424,18 @@ osal_status_t wifi_hal_deinit( void )
   _stop_disconnect_timer_if_active();
   _stop_connect_timer_if_active();
 
-  pthread_mutex_destroy( &g_sim.disc_mutex );
-  pthread_cond_destroy( &g_sim.disc_cond );
-  pthread_mutex_destroy( &g_sim.conn_mutex );
-  pthread_cond_destroy( &g_sim.conn_cond );
-  pthread_mutex_destroy( &g_sim.state_mutex );
-
   pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.initialized = false;
   g_sim.started     = false;
   g_sim.connected   = false;
   g_sim.active_ap   = NULL;
   pthread_mutex_unlock( &g_sim.state_mutex );
+
+  pthread_mutex_destroy( &g_sim.disc_mutex );
+  pthread_cond_destroy( &g_sim.disc_cond );
+  pthread_mutex_destroy( &g_sim.conn_mutex );
+  pthread_cond_destroy( &g_sim.conn_cond );
+  pthread_mutex_destroy( &g_sim.state_mutex );
 
   osal_log_info( "[wifi-sim] HAL deinitialized" );
   return OSAL_SUCCESS;

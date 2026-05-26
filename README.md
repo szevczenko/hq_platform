@@ -7,6 +7,12 @@
 - pthreads (POSIX builds)
 - ESP-IDF (ESP32 builds)
 
+Initialize submodules before the first build:
+
+```bash
+git submodule update --init --recursive
+```
+
 ## Build (POSIX)
 
 ```bash

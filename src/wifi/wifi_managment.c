@@ -603,6 +603,12 @@ void wifi_mgmt_init( void )
   _update_ip_info( UPDATE_LOST_CONNECTION );
   _safe_update_sta_ip_string( "0.0.0.0" );
 
+  if ( g_ctx.config_loaded && g_ctx.sta_cfg.ssid[0] != '\0' )
+  {
+    osal_log_debug( "[wifi] saved credentials found, auto-connect enabled" );
+    g_ctx.connect_req = true;
+  }
+
   osal_task_attr_t attr;
   (void) osal_task_attributes_init( &attr );
   osal_status_t task_rc = osal_task_create( &g_wifi_task_id,
@@ -610,7 +616,7 @@ void wifi_mgmt_init( void )
                            _wifi_event_task,
                            NULL,
                            NULL,
-                           OSAL_TASK_MIN_STACK_SIZE,
+                           OSAL_TASK_MIN_STACK_SIZE * 4,
                            NORMALPRIO,
                            &attr );
   osal_log_info( "[wifi] task create rc=%d, stack=%u, prio=%u",
@@ -658,6 +664,12 @@ static bool _scan( bool block )
   if ( g_ctx.state != WIFI_APP_IDLE && g_ctx.state != WIFI_APP_READY )
   {
     return false;
+  }
+
+  /* Clear stale SCAN_DONE semaphore state from previous scans.
+   * This prevents a new blocking scan from returning immediately. */
+  while ( osal_bin_sem_timed_wait( g_ctx.scan_sem, 0 ) == OSAL_SUCCESS )
+  {
   }
 
   g_ctx.scan_in_progress = true;

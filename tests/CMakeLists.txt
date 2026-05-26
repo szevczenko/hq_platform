@@ -71,6 +71,40 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building Wi-Fi test application (wifi_tests)")
 
+  add_executable(mqtt_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/mqtt/mqtt_config_test.c
+  )
+
+  target_include_directories(mqtt_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_link_libraries(mqtt_tests
+    hq_mongoose
+    pthread
+  )
+
+  message(STATUS "Tests: Building MQTT test application (mqtt_tests)")
+
+  add_executable(mqtt_functional_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/mqtt/mqtt_functional_test.c
+  )
+
+  target_include_directories(mqtt_functional_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_link_libraries(mqtt_functional_tests
+    hq_mongoose
+    pthread
+  )
+
+  message(STATUS "Tests: Building MQTT functional test application (mqtt_functional_tests)")
+
 else()
   message(STATUS "Tests: ESP-IDF tests are built as separate projects")
 endif()
