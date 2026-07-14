@@ -1,0 +1,56 @@
+menu "Mongoose"
+
+config MQTT_DEFAULT_ADDRESS
+  string "MQTT default broker address"
+  default "mqtt://192.168.1.169:1883"
+  help
+    Default broker URL used when mqtt.json is not present.
+
+config MQTT_DEFAULT_SSL
+  bool "MQTT default SSL enabled"
+  default n
+  help
+    Default SSL mode used when mqtt.json is not present.
+
+config MQTT_DEFAULT_TOPIC_PREFIX
+  string "MQTT default topic prefix"
+  default "/config/"
+  help
+    Default MQTT topic prefix used when mqtt.json is not present.
+
+config MQTT_DEFAULT_POST_TOPIC
+  string "MQTT default post-data topic"
+  default "/post_data/"
+  help
+    Default post-data topic used when mqtt.json is not present.
+
+config MQTT_DEFAULT_USERNAME
+  string "MQTT default username"
+  default ""
+  help
+    Default MQTT username used when mqtt.json is not present.
+
+config MQTT_DEFAULT_PASSWORD
+  string "MQTT default password"
+  default ""
+  help
+    Default MQTT password used when mqtt.json is not present.
+
+config MQTT_DEFAULT_CLIENT_ID
+  string "MQTT default client ID"
+  default "hq_"
+  help
+    Default MQTT client ID used when mqtt.json is not present.
+
+config MONGOOSE_LOG_LEVEL
+  int "Mongoose log level"
+  default 2
+  range 0 4
+  help
+    0 = MG_LL_NONE
+    1 = MG_LL_ERROR
+    2 = MG_LL_INFO
+    3 = MG_LL_DEBUG
+    4 = MG_LL_VERBOSE
+
+endmenu
