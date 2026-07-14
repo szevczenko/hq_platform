@@ -573,10 +573,18 @@ static void handle_mqtt_message(struct mg_mqtt_message *mm)
 		for (int i = 0; i < MAX_SUBSCRIPTIONS; i++) {
 			if (mqtt_state.subscriptions[i].active &&
 			    mqtt_state.subscriptions[i].callback) {
+				/* Convert MQTT wildcard '+' to mg_match '*' */
+				char pattern[MQTT_APP_TOPIC_MAX_LEN];
+				strncpy(pattern,
+					mqtt_state.subscriptions[i].topic,
+					sizeof(pattern) - 1);
+				pattern[sizeof(pattern) - 1] = '\0';
+				for (char *p = pattern; *p; p++) {
+					if (*p == '+')
+						*p = '*';
+				}
 				if (mg_match(mg_str(topic_str),
-					     mg_str(mqtt_state.subscriptions[i]
-						    .topic),
-					     NULL)) {
+					     mg_str(pattern), NULL)) {
 					callback =
 						mqtt_state.subscriptions[i].callback;
 					break;
