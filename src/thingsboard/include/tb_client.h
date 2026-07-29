@@ -18,14 +18,15 @@ extern "C" {
 
 /* Maximum concurrent pending requests (attribute requests, client RPCs) */
 #define TB_MAX_PENDING_REQUESTS 8
+#define TB_CLIENT_CONFIG_STR_SIZE 128
 
 typedef struct tb_client tb_client_t;
 
 typedef struct {
-    const char *server_url;      /**< ThingsBoard MQTT URL e.g. "mqtt://host:1883" */
-    const char *access_token;    /**< Device access token (used as MQTT username) */
-    const char *client_id;       /**< MQTT client ID (NULL = use access_token) */
-    const char *device_name;     /**< Device name for logging */
+    char server_url[TB_CLIENT_CONFIG_STR_SIZE];    /**< ThingsBoard MQTT URL e.g. "mqtt://host:1883" */
+    char access_token[TB_CLIENT_CONFIG_STR_SIZE];  /**< Device access token (used as MQTT username) */
+    char client_id[TB_CLIENT_CONFIG_STR_SIZE];     /**< MQTT client ID (empty = use access_token) */
+    char device_name[TB_CLIENT_CONFIG_STR_SIZE];   /**< Device name for logging */
 } tb_client_config_t;
 
 /**

@@ -49,7 +49,6 @@ static tb_client_t *create_test_client(void)
     tb_client_config_t cfg = {
         .server_url = "mqtt://localhost:1883",
         .access_token = "test_token",
-        .client_id = NULL,
         .device_name = "test_device",
     };
 
@@ -107,7 +106,7 @@ static void test_client_init_null_params(void)
     TEST_ASSERT(ret != 0, "init with NULL client ptr fails");
 
     tb_client_t *client = NULL;
-    tb_client_config_t cfg = { .server_url = NULL, .access_token = NULL };
+    tb_client_config_t cfg = { 0 };
     ret = tb_client_init(&client, &cfg);
     TEST_ASSERT(ret != 0, "init with NULL access_token fails");
 }
@@ -283,6 +282,7 @@ static void attr_response_cb(const char *json_response, void *user_data)
     s_attr_response_received = true;
     if (json_response) {
         strncpy(s_attr_response_buf, json_response, sizeof(s_attr_response_buf) - 1);
+        s_attr_response_buf[sizeof(s_attr_response_buf) - 1] = '\0';
     }
     (void)user_data;
 }

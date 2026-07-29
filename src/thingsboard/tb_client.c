@@ -39,7 +39,7 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
     if (client == NULL || config == NULL) {
         return -1;
     }
-    if (config->access_token == NULL || config->server_url == NULL) {
+    if (config->access_token[0] == '\0' || config->server_url[0] == '\0') {
         return -1;
     }
 
@@ -49,6 +49,10 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
     }
 
     ctx->config = *config;
+    ctx->config.server_url[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
+    ctx->config.access_token[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
+    ctx->config.client_id[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
+    ctx->config.device_name[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
     ctx->request_id = 0;
     ctx->connected = false;
 
@@ -59,14 +63,14 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
 
     /* Configure the MQTT connection parameters */
     mqtt_config_init();
-    mqtt_config_set_string(config->server_url, MQTT_CONFIG_VALUE_ADDRESS);
-    mqtt_config_set_string(config->access_token, MQTT_CONFIG_VALUE_USERNAME);
+    mqtt_config_set_string(ctx->config.server_url, MQTT_CONFIG_VALUE_ADDRESS);
+    mqtt_config_set_string(ctx->config.access_token, MQTT_CONFIG_VALUE_USERNAME);
     mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD);
 
-    if (config->client_id != NULL) {
-        mqtt_config_set_string(config->client_id, MQTT_CONFIG_VALUE_CLIENT_ID);
+    if (ctx->config.client_id[0] != '\0') {
+        mqtt_config_set_string(ctx->config.client_id, MQTT_CONFIG_VALUE_CLIENT_ID);
     } else {
-        mqtt_config_set_string(config->access_token, MQTT_CONFIG_VALUE_CLIENT_ID);
+        mqtt_config_set_string(ctx->config.access_token, MQTT_CONFIG_VALUE_CLIENT_ID);
     }
 
     mqtt_app_set_connect_callback(on_connect);

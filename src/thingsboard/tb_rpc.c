@@ -184,9 +184,10 @@ int tb_rpc_request(tb_client_t *client, const char *method,
 
     /* Subscribe to response topic if not already */
     if (!s_client_rpc_subscribed) {
+        uint32_t subscribe_timeout = timeout_ms > 0 ? timeout_ms : TB_RPC_TIMEOUT_MS;
         int ret = tb_client_subscribe(client, TB_RPC_CLIENT_RESP_SUB,
                                       client_rpc_response_handler,
-                                      TB_RPC_TIMEOUT_MS);
+                                      subscribe_timeout);
         if (ret != 0) {
             return ret;
         }
@@ -196,6 +197,8 @@ int tb_rpc_request(tb_client_t *client, const char *method,
     uint32_t req_id = tb_client_get_next_request_id(client);
 
     /* Register pending request */
+    /* TODO(osal): use timed mutex lock once OSAL exposes mutex take with timeout.
+     * This path should respect timeout_ms instead of blocking indefinitely. */
     osal_mutex_take(s_rpc_mutex);
     int slot = -1;
     for (int i = 0; i < TB_RPC_MAX_PENDING; i++) {
@@ -214,6 +217,9 @@ int tb_rpc_request(tb_client_t *client, const char *method,
     s_rpc_pending[slot].user_data = user_data;
     s_rpc_pending[slot].active = true;
     osal_mutex_give(s_rpc_mutex);
+
+    /* TODO(thingsboard): enforce RPC response timeout_ms for pending slots.
+     * Currently timeout_ms is used for subscribe timing and lock TODO only. */
 
     /* Build request JSON: {"method":"name","params":{...}} */
     cJSON *root = cJSON_CreateObject();

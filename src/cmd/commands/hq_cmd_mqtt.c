@@ -13,9 +13,9 @@
 #include <string.h>
 
 #include "hq_cmd.h"
-#include "mongoose_process.h"
 #include "mqtt_app.h"
 #include "mqtt_config.h"
+#include "osal_file.h"
 
 static bool g_mqtt_initialized = false;
 static char g_out[512];
@@ -48,7 +48,34 @@ static bool has_option(const char *args, const char *option)
   return hq_cmd_find_token(args, option) != 0;
 }
 
+static bool read_cert_from_file(const char *path, char *buf, size_t buf_size)
+{
+  if (!path || !buf || buf_size < 2)
+    return false;
 
+  osal_fstat_t st = { 0 };
+  osal_file_id_t fd;
+  int32_t n;
+
+  if (osal_stat(path, &st) != OSAL_SUCCESS || st.file_size == 0)
+    return false;
+
+  fd = osal_open_create(path, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
+  if (fd < 0)
+    return false;
+
+  if (st.file_size >= buf_size)
+    st.file_size = buf_size - 1;
+
+  n = osal_read(fd, buf, st.file_size);
+  (void)osal_close(fd);
+
+  if (n <= 0)
+    return false;
+
+  buf[n] = '\0';
+  return true;
+}
 
 static void cmd_help(void)
 {
@@ -66,9 +93,9 @@ static void cmd_help(void)
   hq_cmd_print("  mqtt --set-post-topic <topic>                 Set post topic");
   hq_cmd_print("  mqtt --set-ssl <0|1>                          Set SSL usage");
   hq_cmd_print("  mqtt --set-skip-verify <0|1>                  Skip TLS cert verification");
-  hq_cmd_print("  mqtt --set-cert <filepath>                    Set CA cert file path");
-  hq_cmd_print("  mqtt --set-client-cert <filepath>             Set client cert file path");
-  hq_cmd_print("  mqtt --set-client-key <filepath>              Set client key file path");
+  hq_cmd_print("  mqtt --set-cert <filepath>                    Load CA cert from file");
+  hq_cmd_print("  mqtt --set-client-cert <filepath>             Load client cert from file");
+  hq_cmd_print("  mqtt --set-client-key <filepath>              Load client key from file");
   hq_cmd_print("  mqtt --save                                   Save mqtt.json + cert file");
 }
 
@@ -90,27 +117,25 @@ static void cmd_show(void)
   print_line("post topic:  %s", mqtt_config_get_string(MQTT_CONFIG_VALUE_POST_DATA_TOPIC));
   print_line("ssl:         %s", ssl ? "enabled" : "disabled");
   print_line("skip_verify: %s", skip_verify ? "yes" : "no");
-  {
-    mqtt_cert_source_t src = MQTT_CERT_SOURCE_NONE;
-    const char *val = NULL;
-    (void)mqtt_config_get_cert_source(&src, &val, MQTT_CONFIG_VALUE_CERT);
-    if (src == MQTT_CERT_SOURCE_FILE_PATH)
-      print_line("cert:        file_path: %s", val);
-    else if (src == MQTT_CERT_SOURCE_RAW)
-      print_line("cert:        raw (loaded)");
-    else
-      print_line("cert:        (none)");
-  }
+  print_line("cert:        %s",
+             strlen(mqtt_config_get_cert(MQTT_CONFIG_VALUE_CERT)) > 0
+               ? "loaded" : "empty");
 }
 
-static void cmd_set_cert_path(const char *path, mqtt_config_value_t key,
-                              const char *label)
+static void cmd_set_cert_from_file(const char *path, mqtt_config_value_t key,
+                                   const char *label)
 {
-  if (!mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH, path, key)) {
-    print_line("Failed to resolve %s from: %s", label, path);
+  static char cert_buf[MQTT_CERT_MAX_SIZE];
+
+  if (!read_cert_from_file(path, cert_buf, sizeof(cert_buf))) {
+    print_line("Failed to read file: %s", path);
     return;
   }
-  print_line("%s set to: %s", label, path);
+  if (!mqtt_config_set_cert_source(MQTT_CERT_SOURCE_RAW, cert_buf, key)) {
+    print_line("Failed to apply %s", label);
+    return;
+  }
+  print_line("%s loaded from %s", label, path);
 }
 
 static void cmd_set(const char *args)
@@ -160,15 +185,15 @@ static void cmd_set(const char *args)
     return;
   }
   if ((value = find_option_value(args, "--set-cert"))) {
-    cmd_set_cert_path(value, MQTT_CONFIG_VALUE_CERT, "CA cert");
+    cmd_set_cert_from_file(value, MQTT_CONFIG_VALUE_CERT, "CA cert");
     return;
   }
   if ((value = find_option_value(args, "--set-client-cert"))) {
-    cmd_set_cert_path(value, MQTT_CONFIG_VALUE_CLIENT_CERT, "Client cert");
+    cmd_set_cert_from_file(value, MQTT_CONFIG_VALUE_CLIENT_CERT, "Client cert");
     return;
   }
   if ((value = find_option_value(args, "--set-client-key"))) {
-    cmd_set_cert_path(value, MQTT_CONFIG_VALUE_CLIENT_KEY, "Client key");
+    cmd_set_cert_from_file(value, MQTT_CONFIG_VALUE_CLIENT_KEY, "Client key");
     return;
   }
 
@@ -226,14 +251,12 @@ static void hq_cmd_mqtt_handler(hq_cmd_cli_t *cli, char *args, void *context)
   }
 
   if (has_option(args, "--start")) {
-    MongooseProcess_Init();
     mqtt_config_init();
     mqtt_app_init();
     g_mqtt_initialized = true;
     hq_cmd_print("MQTT started.");
   } else if (has_option(args, "--stop")) {
     mqtt_app_deinit();
-    MongooseProcess_Deinit();
     g_mqtt_initialized = false;
     hq_cmd_print("MQTT stopped.");
   } else if (has_option(args, "--status")) {

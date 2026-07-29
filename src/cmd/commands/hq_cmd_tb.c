@@ -96,12 +96,10 @@ static void cmd_connect(const char *args)
         return;
     }
 
-    tb_client_config_t cfg = {
-        .server_url = url,
-        .access_token = token,
-        .client_id = NULL,
-        .device_name = "cli_device",
-    };
+    tb_client_config_t cfg = { 0 };
+    (void)snprintf(cfg.server_url, sizeof(cfg.server_url), "%s", url);
+    (void)snprintf(cfg.access_token, sizeof(cfg.access_token), "%s", token);
+    (void)snprintf(cfg.device_name, sizeof(cfg.device_name), "%s", "cli_device");
 
     if (tb_client_init(&s_client, &cfg) != 0) {
         hq_cmd_print("Failed to initialize TB client.");

@@ -34,6 +34,8 @@ osal_status_t osal_mutex_delete(osal_mutex_id_t mutex_id);
  * @retval OSAL_SEM_FAILURE   Operation failed
  * @note Must NOT be called from ISR context
  * @note Only the task that took the mutex may give it back
+ * @todo Add osal_mutex_take_timeout(mutex_id, timeout_ms) so callers can
+ *       avoid unbounded blocking and propagate timeout behavior.
  */
 osal_status_t osal_mutex_take(osal_mutex_id_t mutex_id);
 

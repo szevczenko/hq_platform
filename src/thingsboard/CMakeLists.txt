@@ -37,7 +37,6 @@ else()
   endif()
 
   target_link_libraries(hq_thingsboard
-    PUBLIC hq_osal
-    PRIVATE hq_mongoose hq_cjson
+    PUBLIC hq_osal hq_mongoose hq_cjson
   )
 endif()

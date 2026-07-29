@@ -202,13 +202,6 @@ bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
     }
 }
 
-bool mqtt_config_set_int(int value, mqtt_config_value_t key)
-{
-    (void)value;
-    (void)key;
-    return true;
-}
-
 bool mqtt_config_set_bool(bool value, mqtt_config_value_t key)
 {
     (void)value;
@@ -223,13 +216,6 @@ bool mqtt_config_set_cert_source(mqtt_cert_source_t source, const char *value,
     (void)value;
     (void)key;
     return true;
-}
-
-bool mqtt_config_get_int(int *value, mqtt_config_value_t key)
-{
-    (void)value;
-    (void)key;
-    return false;
 }
 
 bool mqtt_config_get_bool(bool *value, mqtt_config_value_t key)
