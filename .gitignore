@@ -7,3 +7,6 @@
 .config.old
 *.code-workspace
 **/.vscode
+scripts/output/**
+*.littlefs
+api_key

@@ -48,7 +48,7 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
         return -1;
     }
 
-    ctx->config = *config;
+    memcpy(&ctx->config, config, sizeof(*config));
     ctx->config.server_url[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
     ctx->config.access_token[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
     ctx->config.client_id[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';

@@ -111,3 +111,63 @@ target_link_libraries(thingboard_rgb_lamp
 set_target_properties(thingboard_rgb_lamp PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
+
+# -- thingboard_firmware_update_demo example --
+# Configure via cmake -D flags:
+#   -DFW_DEMO_CLIENT_ID="my_fw_device"
+#   -DFW_DEMO_USERNAME="token"
+#   -DFW_DEMO_PASSWORD="pass"
+#   -DFW_DEMO_DEVICE_NAME="FW Device"
+#   -DFW_DEMO_MQTT_URL="mqtt://broker:1883"
+#   -DFW_DEMO_CHECK_PERIOD_MS=10000
+#   -DFW_DEMO_RECONNECT_DELAY_MS=3000
+#   -DFW_DEMO_CHUNK_SIZE=1024
+
+add_executable(thingboard_firmware_update_demo
+  ${CMAKE_CURRENT_LIST_DIR}/../common/thingboard_firmware_update_demo.c
+)
+
+target_include_directories(thingboard_firmware_update_demo
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/thingsboard/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/mongoose
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/posix
+  PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+  PRIVATE ${HQ_CONFIG_DIR}
+)
+
+if(DEFINED FW_DEMO_CLIENT_ID)
+  target_compile_definitions(thingboard_firmware_update_demo PRIVATE CONFIG_FW_DEMO_CLIENT_ID="${FW_DEMO_CLIENT_ID}")
+endif()
+if(DEFINED FW_DEMO_USERNAME)
+  target_compile_definitions(thingboard_firmware_update_demo PRIVATE CONFIG_FW_DEMO_USERNAME="${FW_DEMO_USERNAME}")
+endif()
+if(DEFINED FW_DEMO_PASSWORD)
+  target_compile_definitions(thingboard_firmware_update_demo PRIVATE CONFIG_FW_DEMO_PASSWORD="${FW_DEMO_PASSWORD}")
+endif()
+if(DEFINED FW_DEMO_DEVICE_NAME)
+  target_compile_definitions(thingboard_firmware_update_demo PRIVATE CONFIG_FW_DEMO_DEVICE_NAME="${FW_DEMO_DEVICE_NAME}")
+endif()
+if(DEFINED FW_DEMO_MQTT_URL)
+  target_compile_definitions(thingboard_firmware_update_demo PRIVATE CONFIG_FW_DEMO_MQTT_URL="${FW_DEMO_MQTT_URL}")
+endif()
+if(DEFINED FW_DEMO_CHECK_PERIOD_MS)
+  target_compile_definitions(thingboard_firmware_update_demo PRIVATE CONFIG_FW_DEMO_CHECK_PERIOD_MS=${FW_DEMO_CHECK_PERIOD_MS})
+endif()
+if(DEFINED FW_DEMO_RECONNECT_DELAY_MS)
+  target_compile_definitions(thingboard_firmware_update_demo PRIVATE CONFIG_FW_DEMO_RECONNECT_DELAY_MS=${FW_DEMO_RECONNECT_DELAY_MS})
+endif()
+if(DEFINED FW_DEMO_CHUNK_SIZE)
+  target_compile_definitions(thingboard_firmware_update_demo PRIVATE CONFIG_FW_DEMO_CHUNK_SIZE=${FW_DEMO_CHUNK_SIZE})
+endif()
+
+target_link_libraries(thingboard_firmware_update_demo
+  hq_thingsboard
+  hq_mongoose
+  hq_cjson
+  pthread
+)
+
+set_target_properties(thingboard_firmware_update_demo PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)

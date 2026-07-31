@@ -9,6 +9,7 @@ set(TB_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/tb_rpc.c
   ${CMAKE_CURRENT_SOURCE_DIR}/tb_provision.c
   ${CMAKE_CURRENT_SOURCE_DIR}/tb_claim.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/tb_firmware_update.c
 )
 
 if(ESP_PLATFORM)

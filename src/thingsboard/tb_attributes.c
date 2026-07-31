@@ -82,8 +82,12 @@ static bool ensure_owner_client(tb_client_t *client)
 	}
 
 	if (s_owner_client != client) {
-		osal_log_error("[tb_attr] Multiple tb_client instances are not supported");
-		return false;
+		/* Rebind module state to a new client session. This keeps attribute
+		 * subscriptions functional after reconnect/re-init cycles. */
+		s_owner_client = client;
+		s_response_subscribed = false;
+		s_shared_subscribed = false;
+		memset(s_pending, 0, sizeof(s_pending));
 	}
 
 	return true;
@@ -214,15 +218,20 @@ int tb_attributes_send_json(tb_client_t *client, const char *json)
 
 static int subscribe_response_topic(tb_client_t *client)
 {
-	if (s_response_subscribed) {
-		return 0;
-	}
 	int ret = tb_client_subscribe(client, TB_ATTRIBUTE_RESPONSE_SUB,
 				      attr_response_handler,
 				      TB_ATTR_REQUEST_TIMEOUT_MS);
 	if (ret == 0) {
 		s_response_subscribed = true;
+		return 0;
 	}
+
+	/* If internal state says subscribed but broker rejected duplicate
+	 * subscription attempt, proceed with existing subscription. */
+	if (s_response_subscribed) {
+		return 0;
+	}
+
 	return ret;
 }
 
@@ -359,7 +368,13 @@ int tb_attributes_subscribe(tb_client_t *client, tb_shared_attribute_cb_t cb,
 					      TB_ATTR_REQUEST_TIMEOUT_MS);
 		if (ret == 0) {
 			s_shared_subscribed = true;
+			return 0;
 		}
+
+		if (s_shared_subscribed) {
+			return 0;
+		}
+
 		return ret;
 	}
 	return 0;

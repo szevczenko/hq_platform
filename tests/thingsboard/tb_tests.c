@@ -15,6 +15,7 @@
 #include "tb_rpc.h"
 #include "tb_provision.h"
 #include "tb_claim.h"
+#include "tb_firmware_update.h"
 #include "mqtt_app_mock.h"
 #include "cJSON.h"
 
@@ -590,6 +591,109 @@ static void test_claim_device_no_secret(void)
 }
 
 /* ============================================================
+ * Test: Firmware Update
+ * ============================================================ */
+static bool s_fw_applied_called = false;
+static char s_fw_applied_title[128] = {0};
+static char s_fw_applied_version[128] = {0};
+
+static void fw_applied_cb(const char *new_title, const char *new_version,
+                          void *user_data)
+{
+    s_fw_applied_called = true;
+    if (new_title != NULL) {
+        strncpy(s_fw_applied_title, new_title, sizeof(s_fw_applied_title) - 1);
+    }
+    if (new_version != NULL) {
+        strncpy(s_fw_applied_version, new_version,
+                sizeof(s_fw_applied_version) - 1);
+    }
+    (void)user_data;
+}
+
+static int find_last_publish_with_prefix(const char *prefix)
+{
+    for (int i = mock_publish_count - 1; i >= 0; i--) {
+        if (strncmp(mock_publishes[i].topic, prefix, strlen(prefix)) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void test_firmware_update_flow(void)
+{
+    TEST_START("Firmware Update Flow");
+    tb_client_t *client = create_test_client();
+    TEST_ASSERT(client != NULL, "client created");
+
+    s_fw_applied_called = false;
+    memset(s_fw_applied_title, 0, sizeof(s_fw_applied_title));
+    memset(s_fw_applied_version, 0, sizeof(s_fw_applied_version));
+
+    tb_firmware_update_config_t cfg = {
+        .current_title = "hq_platform.bin",
+        .current_version = "1.0.0",
+        .chunk_size = 4,
+        .on_applied = fw_applied_cb,
+        .user_data = NULL,
+    };
+
+    int ret = tb_firmware_update_init(client, &cfg);
+    TEST_ASSERT(ret == 0, "firmware update init succeeds");
+
+    mock_publish_count = 0;
+
+    ret = tb_firmware_update_request_check(client);
+    TEST_ASSERT(ret == 0, "firmware attribute check request succeeds");
+
+    /* Request ID from tb_client starts at 1 in this test setup. */
+    const char *fw_meta =
+        "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
+        "\"fw_version\":\"1.1.0\","
+        "\"fw_checksum\":\"dummy\","
+        "\"fw_checksum_algorithm\":\"SHA256\","
+        "\"fw_size\":8}}";
+    mqtt_app_mock_deliver_message("v1/devices/me/attributes/response/1",
+                                  fw_meta, strlen(fw_meta));
+
+    int req_idx = find_last_publish_with_prefix("v2/fw/request/");
+    TEST_ASSERT(req_idx >= 0, "firmware chunk request was published");
+
+    uint32_t req_id = 0;
+    if (req_idx >= 0) {
+        sscanf(mock_publishes[req_idx].topic, "v2/fw/request/%u/chunk/0", &req_id);
+    }
+    TEST_ASSERT(req_id > 0, "firmware request id parsed");
+
+    char chunk_topic[128];
+    snprintf(chunk_topic, sizeof(chunk_topic),
+             "v2/fw/response/%u/chunk/0", req_id);
+    mqtt_app_mock_deliver_message(chunk_topic, "ABCD", 4);
+
+    int req_idx_chunk1 = find_last_publish_with_prefix("v2/fw/request/");
+    TEST_ASSERT(req_idx_chunk1 >= 0, "next chunk request published");
+    TEST_ASSERT(strstr(mock_publishes[req_idx_chunk1].topic, "/chunk/1") != NULL,
+                "requested second firmware chunk");
+
+    snprintf(chunk_topic, sizeof(chunk_topic),
+             "v2/fw/response/%u/chunk/1", req_id);
+    mqtt_app_mock_deliver_message(chunk_topic, "EFGH", 4);
+
+    TEST_ASSERT(tb_firmware_update_is_in_progress() == false,
+                "firmware update completed");
+    TEST_ASSERT(s_fw_applied_called == true,
+                "firmware applied callback called");
+    TEST_ASSERT(strcmp(s_fw_applied_title, "hq_platform.bin") == 0,
+                "applied title updated");
+    TEST_ASSERT(strcmp(s_fw_applied_version, "1.1.0") == 0,
+                "applied version updated");
+
+    tb_firmware_update_deinit(client);
+    destroy_test_client(client);
+}
+
+/* ============================================================
  * Main
  * ============================================================ */
 #ifdef ESP_PLATFORM
@@ -630,6 +734,9 @@ int main(void)
     /* Claiming */
     test_claim_device();
     test_claim_device_no_secret();
+
+    /* Firmware update */
+    test_firmware_update_flow();
 
     printf("\n==================================================\n");
     printf("              TEST SUMMARY                       \n");
