@@ -1,0 +1,15 @@
+menu "ThingsBoard RGB Lamp Example"
+
+config WIFI_SSID
+  string "WiFi SSID"
+  default "wifi_test"
+  help
+    WiFi access point SSID
+
+config WIFI_PASSWORD
+  string "WIFI password"
+  default "12345678"
+  help
+    WiFi access point password
+
+endmenu

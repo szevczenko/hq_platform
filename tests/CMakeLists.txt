@@ -105,6 +105,45 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building MQTT functional test application (mqtt_functional_tests)")
 
+  # ---- ThingsBoard client tests (uses mock MQTT) ----
+  set(TB_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thingsboard)
+  set(TB_SRC_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/../src/thingsboard)
+
+  add_executable(tb_tests
+    ${TB_TEST_DIR}/tb_tests.c
+    ${TB_TEST_DIR}/mqtt_app_mock.c
+    # ThingsBoard module sources (linked against mock, not real mqtt_app)
+    ${TB_SRC_DIR}/tb_client.c
+    ${TB_SRC_DIR}/tb_telemetry.c
+    ${TB_SRC_DIR}/tb_attributes.c
+    ${TB_SRC_DIR}/tb_rpc.c
+    ${TB_SRC_DIR}/tb_provision.c
+    ${TB_SRC_DIR}/tb_claim.c
+  )
+
+  target_include_directories(tb_tests
+    PRIVATE ${TB_SRC_DIR}/include
+    PRIVATE ${TB_TEST_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+    PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  if(CONFIG_HQ_PLATFORM_POSIX)
+    target_include_directories(tb_tests
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+    )
+  endif()
+
+  target_link_libraries(tb_tests
+    hq_osal
+    hq_cjson
+    pthread
+  )
+
+  message(STATUS "Tests: Building ThingsBoard test application (tb_tests)")
+
 else()
   message(STATUS "Tests: ESP-IDF tests are built as separate projects")
 endif()

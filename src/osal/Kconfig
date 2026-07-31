@@ -1,0 +1,13 @@
+menu "OSAL"
+
+config OSAL_LOG_LEVEL
+  int "OSAL log level"
+  default 3
+  range 0 3
+  help
+    0 = DEBUG
+    1 = INFO
+    2 = WARNING
+    3 = ERROR
+
+endmenu
