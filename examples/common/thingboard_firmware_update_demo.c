@@ -110,7 +110,7 @@ int main_function(void)
     mqtt_config_set_string(FW_DEMO_PASSWORD, MQTT_CONFIG_VALUE_PASSWORD);
 
     tb_firmware_update_config_t fw_cfg = {
-        .current_title = "hq_platform.bin",
+        .current_title = "test_update_fw",
         .current_version = "1.0.0",
         .chunk_size = FW_DEMO_CHUNK_SIZE,
         .on_applied = on_fw_applied,

@@ -1,5 +1,5 @@
 #
-# configure.cmake — Generate hq_config.h from Kconfig + a defconfig file
+# configure.cmake — Generate C and CMake configuration from Kconfig + a defconfig file
 #
 # Required input (must be set before including this file):
 #   HQ_DEFCONFIG    — absolute path to the defconfig file
@@ -8,6 +8,7 @@
 # Outputs:
 #   HQ_CONFIG_DIR   — directory containing the generated header
 #   HQ_CONFIG_HEADER — full path to hq_config.h
+#   HQ_CONFIG_CMAKE — full path to the generated CMake configuration fragment
 #
 
 if(NOT DEFINED HQ_DEFCONFIG OR HQ_DEFCONFIG STREQUAL "")
@@ -41,6 +42,7 @@ endif()
 
 file(MAKE_DIRECTORY "${HQ_CONFIG_DIR}")
 set(HQ_CONFIG_HEADER "${HQ_CONFIG_DIR}/hq_config.h")
+set(HQ_CONFIG_CMAKE "${HQ_CONFIG_DIR}/hq_config.cmake")
 
 # Run genconfig
 execute_process(
@@ -63,8 +65,29 @@ if(NOT _genconfig_result EQUAL 0)
       "Consider using a virtual environment or scripts/menuconfig.sh if needed.")
 endif()
 
+execute_process(
+  COMMAND ${_hq_python}
+    ${HQ_REPO_ROOT}/scripts/genconfig_cmake.py
+    ${HQ_REPO_ROOT}/Kconfig
+    ${HQ_DEFCONFIG}
+    ${HQ_CONFIG_CMAKE}
+  WORKING_DIRECTORY ${HQ_REPO_ROOT}
+  RESULT_VARIABLE _hq_cmake_config_result
+  OUTPUT_VARIABLE _hq_cmake_config_stdout
+  ERROR_VARIABLE _hq_cmake_config_stderr
+)
+if(NOT _hq_cmake_config_result EQUAL 0)
+  message(FATAL_ERROR
+    "CMake configuration generation failed for ${HQ_DEFCONFIG}\n"
+    "stdout:\n${_hq_cmake_config_stdout}\n"
+    "stderr:\n${_hq_cmake_config_stderr}\n")
+endif()
+
 # Clean up local variables
 unset(_hq_python)
 unset(_genconfig_result)
 unset(_genconfig_stdout)
 unset(_genconfig_stderr)
+unset(_hq_cmake_config_result)
+unset(_hq_cmake_config_stdout)
+unset(_hq_cmake_config_stderr)

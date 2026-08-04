@@ -16,6 +16,14 @@ typedef struct {
     size_t total_size;
 } osal_ota_descriptor_t;
 
+/**
+ * @brief Initialize OTA subsystem for current boot.
+ *
+ * On ESP targets this confirms a newly booted OTA image when rollback is
+ * enabled and the image is in pending-verify state.
+ */
+osal_status_t osal_ota_init(void);
+
 osal_status_t osal_ota_begin(const osal_ota_descriptor_t *descriptor);
 osal_status_t osal_ota_write(const uint8_t *data, size_t len);
 osal_status_t osal_ota_finish(bool apply_update);

@@ -12,6 +12,11 @@ typedef struct {
 
 static osal_ota_ctx_t s_ota_ctx;
 
+osal_status_t osal_ota_init(void)
+{
+    return OSAL_SUCCESS;
+}
+
 osal_status_t osal_ota_begin(const osal_ota_descriptor_t *descriptor)
 {
     if (descriptor == NULL) {

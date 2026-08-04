@@ -226,12 +226,6 @@ static int subscribe_response_topic(tb_client_t *client)
 		return 0;
 	}
 
-	/* If internal state says subscribed but broker rejected duplicate
-	 * subscription attempt, proceed with existing subscription. */
-	if (s_response_subscribed) {
-		return 0;
-	}
-
 	return ret;
 }
 
@@ -368,10 +362,6 @@ int tb_attributes_subscribe(tb_client_t *client, tb_shared_attribute_cb_t cb,
 					      TB_ATTR_REQUEST_TIMEOUT_MS);
 		if (ret == 0) {
 			s_shared_subscribed = true;
-			return 0;
-		}
-
-		if (s_shared_subscribed) {
 			return 0;
 		}
 
