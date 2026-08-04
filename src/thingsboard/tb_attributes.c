@@ -17,10 +17,8 @@
 #include "osal_mutex.h"
 #include "osal_timer.h"
 
-
-
-#define TB_ATTRIBUTE_TOPIC          "v1/devices/me/attributes"
-#define TB_ATTRIBUTE_REQUEST_TOPIC  "v1/devices/me/attributes/request/%"PRIu32
+#define TB_ATTRIBUTE_TOPIC "v1/devices/me/attributes"
+#define TB_ATTRIBUTE_REQUEST_TOPIC "v1/devices/me/attributes/request/%" PRIu32
 #define TB_ATTRIBUTE_RESPONSE_TOPIC "v1/devices/me/attributes/response/"
 #define TB_ATTRIBUTE_RESPONSE_SUB "v1/devices/me/attributes/response/+"
 
@@ -82,8 +80,18 @@ static bool ensure_owner_client(tb_client_t *client)
 	}
 
 	if (s_owner_client != client) {
-		osal_log_error("[tb_attr] Multiple tb_client instances are not supported");
-		return false;
+		/* Rebind module state to a new client session. This keeps attribute
+		 * subscriptions functional after reconnect/re-init cycles. */
+		s_owner_client = client;
+		s_response_subscribed = false;
+		s_shared_subscribed = false;
+		if (s_pending_init) {
+			osal_mutex_take(s_pending_mutex);
+			memset(s_pending, 0, sizeof(s_pending));
+			osal_mutex_give(s_pending_mutex);
+		} else {
+			memset(s_pending, 0, sizeof(s_pending));
+		}
 	}
 
 	return true;
@@ -148,6 +156,25 @@ static int send_kv_attribute(tb_client_t *client, cJSON *root)
 	int ret = tb_client_publish(client, TB_ATTRIBUTE_TOPIC, json);
 	cJSON_free(json);
 	return ret;
+}
+
+void tb_attributes_deinit(tb_client_t *client)
+{
+	if (client == NULL || client != s_owner_client) {
+		return;
+	}
+
+	if (s_pending_init) {
+		osal_mutex_take(s_pending_mutex);
+		memset(s_pending, 0, sizeof(s_pending));
+		osal_mutex_give(s_pending_mutex);
+	}
+
+	s_response_subscribed = false;
+	s_shared_subscribed = false;
+	s_shared_cb = NULL;
+	s_shared_user_data = NULL;
+	s_owner_client = NULL;
 }
 
 int tb_attributes_send_int(tb_client_t *client, const char *key, int64_t value)
@@ -217,12 +244,15 @@ static int subscribe_response_topic(tb_client_t *client)
 	if (s_response_subscribed) {
 		return 0;
 	}
+
 	int ret = tb_client_subscribe(client, TB_ATTRIBUTE_RESPONSE_SUB,
 				      attr_response_handler,
 				      TB_ATTR_REQUEST_TIMEOUT_MS);
 	if (ret == 0) {
 		s_response_subscribed = true;
+		return 0;
 	}
+
 	return ret;
 }
 
@@ -359,7 +389,9 @@ int tb_attributes_subscribe(tb_client_t *client, tb_shared_attribute_cb_t cb,
 					      TB_ATTR_REQUEST_TIMEOUT_MS);
 		if (ret == 0) {
 			s_shared_subscribed = true;
+			return 0;
 		}
+
 		return ret;
 	}
 	return 0;

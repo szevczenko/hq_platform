@@ -611,16 +611,17 @@ void wifi_mgmt_init( void )
 
   osal_task_attr_t attr;
   (void) osal_task_attributes_init( &attr );
+  size_t stack_size = OSAL_TASK_MIN_STACK_SIZE * 4;
   osal_status_t task_rc = osal_task_create( &g_wifi_task_id,
                            "wifi_task",
                            _wifi_event_task,
                            NULL,
                            NULL,
-                           OSAL_TASK_MIN_STACK_SIZE * 4,
+                           stack_size,
                            NORMALPRIO,
                            &attr );
-  osal_log_info( "[wifi] task create rc=%d, stack=%u, prio=%u",
-                 (int) task_rc, (unsigned) OSAL_TASK_MIN_STACK_SIZE, (unsigned) NORMALPRIO );
+  osal_log_info( "[wifi] task create rc=%d, stack=%zu, prio=%u",
+                 (int) task_rc, stack_size, (unsigned) NORMALPRIO );
   if ( task_rc != OSAL_SUCCESS )
   {
     osal_log_error( "[wifi] FAILED to create wifi_task (rc=%d)", (int) task_rc );

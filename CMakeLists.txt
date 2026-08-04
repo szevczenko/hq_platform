@@ -12,12 +12,22 @@ endif()
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/modules.cmake)
-
 option(HQ_BUILD_TESTS "Build tests" OFF)
 option(HQ_BUILD_EXAMPLES "Build examples" OFF)
 option(HQ_BUILD_TOOLS "Build host tools" OFF)
 set(HQ_DEFCONFIG "" CACHE FILEPATH "Path to defconfig file")
+set(HQ_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}")
+
+if(NOT DEFINED HQ_DEFCONFIG OR HQ_DEFCONFIG STREQUAL "")
+  if(ESP_PLATFORM)
+    message(WARNING "HQ_DEFCONFIG is not defined. Using default defconfig for ESP platform.")
+    set(HQ_DEFCONFIG "${HQ_REPO_ROOT}/defconfig/esp.defconfig")
+  endif()
+endif()
+
+# Generate and load project configuration before configuration-dependent logic.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/configure.cmake)
+include(${HQ_CONFIG_CMAKE})
 
 if(NOT ESP_PLATFORM)
   if(CONFIG_HQ_PLATFORM_POSIX AND CONFIG_HQ_PLATFORM_ESP)
@@ -29,6 +39,8 @@ if(NOT ESP_PLATFORM)
   endif()
 endif()
 
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/modules.cmake)
+
 if(NOT ESP_PLATFORM)
   if(CONFIG_HQ_PLATFORM_POSIX)
     include(cmake/posix.cmake)
@@ -36,16 +48,6 @@ if(NOT ESP_PLATFORM)
     include(cmake/esp.cmake)
   endif()
 endif()
-
-# Generate hq_config.h from defconfig
-set(HQ_REPO_ROOT "${CMAKE_CURRENT_LIST_DIR}")
-if(NOT DEFINED HQ_DEFCONFIG OR HQ_DEFCONFIG STREQUAL "")
-  if(ESP_PLATFORM)
-    message(WARNING "HQ_DEFCONFIG is not defined. Using default defconfig for ESP platform.")
-    set(HQ_DEFCONFIG "${HQ_REPO_ROOT}/defconfig/esp.defconfig")
-  endif()
-endif()
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/configure.cmake)
 
 if(ESP_PLATFORM)
   # For ESP-IDF, components are registered in their own CMakeLists.txt

@@ -78,6 +78,78 @@ Replace `/dev/ttyUSB0` with your actual serial port.
 
 ---
 
+### thingboard_firmware_update_test.sh
+
+Purpose: End-to-end firmware update test flow against local ThingsBoard 4.3.
+
+Features:
+- Optionally starts the local docker compose stack from docker/thingboard.
+- Validates REST API availability with API key authentication.
+- Creates or reuses a test device.
+- Resolves device access token.
+- Generates dummy firmware binary.
+- Creates OTA package metadata and uploads package bytes.
+- Assigns firmware package to the selected device.
+- Builds and runs the firmware update demo application.
+- Fetches firmware telemetry and writes run artifacts.
+
+Usage from PowerShell:
+
+```bash
+wsl.exe bash -lc "cd /mnt/c/projekty/hq_platform; bash scripts/thingboard_firmware_update_test.sh"
+```
+
+Main environment overrides:
+- TB_URL (default: http://127.0.0.1:8080)
+- TB_API_KEY_FILE (default: docker/thingboard/api_key)
+- TB_USERNAME and TB_PASSWORD (optional JWT fallback when API key lacks tenant-admin scope)
+- TB_FW_DEVICE_NAME
+- TB_FW_TITLE
+- TB_FW_VERSION
+- TB_FW_SIZE_BYTES
+- TB_FW_RUN_SECONDS
+- TB_FW_START_STACK (1 to start docker compose, 0 to skip)
+
+Output:
+- Root folder: scripts/output/firmware_update
+- One timestamped subfolder per run with:
+    - run.log
+    - demo_runtime.log
+    - summary.txt
+    - json/*.json snapshots from REST operations
+
+Auth note:
+- This script needs tenant-level privileges to create OTA package, upload package data, and assign firmware to device.
+- If API key in docker/thingboard/api_key is restricted, set TB_USERNAME and TB_PASSWORD for a tenant admin account.
+
+---
+
+### thingboard_firmware_update_quick.sh
+
+Purpose: Fast repeat run for firmware update validation during development.
+
+What it does:
+- Wraps `thingboard_firmware_update_test.sh`.
+- Uses faster defaults:
+    - `TB_FW_START_STACK=0` (do not restart docker stack)
+    - `TB_FW_RUN_SECONDS=20`
+    - `TB_FW_SIZE_BYTES=4096`
+    - auto-generated unique `TB_FW_VERSION`
+
+Usage from PowerShell:
+
+```bash
+wsl.exe bash -lc "cd /mnt/c/projekty/hq_platform; bash scripts/thingboard_firmware_update_quick.sh"
+```
+
+Optional override example:
+
+```bash
+wsl.exe bash -lc "cd /mnt/c/projekty/hq_platform; TB_FW_RUN_SECONDS=30 TB_FW_START_STACK=1 bash scripts/thingboard_firmware_update_quick.sh"
+```
+
+---
+
 ### menuconfig.sh
 
 **Purpose:** Open the project Kconfig menu on Linux using Python `kconfiglib`
@@ -134,6 +206,7 @@ Both scripts use all available CPU cores for faster compilation:
 - **Docker daemon not running:** Start Docker service
 - **Permission denied on Docker:** Add user to docker group: `sudo usermod -aG docker $USER`
 - **Image pull timeout:** Retry the script (images are cached after first pull)
+- **Firmware update script fails at API call:** Verify ThingsBoard stack is running and API key in `docker/thingboard/api_key` is valid
 
 ---
 

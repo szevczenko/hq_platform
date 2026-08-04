@@ -14,6 +14,7 @@
 #include "mqtt_config.h"
 #include "osal_mutex.h"
 #include "osal_log.h"
+#include "tb_attributes.h"
 
 struct tb_client {
     tb_client_config_t config;
@@ -48,7 +49,7 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
         return -1;
     }
 
-    ctx->config = *config;
+    memcpy(&ctx->config, config, sizeof(*config));
     ctx->config.server_url[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
     ctx->config.access_token[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
     ctx->config.client_id[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
@@ -88,6 +89,7 @@ void tb_client_deinit(tb_client_t *client)
     if (client == NULL) {
         return;
     }
+    tb_attributes_deinit(client);
     if (client->connected) {
         tb_client_disconnect(client);
     }

@@ -88,6 +88,8 @@ int tb_attributes_subscribe(tb_client_t *client, tb_shared_attribute_cb_t cb,
  */
 int tb_attributes_unsubscribe(tb_client_t *client);
 
+void tb_attributes_deinit(tb_client_t *client);
+
 #ifdef __cplusplus
 }
 #endif

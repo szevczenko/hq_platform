@@ -119,6 +119,7 @@ if(NOT ESP_PLATFORM)
     ${TB_SRC_DIR}/tb_rpc.c
     ${TB_SRC_DIR}/tb_provision.c
     ${TB_SRC_DIR}/tb_claim.c
+    ${TB_SRC_DIR}/tb_firmware_update.c
   )
 
   target_include_directories(tb_tests
