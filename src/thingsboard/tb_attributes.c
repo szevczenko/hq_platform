@@ -17,10 +17,8 @@
 #include "osal_mutex.h"
 #include "osal_timer.h"
 
-
-
-#define TB_ATTRIBUTE_TOPIC          "v1/devices/me/attributes"
-#define TB_ATTRIBUTE_REQUEST_TOPIC  "v1/devices/me/attributes/request/%"PRIu32
+#define TB_ATTRIBUTE_TOPIC "v1/devices/me/attributes"
+#define TB_ATTRIBUTE_REQUEST_TOPIC "v1/devices/me/attributes/request/%" PRIu32
 #define TB_ATTRIBUTE_RESPONSE_TOPIC "v1/devices/me/attributes/response/"
 #define TB_ATTRIBUTE_RESPONSE_SUB "v1/devices/me/attributes/response/+"
 
@@ -87,7 +85,13 @@ static bool ensure_owner_client(tb_client_t *client)
 		s_owner_client = client;
 		s_response_subscribed = false;
 		s_shared_subscribed = false;
-		memset(s_pending, 0, sizeof(s_pending));
+		if (s_pending_init) {
+			osal_mutex_take(s_pending_mutex);
+			memset(s_pending, 0, sizeof(s_pending));
+			osal_mutex_give(s_pending_mutex);
+		} else {
+			memset(s_pending, 0, sizeof(s_pending));
+		}
 	}
 
 	return true;
