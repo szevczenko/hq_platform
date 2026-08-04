@@ -14,6 +14,7 @@
 #include "mqtt_config.h"
 #include "osal_mutex.h"
 #include "osal_log.h"
+#include "tb_attributes.h"
 
 struct tb_client {
     tb_client_config_t config;
@@ -88,6 +89,7 @@ void tb_client_deinit(tb_client_t *client)
     if (client == NULL) {
         return;
     }
+    tb_attributes_deinit(client);
     if (client->connected) {
         tb_client_disconnect(client);
     }

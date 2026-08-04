@@ -620,8 +620,8 @@ void wifi_mgmt_init( void )
                            stack_size,
                            NORMALPRIO,
                            &attr );
-  osal_log_info( "[wifi] task create rc=%d, stack=%u, prio=%u",
-                 (int) task_rc, (unsigned) stack_size, (unsigned) NORMALPRIO );
+  osal_log_info( "[wifi] task create rc=%d, stack=%zu, prio=%u",
+                 (int) task_rc, stack_size, (unsigned) NORMALPRIO );
   if ( task_rc != OSAL_SUCCESS )
   {
     osal_log_error( "[wifi] FAILED to create wifi_task (rc=%d)", (int) task_rc );

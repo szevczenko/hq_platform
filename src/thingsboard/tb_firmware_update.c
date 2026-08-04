@@ -7,10 +7,12 @@
 
 #include "tb_firmware_update.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <stdint.h>
 
 #include "cJSON.h"
 #include "osal_log.h"
@@ -163,14 +165,18 @@ static bool fw_parse_response_topic(const char *topic, uint32_t *request_id,
 
 	const char *p = topic + prefix_len;
 	char *end_ptr = NULL;
+	errno = 0;
 	unsigned long req = strtoul(p, &end_ptr, 10);
-	if (end_ptr == p || strncmp(end_ptr, "/chunk/", 7) != 0) {
+	if (errno == ERANGE || end_ptr == p || req > UINT32_MAX ||
+	    strncmp(end_ptr, "/chunk/", 7) != 0) {
 		return false;
 	}
 
 	p = end_ptr + 7;
+	errno = 0;
 	unsigned long chk = strtoul(p, &end_ptr, 10);
-	if (end_ptr == p || *end_ptr != '\0') {
+	if (errno == ERANGE || end_ptr == p || chk > UINT32_MAX ||
+	    *end_ptr != '\0') {
 		return false;
 	}
 
@@ -337,7 +343,19 @@ static void fw_attributes_cb(const char *response_json, void *user_data)
 		s_fw.target_checksum_alg[0] = '\0';
 	}
 
+	if (fw_size->valuedouble < 1 ||
+	    fw_size->valuedouble >= (double)SIZE_MAX) {
+		cJSON_Delete(root);
+		fw_fail("invalid firmware size");
+		return;
+	}
+
 	s_fw.target_size = (size_t)fw_size->valuedouble;
+	if ((double)s_fw.target_size != fw_size->valuedouble) {
+		cJSON_Delete(root);
+		fw_fail("firmware size must be an integer");
+		return;
+	}
 
 	cJSON_Delete(root);
 

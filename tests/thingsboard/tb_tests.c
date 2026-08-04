@@ -360,6 +360,7 @@ static void shared_attr_cb(const char *json_payload, void *user_data)
 	if (json_payload) {
 		strncpy(s_shared_attr_buf, json_payload,
 			sizeof(s_shared_attr_buf) - 1);
+		s_shared_attr_buf[sizeof(s_shared_attr_buf) - 1] = '\0';
 	}
 	(void)user_data;
 }
@@ -371,6 +372,7 @@ static void test_attributes_subscribe_shared(void)
 	TEST_ASSERT(client != NULL, "client created");
 
 	s_shared_attr_received = false;
+	memset(s_shared_attr_buf, 0, sizeof(s_shared_attr_buf));
 
 	int ret = tb_attributes_subscribe(client, shared_attr_cb, NULL);
 	TEST_ASSERT(ret == 0, "subscribe shared attributes succeeds");
@@ -692,6 +694,8 @@ static void test_firmware_update_flow(void)
 
 	ret = tb_firmware_update_request_check(client);
 	TEST_ASSERT(ret == 0, "firmware attribute check request succeeds");
+	TEST_ASSERT(mock_subscribe_count == 2,
+		    "firmware metadata request reuses the response subscription");
 
 	/* Request ID from tb_client starts at 1 in this test setup. */
 	const char *fw_meta = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
