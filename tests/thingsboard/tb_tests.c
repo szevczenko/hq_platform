@@ -16,12 +16,16 @@
 #include "tb_provision.h"
 #include "tb_claim.h"
 #include "tb_firmware_update.h"
+#include "osal_ota.h"
+#include "osal_ota_state.h"
 #include "mqtt_app_mock.h"
 #include "cJSON.h"
 
 static int tests_run = 0;
 static int tests_passed = 0;
 static int tests_failed = 0;
+
+#define FW_SHA256_ABCDEFGH "9ac2197d9258257b1ae8463e4214e4cd0a578bc1517f2415928b91be4283fc48"
 
 #define TEST_ASSERT(condition, message)                                       \
 	do {                                                                  \
@@ -669,6 +673,187 @@ static int find_last_publish_with_prefix(const char *prefix)
 	return -1;
 }
 
+static int find_last_publish_on_topic(const char *topic)
+{
+	for (int i = mock_publish_count - 1; i >= 0; i--) {
+		if (strcmp(mock_publishes[i].topic, topic) == 0) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static bool last_fw_telemetry_matches(const char *expected_state,
+					const char *expected_error)
+{
+	int idx = find_last_publish_on_topic("v1/devices/me/telemetry");
+	bool matches = false;
+	cJSON *root = NULL;
+	cJSON *state = NULL;
+	cJSON *error = NULL;
+
+	if (idx < 0) {
+		return false;
+	}
+
+	root = cJSON_Parse(mock_publishes[idx].message);
+	if (root == NULL) {
+		return false;
+	}
+
+	state = cJSON_GetObjectItemCaseSensitive(root, "fw_state");
+	error = cJSON_GetObjectItemCaseSensitive(root, "fw_error");
+	matches = cJSON_IsString(state) &&
+		  strcmp(state->valuestring, expected_state) == 0;
+	if (matches && expected_error != NULL) {
+		matches = cJSON_IsString(error) &&
+			strcmp(error->valuestring, expected_error) == 0;
+	}
+
+	cJSON_Delete(root);
+	return matches;
+}
+
+static uint32_t parse_fw_request_id(int publish_idx)
+{
+	unsigned int req_id = 0;
+
+	if (publish_idx < 0) {
+		return 0;
+	}
+	if (sscanf(mock_publishes[publish_idx].topic,
+		   "v2/fw/request/%u/chunk/0", &req_id) != 1) {
+		return 0;
+	}
+
+	return (uint32_t)req_id;
+}
+
+static void test_osal_ota_checksum_validation(void)
+{
+	TEST_START("OSAL OTA SHA256 Validation");
+	osal_ota_descriptor_t desc = {
+		.title = "hq_platform.bin",
+		.version = "1.1.0",
+		.checksum = FW_SHA256_ABCDEFGH,
+		.checksum_algorithm = "SHA256",
+		.total_size = 8,
+	};
+
+	osal_ota_abort();
+	TEST_ASSERT(osal_ota_begin(&desc) == OSAL_SUCCESS,
+		    "ota begin with SHA256 metadata succeeds");
+	TEST_ASSERT(osal_ota_write((const uint8_t *)"ABCD", 4) == OSAL_SUCCESS,
+		    "first chunk write succeeds");
+	TEST_ASSERT(osal_ota_write((const uint8_t *)"EFGH", 4) == OSAL_SUCCESS,
+		    "second chunk write succeeds");
+	TEST_ASSERT(osal_ota_verify() == OSAL_SUCCESS,
+		    "checksum verification succeeds");
+	TEST_ASSERT(osal_ota_finish(false) == OSAL_SUCCESS,
+		    "ota finish without apply succeeds after verify");
+}
+
+static void test_osal_ota_checksum_failures(void)
+{
+	TEST_START("OSAL OTA Checksum Failures");
+	osal_ota_descriptor_t desc = {
+		.title = "hq_platform.bin",
+		.version = "1.1.0",
+		.checksum = FW_SHA256_ABCDEFGH,
+		.checksum_algorithm = "SHA256",
+		.total_size = 8,
+	};
+
+	osal_ota_abort();
+	desc.checksum = "0000000000000000000000000000000000000000000000000000000000000000";
+	TEST_ASSERT(osal_ota_begin(&desc) == OSAL_SUCCESS,
+		    "ota begin succeeds with checksum mismatch test vector");
+	TEST_ASSERT(osal_ota_write((const uint8_t *)"ABCD", 4) == OSAL_SUCCESS,
+		    "mismatch test first chunk succeeds");
+	TEST_ASSERT(osal_ota_write((const uint8_t *)"EFGH", 4) == OSAL_SUCCESS,
+		    "mismatch test second chunk succeeds");
+	TEST_ASSERT(osal_ota_verify() != OSAL_SUCCESS,
+		    "checksum mismatch is rejected");
+	TEST_ASSERT(osal_ota_finish(false) != OSAL_SUCCESS,
+		    "finish fails when image is not verified");
+	osal_ota_abort();
+
+	desc.checksum = "not-a-valid-checksum";
+	TEST_ASSERT(osal_ota_begin(&desc) != OSAL_SUCCESS,
+		    "malformed checksum encoding is rejected");
+
+	desc.checksum = FW_SHA256_ABCDEFGH;
+	desc.checksum_algorithm = "MD5";
+	TEST_ASSERT(osal_ota_begin(&desc) != OSAL_SUCCESS,
+		    "unsupported checksum algorithm is rejected");
+
+	desc.checksum_algorithm = "SHA256";
+	TEST_ASSERT(osal_ota_begin(&desc) == OSAL_SUCCESS,
+		    "ota begin succeeds for short stream test");
+	TEST_ASSERT(osal_ota_write((const uint8_t *)"ABCD", 4) == OSAL_SUCCESS,
+		    "short stream partial write succeeds");
+	TEST_ASSERT(osal_ota_verify() != OSAL_SUCCESS,
+		    "short stream verify fails before completion");
+	TEST_ASSERT(osal_ota_finish(false) != OSAL_SUCCESS,
+		    "short stream finish fails before completion");
+	osal_ota_abort();
+
+	TEST_ASSERT(osal_ota_begin(&desc) == OSAL_SUCCESS,
+		    "ota begin succeeds for oversized stream test");
+	TEST_ASSERT(osal_ota_write((const uint8_t *)"ABCDE", 5) == OSAL_SUCCESS,
+		    "oversized stream first partial write succeeds");
+	TEST_ASSERT(osal_ota_write((const uint8_t *)"FGHI", 4) != OSAL_SUCCESS,
+		    "oversized stream is rejected");
+	osal_ota_abort();
+}
+
+static void test_osal_ota_health_confirmation_api(void)
+{
+	TEST_START("OSAL OTA Health Confirmation API");
+	TEST_ASSERT(osal_ota_init() == OSAL_SUCCESS,
+		    "osal_ota_init succeeds on POSIX");
+	TEST_ASSERT(osal_ota_needs_confirmation() == false,
+		    "POSIX running image does not require confirmation");
+	TEST_ASSERT(osal_ota_confirm_running_image() == OSAL_SUCCESS,
+		    "confirm running image is a no-op on POSIX");
+}
+
+static void test_osal_ota_state_persistence(void)
+{
+	TEST_START("OSAL OTA State Persistence");
+	osal_ota_state_t saved_state = { 0 };
+	osal_ota_state_t loaded_state = { 0 };
+
+	strncpy(saved_state.title, "hq_platform.bin",
+		sizeof(saved_state.title) - 1);
+	strncpy(saved_state.version, "1.2.3",
+		sizeof(saved_state.version) - 1);
+	strncpy(saved_state.checksum, FW_SHA256_ABCDEFGH,
+		sizeof(saved_state.checksum) - 1);
+	saved_state.download_state = OSAL_OTA_DOWNLOAD_STATE_DOWNLOADING;
+	strncpy(saved_state.last_error, "chunk timeout",
+		sizeof(saved_state.last_error) - 1);
+
+	TEST_ASSERT(osal_ota_state_save(&saved_state) == OSAL_SUCCESS,
+		    "OTA state save succeeds");
+	TEST_ASSERT(osal_ota_state_load(&loaded_state) == OSAL_SUCCESS,
+		    "OTA state load succeeds");
+	TEST_ASSERT(strcmp(loaded_state.title, saved_state.title) == 0,
+		    "loaded OTA title matches");
+	TEST_ASSERT(strcmp(loaded_state.version, saved_state.version) == 0,
+		    "loaded OTA version matches");
+	TEST_ASSERT(strcmp(loaded_state.checksum, saved_state.checksum) == 0,
+		    "loaded OTA checksum matches");
+	TEST_ASSERT(loaded_state.download_state == saved_state.download_state,
+		    "loaded OTA state matches");
+	TEST_ASSERT(strcmp(loaded_state.last_error, saved_state.last_error) == 0,
+		    "loaded OTA last error matches");
+	TEST_ASSERT(osal_ota_state_clear() == OSAL_SUCCESS,
+		    "OTA state clear succeeds");
+	TEST_ASSERT(osal_ota_state_load(&loaded_state) == OSAL_ERR_EMPTY_SET,
+		    "cleared OTA state is no longer present");
+}
+
 static void test_firmware_update_flow(void)
 {
 	TEST_START("Firmware Update Flow");
@@ -700,7 +885,7 @@ static void test_firmware_update_flow(void)
 	/* Request ID from tb_client starts at 1 in this test setup. */
 	const char *fw_meta = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
 			      "\"fw_version\":\"1.1.0\","
-			      "\"fw_checksum\":\"dummy\","
+			      "\"fw_checksum\":\"" FW_SHA256_ABCDEFGH "\","
 			      "\"fw_checksum_algorithm\":\"SHA256\","
 			      "\"fw_size\":8}}";
 	mqtt_app_mock_deliver_message("v1/devices/me/attributes/response/1",
@@ -709,14 +894,7 @@ static void test_firmware_update_flow(void)
 	int req_idx = find_last_publish_with_prefix("v2/fw/request/");
 	TEST_ASSERT(req_idx >= 0, "firmware chunk request was published");
 
-	uint32_t req_id = 0;
-	if (req_idx >= 0) {
-		unsigned int req_id_u = 0;
-		if (sscanf(mock_publishes[req_idx].topic,
-			   "v2/fw/request/%u/chunk/0", &req_id_u) == 1) {
-			req_id = (uint32_t)req_id_u;
-		}
-	}
+	uint32_t req_id = parse_fw_request_id(req_idx);
 	TEST_ASSERT(req_id > 0, "firmware request id parsed");
 
 	char chunk_topic[128];
@@ -742,6 +920,170 @@ static void test_firmware_update_flow(void)
 		    "applied title updated");
 	TEST_ASSERT(strcmp(s_fw_applied_version, "1.1.0") == 0,
 		    "applied version updated");
+
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
+static void test_firmware_update_checksum_mismatch(void)
+{
+	TEST_START("Firmware Update Checksum Mismatch");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_fw_applied_called = false;
+	memset(s_fw_applied_title, 0, sizeof(s_fw_applied_title));
+	memset(s_fw_applied_version, 0, sizeof(s_fw_applied_version));
+
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+		.on_applied = fw_applied_cb,
+		.user_data = NULL,
+	};
+
+	TEST_ASSERT(tb_firmware_update_init(client, &cfg) == 0,
+		    "firmware update init succeeds");
+	mock_publish_count = 0;
+	TEST_ASSERT(tb_firmware_update_request_check(client) == 0,
+		    "firmware attribute request succeeds");
+
+	const char *fw_meta = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
+			      "\"fw_version\":\"1.1.0\","
+			      "\"fw_checksum\":\"0000000000000000000000000000000000000000000000000000000000000000\","
+			      "\"fw_checksum_algorithm\":\"SHA256\","
+			      "\"fw_size\":8}}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes/response/1",
+				      fw_meta, strlen(fw_meta));
+
+	uint32_t req_id = parse_fw_request_id(
+		find_last_publish_with_prefix("v2/fw/request/"));
+	TEST_ASSERT(req_id > 0, "firmware request id parsed");
+
+	char chunk_topic[128];
+	snprintf(chunk_topic, sizeof(chunk_topic), "v2/fw/response/%u/chunk/0",
+		 req_id);
+	mqtt_app_mock_deliver_message(chunk_topic, "ABCD", 4);
+	snprintf(chunk_topic, sizeof(chunk_topic), "v2/fw/response/%u/chunk/1",
+		 req_id);
+	mqtt_app_mock_deliver_message(chunk_topic, "EFGH", 4);
+
+	TEST_ASSERT(tb_firmware_update_is_in_progress() == false,
+		    "firmware update stops after checksum mismatch");
+	TEST_ASSERT(s_fw_applied_called == false,
+		    "firmware apply callback is not called on checksum mismatch");
+	TEST_ASSERT(last_fw_telemetry_matches("FAILED",
+				      "firmware checksum mismatch"),
+		    "firmware update reports failed checksum mismatch");
+
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
+static void test_firmware_update_invalid_checksum_metadata(void)
+{
+	TEST_START("Firmware Update Invalid Checksum Metadata");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_fw_applied_called = false;
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+		.on_applied = fw_applied_cb,
+		.user_data = NULL,
+	};
+
+	TEST_ASSERT(tb_firmware_update_init(client, &cfg) == 0,
+		    "firmware update init succeeds");
+	mock_publish_count = 0;
+	TEST_ASSERT(tb_firmware_update_request_check(client) == 0,
+		    "firmware attribute request succeeds");
+
+	const char *bad_checksum_meta = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
+				       "\"fw_version\":\"1.1.0\","
+				       "\"fw_checksum\":\"not-a-valid-checksum\","
+				       "\"fw_checksum_algorithm\":\"SHA256\","
+				       "\"fw_size\":8}}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes/response/1",
+				      bad_checksum_meta,
+				      strlen(bad_checksum_meta));
+	TEST_ASSERT(find_last_publish_with_prefix("v2/fw/request/") < 0,
+		    "no firmware chunk request is published for invalid checksum metadata");
+	TEST_ASSERT(last_fw_telemetry_matches("FAILED", "invalid firmware checksum"),
+		    "invalid checksum metadata reports a specific failure");
+
+	mock_publish_count = 0;
+	TEST_ASSERT(tb_firmware_update_request_check(client) == 0,
+		    "second firmware attribute request succeeds");
+
+	const char *bad_algorithm_meta = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
+				        "\"fw_version\":\"1.1.0\","
+				        "\"fw_checksum\":\"" FW_SHA256_ABCDEFGH "\","
+				        "\"fw_checksum_algorithm\":\"MD5\","
+				        "\"fw_size\":8}}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes/response/2",
+				      bad_algorithm_meta,
+				      strlen(bad_algorithm_meta));
+	TEST_ASSERT(find_last_publish_with_prefix("v2/fw/request/") < 0,
+		    "no firmware chunk request is published for unsupported algorithm metadata");
+	TEST_ASSERT(last_fw_telemetry_matches(
+			    "FAILED", "unsupported firmware checksum algorithm"),
+		    "unsupported checksum algorithm reports a specific failure");
+
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
+static void test_firmware_update_oversized_chunk_stream(void)
+{
+	TEST_START("Firmware Update Oversized Chunk Stream");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_fw_applied_called = false;
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+		.on_applied = fw_applied_cb,
+		.user_data = NULL,
+	};
+
+	TEST_ASSERT(tb_firmware_update_init(client, &cfg) == 0,
+		    "firmware update init succeeds");
+	mock_publish_count = 0;
+	TEST_ASSERT(tb_firmware_update_request_check(client) == 0,
+		    "firmware attribute request succeeds");
+
+	const char *fw_meta = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
+			      "\"fw_version\":\"1.1.0\","
+			      "\"fw_checksum\":\"" FW_SHA256_ABCDEFGH "\","
+			      "\"fw_checksum_algorithm\":\"SHA256\","
+			      "\"fw_size\":8}}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes/response/1",
+				      fw_meta, strlen(fw_meta));
+
+	uint32_t req_id = parse_fw_request_id(
+		find_last_publish_with_prefix("v2/fw/request/"));
+	TEST_ASSERT(req_id > 0, "firmware request id parsed");
+
+	char chunk_topic[128];
+	snprintf(chunk_topic, sizeof(chunk_topic), "v2/fw/response/%u/chunk/0",
+		 req_id);
+	mqtt_app_mock_deliver_message(chunk_topic, "ABCDE", 5);
+	snprintf(chunk_topic, sizeof(chunk_topic), "v2/fw/response/%u/chunk/1",
+		 req_id);
+	mqtt_app_mock_deliver_message(chunk_topic, "FGHI", 4);
+
+	TEST_ASSERT(tb_firmware_update_is_in_progress() == false,
+		    "firmware update stops after oversized stream");
+	TEST_ASSERT(s_fw_applied_called == false,
+		    "firmware apply callback is not called on oversized stream");
+	TEST_ASSERT(last_fw_telemetry_matches("FAILED", "ota write failed"),
+		    "oversized chunk stream reports OTA write failure");
 
 	tb_firmware_update_deinit(client);
 	destroy_test_client(client);
@@ -790,7 +1132,14 @@ int main(void)
 	test_claim_device_no_secret();
 
 	/* Firmware update */
+	test_osal_ota_checksum_validation();
+	test_osal_ota_checksum_failures();
+	test_osal_ota_health_confirmation_api();
+	test_osal_ota_state_persistence();
 	test_firmware_update_flow();
+	test_firmware_update_checksum_mismatch();
+	test_firmware_update_invalid_checksum_metadata();
+	test_firmware_update_oversized_chunk_stream();
 
 	printf("\n==================================================\n");
 	printf("              TEST SUMMARY                       \n");
