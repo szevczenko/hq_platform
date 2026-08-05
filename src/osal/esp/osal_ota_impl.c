@@ -8,17 +8,25 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 
+#include "mongoose.h"
 #include "osal_log.h"
+
+#define OSAL_OTA_SHA256_DIGEST_LEN 32U
+#define OSAL_OTA_SHA256_HEX_LEN    (OSAL_OTA_SHA256_DIGEST_LEN * 2U)
 
 typedef struct {
     bool active;
+    bool verified;
     esp_ota_handle_t handle;
     const esp_partition_t *update_partition;
     size_t total_size;
     size_t written_size;
+    uint8_t expected_digest[OSAL_OTA_SHA256_DIGEST_LEN];
+    mg_sha256_ctx sha256_ctx;
 } osal_ota_ctx_t;
 
 static osal_ota_ctx_t s_ota_ctx;
+static bool s_running_image_pending_confirmation;
 
 static const char *osal_ota_state_to_string(esp_ota_img_states_t state)
 {
@@ -66,6 +74,53 @@ static void osal_ota_reset_ctx(void)
     memset(&s_ota_ctx, 0, sizeof(s_ota_ctx));
 }
 
+static bool osal_ota_is_sha256_algorithm(const char *algorithm)
+{
+    return algorithm != NULL && strcmp(algorithm, "SHA256") == 0;
+}
+
+static int osal_ota_hex_nibble(char ch)
+{
+    if (ch >= '0' && ch <= '9') {
+        return ch - '0';
+    }
+    if (ch >= 'a' && ch <= 'f') {
+        return 10 + (ch - 'a');
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return 10 + (ch - 'A');
+    }
+    return -1;
+}
+
+static osal_status_t osal_ota_parse_sha256_checksum(const char *checksum,
+                                                    uint8_t *digest)
+{
+    size_t checksum_len = 0;
+
+    if (checksum == NULL || digest == NULL) {
+        return OSAL_INVALID_POINTER;
+    }
+
+    checksum_len = strlen(checksum);
+    if (checksum_len != OSAL_OTA_SHA256_HEX_LEN) {
+        return OSAL_ERR_INVALID_ARGUMENT;
+    }
+
+    for (size_t index = 0; index < OSAL_OTA_SHA256_DIGEST_LEN; index++) {
+        int high = osal_ota_hex_nibble(checksum[index * 2U]);
+        int low = osal_ota_hex_nibble(checksum[index * 2U + 1U]);
+
+        if (high < 0 || low < 0) {
+            return OSAL_ERR_INVALID_ARGUMENT;
+        }
+
+        digest[index] = (uint8_t)((high << 4) | low);
+    }
+
+    return OSAL_SUCCESS;
+}
+
 osal_status_t osal_ota_init(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -93,14 +148,10 @@ osal_status_t osal_ota_init(void)
                   running->subtype,
                   osal_ota_state_to_string(ota_state));
 
+    s_running_image_pending_confirmation =
+        (ota_state == ESP_OTA_IMG_PENDING_VERIFY);
     if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
-        err = esp_ota_mark_app_valid_cancel_rollback();
-        if (err != ESP_OK) {
-            osal_log_error("[osal_ota] Failed to confirm running image: %s",
-                           esp_err_to_name(err));
-            return osal_ota_from_esp_err(err);
-        }
-        osal_log_info("[osal_ota] Running OTA image confirmed");
+        osal_log_warning("[osal_ota] Running OTA image pending verification");
     } else {
         osal_log_info("[osal_ota] Confirmation not required for state=%s",
                       osal_ota_state_to_string(ota_state));
@@ -121,6 +172,9 @@ osal_status_t osal_ota_begin(const osal_ota_descriptor_t *descriptor)
     if (descriptor->total_size == 0) {
         return OSAL_ERR_INVALID_SIZE;
     }
+    if (!osal_ota_is_sha256_algorithm(descriptor->checksum_algorithm)) {
+        return OSAL_ERR_INVALID_ARGUMENT;
+    }
 
     const esp_partition_t *update_partition =
         esp_ota_get_next_update_partition(NULL);
@@ -139,10 +193,18 @@ osal_status_t osal_ota_begin(const osal_ota_descriptor_t *descriptor)
     }
 
     osal_ota_reset_ctx();
+    osal_status_t status = osal_ota_parse_sha256_checksum(
+        descriptor->checksum, s_ota_ctx.expected_digest);
+    if (status != OSAL_SUCCESS) {
+        esp_ota_abort(handle);
+        return status;
+    }
+
     s_ota_ctx.active = true;
     s_ota_ctx.handle = handle;
     s_ota_ctx.update_partition = update_partition;
     s_ota_ctx.total_size = descriptor->total_size;
+    mg_sha256_init(&s_ota_ctx.sha256_ctx);
 
     osal_log_info("[osal_ota] OTA begin: title=%s version=%s size=%zu partition=0x%08" PRIx32,
                   descriptor->title ? descriptor->title : "",
@@ -174,7 +236,60 @@ osal_status_t osal_ota_write(const uint8_t *data, size_t len)
         return osal_ota_from_esp_err(err);
     }
 
+    mg_sha256_update(&s_ota_ctx.sha256_ctx, data, len);
     s_ota_ctx.written_size += len;
+    return OSAL_SUCCESS;
+}
+
+osal_status_t osal_ota_verify(void)
+{
+    uint8_t actual_digest[OSAL_OTA_SHA256_DIGEST_LEN];
+
+    if (!s_ota_ctx.active) {
+        return OSAL_ERR_INCORRECT_OBJ_STATE;
+    }
+    if (s_ota_ctx.written_size != s_ota_ctx.total_size) {
+        osal_log_error("[osal_ota] Incomplete image: written=%zu total=%zu",
+                       s_ota_ctx.written_size, s_ota_ctx.total_size);
+        return OSAL_ERROR;
+    }
+    if (s_ota_ctx.verified) {
+        return OSAL_SUCCESS;
+    }
+
+    mg_sha256_final(actual_digest, &s_ota_ctx.sha256_ctx);
+    if (memcmp(actual_digest, s_ota_ctx.expected_digest,
+               sizeof(actual_digest)) != 0) {
+        osal_log_error("[osal_ota] Firmware checksum mismatch");
+        return OSAL_ERROR;
+    }
+
+    s_ota_ctx.verified = true;
+    return OSAL_SUCCESS;
+}
+
+bool osal_ota_needs_confirmation(void)
+{
+    return s_running_image_pending_confirmation;
+}
+
+osal_status_t osal_ota_confirm_running_image(void)
+{
+    esp_err_t err;
+
+    if (!s_running_image_pending_confirmation) {
+        return OSAL_SUCCESS;
+    }
+
+    err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err != ESP_OK) {
+        osal_log_error("[osal_ota] Failed to confirm running image: %s",
+                       esp_err_to_name(err));
+        return osal_ota_from_esp_err(err);
+    }
+
+    s_running_image_pending_confirmation = false;
+    osal_log_info("[osal_ota] Running OTA image confirmed");
     return OSAL_SUCCESS;
 }
 
@@ -187,6 +302,10 @@ osal_status_t osal_ota_finish(bool apply_update)
         osal_log_error("[osal_ota] Incomplete image: written=%zu total=%zu",
                        s_ota_ctx.written_size, s_ota_ctx.total_size);
         return OSAL_ERROR;
+    }
+    if (!s_ota_ctx.verified) {
+        osal_log_error("[osal_ota] Firmware image must be verified before finish");
+        return OSAL_ERR_INCORRECT_OBJ_STATE;
     }
 
     esp_err_t err = esp_ota_end(s_ota_ctx.handle);

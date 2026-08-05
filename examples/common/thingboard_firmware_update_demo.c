@@ -14,6 +14,7 @@
 #include "tb_attributes.h"
 #include "tb_client.h"
 #include "tb_firmware_update.h"
+#include "tb_telemetry.h"
 
 #include "mongoose_process.h"
 #include "mqtt_config.h"
@@ -118,6 +119,7 @@ int main_function(void)
     };
 
     bool fw_initialized = false;
+    bool fw_health_confirmed = false;
     uint32_t last_check_ms = 0;
 
     while (1) {
@@ -140,6 +142,18 @@ int main_function(void)
                     continue;
                 }
                 fw_initialized = true;
+            }
+
+            if (!fw_health_confirmed) {
+                rc = tb_telemetry_send_string(g_tb_client,
+                             "fw_health", "ready");
+                if (rc == 0) {
+                    rc = tb_firmware_update_confirm_health(g_tb_client);
+                    if (rc == 0) {
+                        fw_health_confirmed = true;
+                        printf("[FW_DEMO] Running image confirmed healthy\n");
+                    }
+                }
             }
         }
 

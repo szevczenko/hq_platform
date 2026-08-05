@@ -33,6 +33,8 @@ int tb_firmware_update_init(tb_client_t *client,
 
 int tb_firmware_update_request_check(tb_client_t *client);
 
+int tb_firmware_update_confirm_health(tb_client_t *client);
+
 bool tb_firmware_update_is_in_progress(void);
 
 void tb_firmware_update_deinit(tb_client_t *client);

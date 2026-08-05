@@ -47,12 +47,15 @@ set(OSAL_ALL_SOURCES ${OSAL_COMMON_SOURCES} ${OSAL_PLATFORM_SOURCES} ${OSAL_LITT
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${OSAL_ALL_SOURCES}
                          INCLUDE_DIRS ${OSAL_PUBLIC_INCLUDES} ${OSAL_PLATFORM_INCLUDES}
-                         REQUIRES app_update esp_partition vfs spi_flash
+                         REQUIRES app_update esp_partition vfs spi_flash mongoose
                          KCONFIG ${COMPONENT_DIR}/esp/littlefs_impl/Kconfig)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE LFS_CONFIG=lfs_config.h)
 else()
   add_library(hq_osal STATIC ${OSAL_ALL_SOURCES})
   target_include_directories(hq_osal
     PUBLIC ${OSAL_PUBLIC_INCLUDES} ${OSAL_PLATFORM_INCLUDES}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../mongoose
   )
+
+  target_link_libraries(hq_osal PUBLIC hq_mongoose)
 endif()

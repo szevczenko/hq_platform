@@ -18,23 +18,6 @@ device-client capability.
 
 ### P0 - Firmware Trust And Recovery
 
-- [ ] **Verify the downloaded firmware checksum before applying it.**
-  - Parse the ThingsBoard `fw_checksum` and `fw_checksum_algorithm` shared
-    attributes.
-  - Support at least `SHA256`; reject a missing checksum, unsupported
-    algorithm, malformed hex digest, or mismatching digest.
-  - Hash incrementally as chunks are received so the complete firmware is
-    never held in RAM.
-  - Report `DOWNLOADED`, then `VERIFIED` only after comparison succeeds.
-    Report `FAILED` with a specific error and call `osal_ota_abort()` on every
-    failure path.
-  - Keep the `osal_ota_*` interface responsible for writing and applying the
-    image; either extend the descriptor with the hash context/result or add an
-    OSAL crypto abstraction so POSIX and ESP use the same verification flow.
-  - Unit tests: valid SHA-256; mismatching checksum; bad checksum encoding;
-    unknown algorithm; short and oversized chunk streams; assert that the boot
-    partition is never selected after failure.
-
 - [ ] **Require a firmware signature in addition to the checksum.**
   - A checksum detects accidental corruption but does not authenticate a
     firmware publisher.
@@ -73,7 +56,6 @@ device-client capability.
     verify encrypted OTA slots across reset.
 
 - [ ] **Implement an OTA health-confirmation policy.**
-  - Do not call `esp_ota_mark_app_valid_cancel_rollback()` immediately at boot.
   - Define a health milestone: OSAL initialized, network operational, MQTT
     connected, and a successful ThingsBoard telemetry publish, or an explicit
     application callback for products that can operate offline.
@@ -83,13 +65,57 @@ device-client capability.
     and verify it is not confirmed.
 
 - [ ] **Persist firmware-update state.**
-  - Persist the target title, version, checksum, download status, and last
-    error in NVS or an OSAL persistence abstraction.
   - On restart, report the correct state and choose a documented policy:
     restart the download, resume only if the OTA backend can safely resume, or
     abort and begin a clean transfer.
   - Test reset/power-loss at begin, mid-chunk, post-download, and post-boot
     partition selection.
+
+### OTA Validation Checklist
+
+Use this checklist to validate the implemented checksum, health-confirmation,
+and OTA-state persistence behavior against a real ThingsBoard deployment and a
+real device target.
+
+#### ThingsBoard Platform Validation
+
+- [ ] Create or update a device profile that exposes `fw_title`,
+  `fw_version`, `fw_checksum`, `fw_checksum_algorithm`, and `fw_size` shared
+  attributes.
+- [ ] Upload a firmware binary whose SHA-256 digest matches the configured
+  `fw_checksum` value.
+- [ ] Trigger an OTA update and verify the device reports:
+  `DOWNLOADING` -> `DOWNLOADED` -> `VERIFIED` -> `UPDATING` -> `UPDATED`.
+- [ ] Publish a bad checksum and verify the device reports `FAILED` with a
+  checksum-specific error and does not reboot into the new image.
+- [ ] Publish malformed checksum metadata and verify no chunk download starts.
+- [ ] Publish an unsupported checksum algorithm and verify no chunk download
+  starts.
+- [ ] Interrupt chunk delivery mid-transfer, reboot the device, and verify the
+  restarted session reports the persisted failed/interrupted state before a new
+  clean download is requested.
+
+#### Real Target Validation
+
+- [ ] Boot a newly updated image in `PENDING_VERIFY` state and verify it is
+  not confirmed immediately at startup.
+- [ ] Reach the configured health milestone on the real target and verify the
+  image is confirmed only after successful telemetry publish.
+- [ ] Force network or MQTT failure after booting a pending image and verify
+  the health milestone is not reached.
+- [ ] Add and validate a deadline policy so a pending image that never reaches
+  health confirmation remains rollback-eligible.
+- [ ] Power-cycle or reset the target during these phases and verify the
+  persisted OTA state is reported correctly after reboot:
+  begin, mid-chunk, post-download, post-verify, and post-boot-partition
+  selection.
+- [ ] Verify the selected restart policy is applied consistently after reboot:
+  clean restart of download, safe resume if ever implemented, or explicit
+  failure and restart.
+- [ ] On ESP hardware, verify checksum failure never results in the new boot
+  partition being selected.
+- [ ] On ESP hardware, verify rollback returns to the previous image when a
+  pending image is not confirmed.
 
 ## P1 - Client Reliability And Protocol Behavior
 
