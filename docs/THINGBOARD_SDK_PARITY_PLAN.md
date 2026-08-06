@@ -142,7 +142,7 @@ and device name, and must log its connection lifecycle.
   - Mirrors Python: `client_rpc_request.py` plus server-RPC handling.
   - Tests: malformed JSON, request ID handling, timeout, and reconnect.
 
-- [ ] **`thingboard_claim_demo`**
+- [x] **`thingboard_claim_demo`**
   - Claim a device with and without a secret key and report the resulting
     telemetry/attributes.
   - Mirrors Python: `claiming_device_pe_only.py`.

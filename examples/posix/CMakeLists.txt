@@ -351,3 +351,71 @@ target_link_libraries(thingboard_rpc_demo
 set_target_properties(thingboard_rpc_demo PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
+
+# -- thingboard_claim_demo example --
+# Configure via cmake -D flags:
+#   -DCLAIM_DEMO_CLIENT_ID="tb_claim_demo_0001"
+#   -DCLAIM_DEMO_USERNAME="token"
+#   -DCLAIM_DEMO_PASSWORD="pass"
+#   -DCLAIM_DEMO_DEVICE_NAME="Claim Demo"
+#   -DCLAIM_DEMO_MQTT_URL="mqtt://broker:1883"
+#   -DCLAIM_DEMO_SECRET="demo_secret_key"
+#   -DCLAIM_DEMO_DURATION_SECRET_MS=60000
+#   -DCLAIM_DEMO_DURATION_NO_SECRET_MS=30000
+#   -DCLAIM_DEMO_PERIOD_MS=30000
+#   -DCLAIM_DEMO_RECONNECT_DELAY_MS=3000
+
+add_executable(thingboard_claim_demo
+  ${CMAKE_CURRENT_LIST_DIR}/../common/thingboard_claim_demo.c
+)
+
+target_include_directories(thingboard_claim_demo
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/thingsboard/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/mongoose
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/posix
+  PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+  PRIVATE ${HQ_CONFIG_DIR}
+)
+
+if(DEFINED CLAIM_DEMO_CLIENT_ID)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_CLIENT_ID="${CLAIM_DEMO_CLIENT_ID}")
+endif()
+if(DEFINED CLAIM_DEMO_USERNAME)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_USERNAME="${CLAIM_DEMO_USERNAME}")
+endif()
+if(DEFINED CLAIM_DEMO_PASSWORD)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_PASSWORD="${CLAIM_DEMO_PASSWORD}")
+endif()
+if(DEFINED CLAIM_DEMO_DEVICE_NAME)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_DEVICE_NAME="${CLAIM_DEMO_DEVICE_NAME}")
+endif()
+if(DEFINED CLAIM_DEMO_MQTT_URL)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_MQTT_URL="${CLAIM_DEMO_MQTT_URL}")
+endif()
+if(DEFINED CLAIM_DEMO_SECRET)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_SECRET="${CLAIM_DEMO_SECRET}")
+endif()
+if(DEFINED CLAIM_DEMO_DURATION_SECRET_MS)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_DURATION_SECRET_MS=${CLAIM_DEMO_DURATION_SECRET_MS})
+endif()
+if(DEFINED CLAIM_DEMO_DURATION_NO_SECRET_MS)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_DURATION_NO_SECRET_MS=${CLAIM_DEMO_DURATION_NO_SECRET_MS})
+endif()
+if(DEFINED CLAIM_DEMO_PERIOD_MS)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_PERIOD_MS=${CLAIM_DEMO_PERIOD_MS})
+endif()
+if(DEFINED CLAIM_DEMO_RECONNECT_DELAY_MS)
+  target_compile_definitions(thingboard_claim_demo PRIVATE CONFIG_CLAIM_DEMO_RECONNECT_DELAY_MS=${CLAIM_DEMO_RECONNECT_DELAY_MS})
+endif()
+
+target_link_libraries(thingboard_claim_demo
+  hq_thingsboard
+  hq_mongoose
+  hq_cjson
+  pthread
+)
+
+set_target_properties(thingboard_claim_demo PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)

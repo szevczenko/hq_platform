@@ -1910,6 +1910,21 @@ static void test_claim_device_no_secret(void)
 	destroy_test_client(client);
 }
 
+static void test_claim_device_publish_failure(void)
+{
+	TEST_START("Device Claiming Publish Failure");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	mqtt_app_mock_simulate_error_disconnect();
+
+	int ret = tb_claim_device(client, "my_secret", 60000);
+	TEST_ASSERT(ret != 0,
+		    "claim request fails when transport publish fails");
+
+	destroy_test_client(client);
+}
+
 /* ============================================================
  * Test: Firmware Update
  * ============================================================ */
@@ -2419,6 +2434,7 @@ int main(void)
 	/* Claiming */
 	test_claim_device();
 	test_claim_device_no_secret();
+	test_claim_device_publish_failure();
 
 	/* Firmware update */
 	test_osal_ota_checksum_validation();
