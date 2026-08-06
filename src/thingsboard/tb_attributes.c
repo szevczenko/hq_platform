@@ -122,6 +122,19 @@ static void pending_timeout_timer_cb(osal_timer_id_t timer_id)
 	}
 }
 
+static void teardown_pending_resources(void)
+{
+	if (!s_pending_init) {
+		return;
+	}
+
+	(void)osal_timer_stop(s_pending_timer, 0);
+	(void)osal_timer_delete(s_pending_timer, 0);
+	(void)osal_mutex_delete(s_pending_mutex);
+	memset(s_pending, 0, sizeof(s_pending));
+	s_pending_init = false;
+}
+
 static bool ensure_pending_init(void)
 {
 	if (s_pending_init) {
@@ -148,7 +161,13 @@ static bool ensure_pending_init(void)
 		s_pending_init_failed = true;
 		return false;
 	}
-	(void)osal_timer_start(s_pending_timer, 0);
+	if (osal_timer_start(s_pending_timer, 0) != OSAL_SUCCESS) {
+		osal_log_error("[tb_attr] Failed to start timeout sweep timer");
+		(void)osal_timer_delete(s_pending_timer, 0);
+		(void)osal_mutex_delete(s_pending_mutex);
+		s_pending_init_failed = true;
+		return false;
+	}
 	s_pending_init = true;
 	return true;
 }
@@ -205,6 +224,7 @@ static void attr_response_handler(const char *topic, const char *payload,
 		}
 	}
 	if (cb == NULL) {
+		/* No matching pending request in this message. */
 		osal_mutex_give(s_pending_mutex);
 		return;
 	}
@@ -271,6 +291,7 @@ void tb_attributes_deinit(tb_client_t *client)
 
 	if (s_pending_init) {
 		complete_pending_requests(TB_REQUEST_RESULT_CANCELLED);
+		teardown_pending_resources();
 	}
 
 	s_response_subscribed = false;
@@ -278,6 +299,7 @@ void tb_attributes_deinit(tb_client_t *client)
 	s_shared_cb = NULL;
 	s_shared_user_data = NULL;
 	s_owner_client = NULL;
+	s_pending_init_failed = false;
 }
 
 int tb_attributes_send_int(tb_client_t *client, const char *key, int64_t value)
