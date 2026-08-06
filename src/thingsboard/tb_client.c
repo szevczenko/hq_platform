@@ -7,15 +7,40 @@
 
 #include "tb_client.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "cJSON.h"
 #include "mqtt_app.h"
 #include "mqtt_config.h"
 #include "osal_mutex.h"
 #include "osal_log.h"
+#include "osal_task.h"
 #include "tb_attributes.h"
 #include "tb_rpc.h"
+
+typedef struct {
+    uint32_t message_rate;
+    uint32_t telemetry_rate;
+    uint32_t telemetry_datapoints_rate;
+    uint32_t max_payload_size;
+    uint32_t max_inflight_messages;
+} tb_session_limits_t;
+
+typedef struct {
+    double tokens;
+    double rate_per_sec;
+    double capacity;
+    uint32_t last_update_ms;
+} tb_token_bucket_t;
+
+typedef struct {
+    char topic[256];
+    char payload[1024];
+    int qos;
+    bool active;
+} tb_deferred_message_t;
 
 struct tb_client {
     tb_client_config_t config;
@@ -23,6 +48,16 @@ struct tb_client {
     uint32_t           request_id;
     int                publish_qos_default;
     int                subscribe_qos_default;
+    tb_session_limits_t limits;
+    tb_token_bucket_t msg_bucket;
+    tb_token_bucket_t datapoint_bucket;
+    tb_deferred_message_t deferred[16];
+    uint16_t deferred_capacity;
+    uint16_t deferred_head;
+    uint16_t deferred_tail;
+    uint16_t deferred_count;
+    bool session_limits_request_inflight;
+    bool session_limits_ready;
     bool               connected;
     bool               mqtt_started;
     bool               initialized;
@@ -39,6 +74,21 @@ static tb_client_t *s_active_client = NULL;
 #define TB_CLIENT_MAX_KEEPALIVE_SEC 1200U
 #define TB_CLIENT_MIN_RECONNECT_DELAY_MS 1000U
 #define TB_CLIENT_MAX_RECONNECT_DELAY_MS 3600000U
+#define TB_CLIENT_DEFAULT_DEFER_QUEUE_CAPACITY 8U
+#define TB_CLIENT_MAX_DEFER_QUEUE_CAPACITY 16U
+
+#define TB_DEFAULT_LIMIT_MESSAGE_RATE 100U
+#define TB_DEFAULT_LIMIT_TELEMETRY_RATE 100U
+#define TB_DEFAULT_LIMIT_TELEMETRY_DATAPOINTS_RATE 500U
+#define TB_DEFAULT_LIMIT_MAX_PAYLOAD_SIZE 8192U
+#define TB_DEFAULT_LIMIT_MAX_INFLIGHT_MESSAGES 16U
+
+#define TB_TOPIC_TELEMETRY "v1/devices/me/telemetry"
+#define TB_TOPIC_ATTRIBUTES "v1/devices/me/attributes"
+#define TB_TOPIC_RPC_REQUEST_PREFIX "v1/devices/me/rpc/request/"
+
+static void maybe_request_session_limits(tb_client_t *client);
+static void flush_deferred_queue(tb_client_t *client);
 
 static uint16_t clamp_keepalive_sec(uint16_t value)
 {
@@ -66,6 +116,404 @@ static uint32_t clamp_reconnect_delay_ms(uint32_t value, uint32_t fallback)
         return TB_CLIENT_MAX_RECONNECT_DELAY_MS;
     }
     return value;
+}
+
+static uint16_t clamp_defer_queue_capacity(uint16_t value)
+{
+    if (value == 0) {
+        return TB_CLIENT_DEFAULT_DEFER_QUEUE_CAPACITY;
+    }
+    if (value > TB_CLIENT_MAX_DEFER_QUEUE_CAPACITY) {
+        return TB_CLIENT_MAX_DEFER_QUEUE_CAPACITY;
+    }
+    return value;
+}
+
+static bool topic_is_rate_limited(const char *topic)
+{
+    return strcmp(topic, TB_TOPIC_TELEMETRY) == 0 ||
+           strcmp(topic, TB_TOPIC_ATTRIBUTES) == 0;
+}
+
+static bool topic_is_internal_control(const char *topic)
+{
+    if (strncmp(topic, TB_TOPIC_RPC_REQUEST_PREFIX,
+                strlen(TB_TOPIC_RPC_REQUEST_PREFIX)) == 0) {
+        return true;
+    }
+
+    if (strncmp(topic, "v1/devices/me/attributes/request/",
+                strlen("v1/devices/me/attributes/request/")) == 0) {
+        return true;
+    }
+
+    return false;
+}
+
+static uint32_t count_top_level_datapoints(const char *json)
+{
+    uint32_t count = 1;
+    cJSON *root;
+
+    if (json == NULL) {
+        return 0;
+    }
+
+    root = cJSON_Parse(json);
+    if (!cJSON_IsObject(root)) {
+        if (root != NULL) {
+            cJSON_Delete(root);
+        }
+        return 1;
+    }
+
+    count = 0;
+    for (cJSON *item = root->child; item != NULL; item = item->next) {
+        count++;
+    }
+
+    cJSON_Delete(root);
+    return count > 0 ? count : 1;
+}
+
+static void bucket_init(tb_token_bucket_t *bucket, double rate_per_sec,
+                        uint32_t now_ms)
+{
+    bucket->rate_per_sec = rate_per_sec;
+    bucket->capacity = rate_per_sec;
+    bucket->tokens = rate_per_sec;
+    bucket->last_update_ms = now_ms;
+}
+
+static void bucket_refill(tb_token_bucket_t *bucket, uint32_t now_ms)
+{
+    if (now_ms <= bucket->last_update_ms) {
+        return;
+    }
+
+    double elapsed_sec = (double)(now_ms - bucket->last_update_ms) / 1000.0;
+    bucket->tokens += elapsed_sec * bucket->rate_per_sec;
+    if (bucket->tokens > bucket->capacity) {
+        bucket->tokens = bucket->capacity;
+    }
+    bucket->last_update_ms = now_ms;
+}
+
+static bool bucket_consume(tb_token_bucket_t *bucket, double amount,
+                           uint32_t now_ms)
+{
+    bucket_refill(bucket, now_ms);
+    if (bucket->tokens + 1e-9 < amount) {
+        return false;
+    }
+    bucket->tokens -= amount;
+    return true;
+}
+
+static void apply_default_session_limits(tb_client_t *client)
+{
+    uint32_t now_ms = osal_task_get_time_ms();
+
+    client->limits.message_rate = TB_DEFAULT_LIMIT_MESSAGE_RATE;
+    client->limits.telemetry_rate = TB_DEFAULT_LIMIT_TELEMETRY_RATE;
+    client->limits.telemetry_datapoints_rate =
+        TB_DEFAULT_LIMIT_TELEMETRY_DATAPOINTS_RATE;
+    client->limits.max_payload_size = TB_DEFAULT_LIMIT_MAX_PAYLOAD_SIZE;
+    client->limits.max_inflight_messages = TB_DEFAULT_LIMIT_MAX_INFLIGHT_MESSAGES;
+
+    bucket_init(&client->msg_bucket, (double)client->limits.message_rate,
+                now_ms);
+    bucket_init(&client->datapoint_bucket,
+                (double)client->limits.telemetry_datapoints_rate, now_ms);
+}
+
+static bool queue_deferred_message(tb_client_t *client, const char *topic,
+                                   const char *payload, int qos)
+{
+    if (client->deferred_count >= client->deferred_capacity) {
+        return false;
+    }
+
+    tb_deferred_message_t *slot = &client->deferred[client->deferred_tail];
+    strncpy(slot->topic, topic, sizeof(slot->topic) - 1);
+    slot->topic[sizeof(slot->topic) - 1] = '\0';
+    strncpy(slot->payload, payload, sizeof(slot->payload) - 1);
+    slot->payload[sizeof(slot->payload) - 1] = '\0';
+    slot->qos = qos;
+    slot->active = true;
+
+    client->deferred_tail =
+        (uint16_t)((client->deferred_tail + 1) % client->deferred_capacity);
+    client->deferred_count++;
+    return true;
+}
+
+static bool send_direct_now(tb_client_t *client, const char *topic,
+                            const char *payload, int qos)
+{
+    if (!mqtt_app_is_connected()) {
+        return false;
+    }
+
+    if (client->config.enable_session_limits && topic_is_rate_limited(topic)) {
+        uint32_t now_ms = osal_task_get_time_ms();
+        uint32_t datapoints = count_top_level_datapoints(payload);
+
+        if (!bucket_consume(&client->msg_bucket, 1.0, now_ms)) {
+            return false;
+        }
+
+        if (strcmp(topic, TB_TOPIC_TELEMETRY) == 0 &&
+            !bucket_consume(&client->datapoint_bucket, (double)datapoints,
+                            now_ms)) {
+            client->msg_bucket.tokens += 1.0;
+            if (client->msg_bucket.tokens > client->msg_bucket.capacity) {
+                client->msg_bucket.tokens = client->msg_bucket.capacity;
+            }
+            return false;
+        }
+    }
+
+    return mqtt_app_post_data(topic, payload, qos);
+}
+
+static void flush_deferred_queue(tb_client_t *client)
+{
+    while (client->deferred_count > 0) {
+        tb_deferred_message_t *msg = &client->deferred[client->deferred_head];
+        if (!msg->active) {
+            client->deferred_head =
+                (uint16_t)((client->deferred_head + 1) %
+                           client->deferred_capacity);
+            client->deferred_count--;
+            continue;
+        }
+
+        if (!send_direct_now(client, msg->topic, msg->payload, msg->qos)) {
+            break;
+        }
+
+        msg->active = false;
+        client->deferred_head =
+            (uint16_t)((client->deferred_head + 1) % client->deferred_capacity);
+        client->deferred_count--;
+    }
+}
+
+static bool enqueue_or_send(tb_client_t *client, const char *topic,
+                            const char *payload, int qos)
+{
+    if (send_direct_now(client, topic, payload, qos)) {
+        return true;
+    }
+
+    if (!client->config.enable_session_limits || topic_is_internal_control(topic)) {
+        return false;
+    }
+
+    return queue_deferred_message(client, topic, payload, qos);
+}
+
+static int publish_split_object_if_needed(tb_client_t *client,
+                                          const char *topic,
+                                          const char *json,
+                                          int qos)
+{
+    cJSON *root;
+    cJSON *chunk;
+    uint32_t datapoints_limit;
+    uint32_t payload_limit;
+    uint32_t chunk_points = 0;
+    int sent_chunks = 0;
+
+    if (!client->config.enable_session_limits ||
+        !topic_is_rate_limited(topic)) {
+        return enqueue_or_send(client, topic, json, qos) ? 0 : -1;
+    }
+
+    payload_limit = client->limits.max_payload_size;
+    if (payload_limit == 0 || strlen(json) <= payload_limit) {
+        return enqueue_or_send(client, topic, json, qos) ? 0 : -1;
+    }
+
+    root = cJSON_Parse(json);
+    if (!cJSON_IsObject(root)) {
+        if (root != NULL) {
+            cJSON_Delete(root);
+        }
+        return -1;
+    }
+
+    datapoints_limit = client->limits.telemetry_datapoints_rate;
+    if (datapoints_limit == 0) {
+        datapoints_limit = 1;
+    }
+
+    chunk = cJSON_CreateObject();
+    if (chunk == NULL) {
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    for (cJSON *item = root->child; item != NULL; item = item->next) {
+        cJSON *dup = cJSON_Duplicate(item, true);
+        if (dup == NULL || !cJSON_AddItemToObject(chunk, item->string, dup)) {
+            if (dup != NULL) {
+                cJSON_Delete(dup);
+            }
+            cJSON_Delete(chunk);
+            cJSON_Delete(root);
+            return -1;
+        }
+        chunk_points++;
+
+        char *candidate = cJSON_PrintUnformatted(chunk);
+        bool chunk_full = false;
+        if (candidate == NULL) {
+            cJSON_Delete(chunk);
+            cJSON_Delete(root);
+            return -1;
+        }
+
+        if (strlen(candidate) > payload_limit || chunk_points >= datapoints_limit) {
+            cJSON_DeleteItemFromObjectCaseSensitive(chunk, item->string);
+            cJSON_free(candidate);
+
+            char *emit = cJSON_PrintUnformatted(chunk);
+            if (emit == NULL) {
+                cJSON_Delete(chunk);
+                cJSON_Delete(root);
+                return -1;
+            }
+            if (!enqueue_or_send(client, topic, emit, qos)) {
+                cJSON_free(emit);
+                cJSON_Delete(chunk);
+                cJSON_Delete(root);
+                return -1;
+            }
+            cJSON_free(emit);
+            sent_chunks++;
+
+            cJSON_Delete(chunk);
+            chunk = cJSON_CreateObject();
+            if (chunk == NULL) {
+                cJSON_Delete(root);
+                return -1;
+            }
+            dup = cJSON_Duplicate(item, true);
+            if (dup == NULL || !cJSON_AddItemToObject(chunk, item->string, dup)) {
+                if (dup != NULL) {
+                    cJSON_Delete(dup);
+                }
+                cJSON_Delete(chunk);
+                cJSON_Delete(root);
+                return -1;
+            }
+            chunk_points = 1;
+            chunk_full = true;
+        }
+
+        if (!chunk_full) {
+            cJSON_free(candidate);
+        }
+    }
+
+    if (chunk->child != NULL) {
+        char *emit = cJSON_PrintUnformatted(chunk);
+        if (emit == NULL) {
+            cJSON_Delete(chunk);
+            cJSON_Delete(root);
+            return -1;
+        }
+        if (!enqueue_or_send(client, topic, emit, qos)) {
+            cJSON_free(emit);
+            cJSON_Delete(chunk);
+            cJSON_Delete(root);
+            return -1;
+        }
+        cJSON_free(emit);
+        sent_chunks++;
+    }
+
+    cJSON_Delete(chunk);
+    cJSON_Delete(root);
+    return sent_chunks > 0 ? 0 : -1;
+}
+
+static uint32_t get_u32_field(cJSON *obj, const char *name, uint32_t fallback)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, name);
+    if (cJSON_IsNumber(item) && item->valuedouble > 0) {
+        return (uint32_t)item->valuedouble;
+    }
+    return fallback;
+}
+
+static void on_session_limits_response(tb_request_result_t result,
+                                       const char *response_json,
+                                       void *user_data)
+{
+    tb_client_t *client = (tb_client_t *)user_data;
+    uint32_t now_ms;
+
+    if (client == NULL) {
+        return;
+    }
+
+    client->session_limits_request_inflight = false;
+
+    if (result != TB_REQUEST_RESULT_SUCCESS || response_json == NULL) {
+        return;
+    }
+
+    cJSON *root = cJSON_Parse(response_json);
+    if (root == NULL) {
+        return;
+    }
+
+    cJSON *limits = cJSON_GetObjectItemCaseSensitive(root, "result");
+    if (!cJSON_IsObject(limits)) {
+        limits = root;
+    }
+
+    client->limits.message_rate = get_u32_field(
+        limits, "maxMessageRate", client->limits.message_rate);
+    client->limits.telemetry_rate = get_u32_field(
+        limits, "maxTelemetryRate", client->limits.telemetry_rate);
+    client->limits.telemetry_datapoints_rate = get_u32_field(
+        limits, "maxTelemetryDataPointsRate",
+        client->limits.telemetry_datapoints_rate);
+    client->limits.max_payload_size = get_u32_field(
+        limits, "maxPayloadSize", client->limits.max_payload_size);
+    client->limits.max_inflight_messages = get_u32_field(
+        limits, "maxInflightMessages", client->limits.max_inflight_messages);
+
+    cJSON_Delete(root);
+
+    now_ms = osal_task_get_time_ms();
+    bucket_init(&client->msg_bucket, (double)client->limits.message_rate,
+                now_ms);
+    bucket_init(&client->datapoint_bucket,
+                (double)client->limits.telemetry_datapoints_rate, now_ms);
+
+    client->session_limits_ready = true;
+    flush_deferred_queue(client);
+}
+
+static void maybe_request_session_limits(tb_client_t *client)
+{
+    if (client == NULL || !client->config.enable_session_limits) {
+        return;
+    }
+    if (client->session_limits_request_inflight || !client->connected) {
+        return;
+    }
+
+    client->session_limits_request_inflight = true;
+    if (tb_rpc_request(client, "getSessionLimits", "{}",
+                       on_session_limits_response, client, 5000) != 0) {
+        client->session_limits_request_inflight = false;
+    }
 }
 
 static tb_client_disconnect_reason_t map_disconnect_reason(
@@ -104,6 +552,8 @@ static void on_connect(void)
         return;
 
     client->connected = true;
+    flush_deferred_queue(client);
+    maybe_request_session_limits(client);
     /* This is called from the Mongoose event loop context */
     osal_log_info("[tb] Connected to ThingsBoard");
 
@@ -120,6 +570,7 @@ static void on_disconnect(mqtt_disconnect_reason_t reason)
         return;
 
     client->connected = false;
+    client->session_limits_request_inflight = false;
 
     /* Reset module pending state tied to the dropped transport session. */
     tb_attributes_handle_disconnect(client);
@@ -179,6 +630,13 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
     ctx->subscribe_qos_default = TB_CLIENT_DEFAULT_SUBSCRIBE_QOS;
     ctx->connected = false;
     ctx->mqtt_started = false;
+    ctx->deferred_capacity = clamp_defer_queue_capacity(config->defer_queue_capacity);
+    ctx->deferred_head = 0;
+    ctx->deferred_tail = 0;
+    ctx->deferred_count = 0;
+    ctx->session_limits_request_inflight = false;
+    ctx->session_limits_ready = false;
+    apply_default_session_limits(ctx);
 
     if (ctx->config.use_custom_qos_defaults) {
         if (ctx->config.default_publish_qos <= 1) {
@@ -261,6 +719,10 @@ int tb_client_connect(tb_client_t *client)
     mqtt_app_init();
     client->mqtt_started = true;
     client->connected = mqtt_app_is_connected();
+    if (client->connected) {
+        flush_deferred_queue(client);
+        maybe_request_session_limits(client);
+    }
     osal_log_info("[tb] ThingsBoard client connect requested");
     return 0;
 }
@@ -316,12 +778,25 @@ int tb_client_publish_with_qos(tb_client_t *client, const char *topic,
     if (qos != 0 && qos != 1) {
         return -1;
     }
-    if (!mqtt_app_is_connected()) {
-        osal_log_warning("[tb] Cannot publish: not connected");
+
+    flush_deferred_queue(client);
+
+    if (client->config.enable_session_limits && topic_is_rate_limited(topic)) {
+        if (strlen(json) > client->limits.max_payload_size) {
+            return publish_split_object_if_needed(client, topic, json, qos);
+        }
+    }
+
+    if (!enqueue_or_send(client, topic, json, qos)) {
+        if (!mqtt_app_is_connected()) {
+            osal_log_warning("[tb] Cannot publish: not connected");
+        } else {
+            osal_log_warning("[tb] Publish deferred queue full or throttled");
+        }
         return -1;
     }
-    bool ok = mqtt_app_post_data(topic, json, qos);
-    return ok ? 0 : -1;
+
+    return 0;
 }
 
 int tb_client_subscribe(tb_client_t *client, const char *topic,

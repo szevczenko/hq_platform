@@ -74,6 +74,10 @@ typedef struct {
     uint32_t reconnect_initial_delay_ms;
     uint32_t reconnect_max_delay_ms;
     bool reconnect_exponential_backoff;
+
+    /* Optional ThingsBoard session-limits enforcement (P1 reliability feature). */
+    bool enable_session_limits;
+    uint16_t defer_queue_capacity; /* 0 = default */
 } tb_client_config_t;
 
 /**

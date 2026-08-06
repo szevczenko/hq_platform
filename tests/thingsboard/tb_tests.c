@@ -148,6 +148,9 @@ static void destroy_test_client(tb_client_t *client)
 	}
 }
 
+static uint32_t parse_topic_suffix_id(const char *topic);
+static int find_last_publish_with_prefix(const char *prefix);
+
 /* ============================================================
  * Test: Client Init/Connect/Disconnect
  * ============================================================ */
@@ -391,6 +394,102 @@ static void test_client_qos_and_reconnect_policy(void)
 		MQTT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED);
 	TEST_ASSERT(mock_deinit_count == 0,
 		    "connect failure path does not deinit mqtt app");
+
+	tb_client_deinit(client);
+}
+
+static void test_session_limits_enforcement(void)
+{
+	TEST_START("Session Limits Enforcement");
+	mqtt_app_mock_reset();
+
+	tb_client_config_t cfg = {
+		.server_url = "mqtt://tb.example.com:1883",
+		.access_token = "my_device_token",
+		.client_id = "my_client",
+		.device_name = "sensor_1",
+		.enable_session_limits = true,
+		.defer_queue_capacity = 2,
+	};
+
+	tb_client_t *client = NULL;
+	TEST_ASSERT(tb_client_init(&client, &cfg) == 0,
+		    "tb_client_init succeeds with session limits enabled");
+	TEST_ASSERT(client != NULL, "client handle is not NULL");
+	TEST_ASSERT(tb_client_connect(client) == 0, "tb_client_connect succeeds");
+
+	int limits_req_idx = find_last_publish_with_prefix(
+		"v1/devices/me/rpc/request/");
+	TEST_ASSERT(limits_req_idx >= 0,
+		    "getSessionLimits client RPC request is published on connect");
+
+	cJSON *limits_req = cJSON_Parse(mock_publishes[limits_req_idx].message);
+	TEST_ASSERT(limits_req != NULL, "getSessionLimits request JSON is valid");
+	if (limits_req != NULL) {
+		cJSON *method =
+			cJSON_GetObjectItemCaseSensitive(limits_req, "method");
+		TEST_ASSERT(method != NULL && cJSON_IsString(method) &&
+				    strcmp(method->valuestring,
+					   "getSessionLimits") == 0,
+			    "getSessionLimits method is requested");
+		cJSON_Delete(limits_req);
+	}
+
+	uint32_t req_id = parse_topic_suffix_id(mock_publishes[limits_req_idx].topic);
+	char limits_resp_topic[128];
+	snprintf(limits_resp_topic, sizeof(limits_resp_topic),
+		 "v1/devices/me/rpc/response/%u", req_id);
+	const char *strict_limits =
+		"{\"result\":{\"maxMessageRate\":1,\"maxTelemetryRate\":1,"
+		"\"maxTelemetryDataPointsRate\":2,\"maxPayloadSize\":12,"
+		"\"maxInflightMessages\":2}}";
+	mqtt_app_mock_deliver_message(limits_resp_topic, strict_limits,
+			      strlen(strict_limits));
+
+	mock_publish_count = 0;
+	int ret = tb_telemetry_send_json(client, "{\"a\":1,\"b\":2,\"c\":3}");
+	TEST_ASSERT(ret == 0,
+		    "telemetry publish succeeds with payload split/defer under strict limits");
+	TEST_ASSERT(mock_publish_count >= 1,
+		    "at least one telemetry chunk is published immediately");
+
+	ret = tb_telemetry_send_json(client, "{\"d\":4}");
+	TEST_ASSERT(ret != 0,
+		    "queue saturation rejects additional telemetry when defer queue is full");
+
+	int published_before_delay = mock_publish_count;
+	osal_task_delay_ms(1200);
+	ret = tb_telemetry_send_json(client, "{\"e\":5}");
+	TEST_ASSERT(ret == 0,
+		    "token bucket allows deferred progress after refill interval");
+	TEST_ASSERT(mock_publish_count > published_before_delay,
+		    "deferred telemetry is flushed after limiter refill");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	mqtt_app_mock_simulate_connect();
+	int limits_req_idx_after_reconnect = find_last_publish_with_prefix(
+		"v1/devices/me/rpc/request/");
+	TEST_ASSERT(limits_req_idx_after_reconnect >= 0,
+		    "getSessionLimits is requested again after reconnect");
+
+	uint32_t req_id2 =
+		parse_topic_suffix_id(mock_publishes[limits_req_idx_after_reconnect].topic);
+	snprintf(limits_resp_topic, sizeof(limits_resp_topic),
+		 "v1/devices/me/rpc/response/%u", req_id2);
+	const char *relaxed_limits =
+		"{\"result\":{\"maxMessageRate\":20,\"maxTelemetryRate\":20,"
+		"\"maxTelemetryDataPointsRate\":20,\"maxPayloadSize\":256,"
+		"\"maxInflightMessages\":8}}";
+	mqtt_app_mock_deliver_message(limits_resp_topic, relaxed_limits,
+			      strlen(relaxed_limits));
+
+	mock_publish_count = 0;
+	ret = tb_telemetry_send_json(client,
+			     "{\"x\":1,\"y\":2,\"z\":3,\"w\":4}");
+	TEST_ASSERT(ret == 0,
+		    "telemetry publish succeeds after relaxed limits update");
+	TEST_ASSERT(mock_publish_count == 1,
+		    "relaxed payload limit avoids split after reconnect limits refresh");
 
 	tb_client_deinit(client);
 }
@@ -1763,6 +1862,7 @@ int main(void)
 	test_client_connection_callbacks();
 	test_client_connection_failure_callback();
 	test_client_qos_and_reconnect_policy();
+	test_session_limits_enforcement();
 	test_client_singleton_init_rejected();
 
 	/* Telemetry */

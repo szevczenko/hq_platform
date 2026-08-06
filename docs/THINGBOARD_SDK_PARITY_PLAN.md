@@ -115,17 +115,6 @@ real device target.
 
 ## P1 - Client Reliability And Protocol Behavior
 
-- [ ] **Enforce ThingsBoard session limits and payload bounds.**
-  - Request `getSessionLimits` by client-side RPC after a successful connect.
-  - Parse server limits for message rate, telemetry rate, telemetry data
-    points, maximum payload size, and maximum inflight messages.
-  - Implement bounded queues and a token-bucket limiter suitable for an MCU.
-    Reject or defer data rather than blocking the Mongoose event thread.
-  - Split telemetry and attribute batches by configured payload/data-point
-    limits while preserving timestamp and metadata semantics.
-  - Unit tests: parser validation, queue saturation, limiter timing through a
-    fake clock, payload splitting, and server-limit changes after reconnect.
-
 - [ ] **Improve attribute subscription semantics.**
   - Keep the existing all-shared-attributes callback for a small API.
   - Add optional per-key subscriptions and independent subscription handles,
