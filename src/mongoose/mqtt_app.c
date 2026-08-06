@@ -867,7 +867,6 @@ void mqtt_app_init(void)
 		goto err_sync;
 	}
 
-	memset(mqtt_state.subscriptions, 0, sizeof(mqtt_state.subscriptions));
 	memset(&mqtt_acks, 0, sizeof(mqtt_acks));
 	mqtt_state.reconnect_enabled = true;
 	mqtt_state.shutdown_requested = false;

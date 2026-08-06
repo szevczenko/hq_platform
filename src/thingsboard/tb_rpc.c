@@ -47,6 +47,7 @@ static tb_rpc_pending_t s_rpc_pending[TB_RPC_MAX_PENDING];
 static osal_mutex_id_t s_rpc_mutex;
 static bool s_rpc_init = false;
 static bool s_client_rpc_subscribed = false;
+static tb_client_t *s_owner_client = NULL;
 
 static void ensure_rpc_init(void)
 {
@@ -127,6 +128,12 @@ int tb_rpc_subscribe_server(tb_client_t *client, tb_server_rpc_cb_t cb,
         return -1;
     }
 
+    if (s_owner_client == NULL) {
+        s_owner_client = client;
+    } else if (s_owner_client != client) {
+        return -1;
+    }
+
     s_server_rpc_cb = cb;
     s_server_rpc_user_data = user_data;
 
@@ -144,6 +151,9 @@ int tb_rpc_subscribe_server(tb_client_t *client, tb_server_rpc_cb_t cb,
 int tb_rpc_unsubscribe_server(tb_client_t *client)
 {
     if (client == NULL) {
+        return -1;
+    }
+    if (s_owner_client != NULL && s_owner_client != client) {
         return -1;
     }
 
@@ -177,6 +187,12 @@ int tb_rpc_request(tb_client_t *client, const char *method,
                    void *user_data, uint32_t timeout_ms)
 {
     if (client == NULL || method == NULL) {
+        return -1;
+    }
+
+    if (s_owner_client == NULL) {
+        s_owner_client = client;
+    } else if (s_owner_client != client) {
         return -1;
     }
 
@@ -265,4 +281,49 @@ int tb_rpc_request(tb_client_t *client, const char *method,
     }
 
     return ret;
+}
+
+void tb_rpc_handle_disconnect(tb_client_t *client)
+{
+    tb_client_rpc_cb_t callbacks[TB_RPC_MAX_PENDING] = { 0 };
+    void *user_data[TB_RPC_MAX_PENDING] = { 0 };
+    int callback_count = 0;
+
+    if (client == NULL || s_owner_client == NULL || s_owner_client != client ||
+        !s_rpc_init) {
+        return;
+    }
+
+    osal_mutex_take(s_rpc_mutex);
+    for (int i = 0; i < TB_RPC_MAX_PENDING; i++) {
+        if (!s_rpc_pending[i].active) {
+            continue;
+        }
+
+        callbacks[callback_count] = s_rpc_pending[i].cb;
+        user_data[callback_count] = s_rpc_pending[i].user_data;
+        callback_count++;
+        s_rpc_pending[i].active = false;
+    }
+    osal_mutex_give(s_rpc_mutex);
+
+    for (int i = 0; i < callback_count; i++) {
+        if (callbacks[i] != NULL) {
+            callbacks[i](NULL, user_data[i]);
+        }
+    }
+}
+
+void tb_rpc_deinit(tb_client_t *client)
+{
+    if (client == NULL || s_owner_client == NULL || s_owner_client != client) {
+        return;
+    }
+
+    tb_rpc_handle_disconnect(client);
+    s_server_rpc_cb = NULL;
+    s_server_rpc_user_data = NULL;
+    s_server_rpc_subscribed = false;
+    s_client_rpc_subscribed = false;
+    s_owner_client = NULL;
 }

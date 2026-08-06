@@ -146,6 +146,36 @@ static void shared_attr_handler(const char *topic, const char *payload,
 	}
 }
 
+void tb_attributes_handle_disconnect(tb_client_t *client)
+{
+	tb_attribute_response_cb_t callbacks[TB_ATTR_MAX_PENDING] = { 0 };
+	void *user_data[TB_ATTR_MAX_PENDING] = { 0 };
+	int callback_count = 0;
+
+	if (client == NULL || client != s_owner_client || !s_pending_init) {
+		return;
+	}
+
+	osal_mutex_take(s_pending_mutex);
+	for (int i = 0; i < TB_ATTR_MAX_PENDING; i++) {
+		if (!s_pending[i].active) {
+			continue;
+		}
+
+		callbacks[callback_count] = s_pending[i].cb;
+		user_data[callback_count] = s_pending[i].user_data;
+		callback_count++;
+		s_pending[i].active = false;
+	}
+	osal_mutex_give(s_pending_mutex);
+
+	for (int i = 0; i < callback_count; i++) {
+		if (callbacks[i] != NULL) {
+			callbacks[i](NULL, user_data[i]);
+		}
+	}
+}
+
 static int send_kv_attribute(tb_client_t *client, cJSON *root)
 {
 	char *json = cJSON_PrintUnformatted(root);

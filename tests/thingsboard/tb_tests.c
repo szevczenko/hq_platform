@@ -503,16 +503,59 @@ static void test_attributes_send(void)
 
 static bool s_attr_response_received = false;
 static char s_attr_response_buf[512] = { 0 };
+static int s_attr_null_response_count = 0;
+static int s_attr_response_count = 0;
 
 static void attr_response_cb(const char *json_response, void *user_data)
 {
 	s_attr_response_received = true;
+	s_attr_response_count++;
 	if (json_response) {
 		strncpy(s_attr_response_buf, json_response,
 			sizeof(s_attr_response_buf) - 1);
 		s_attr_response_buf[sizeof(s_attr_response_buf) - 1] = '\0';
+	} else {
+		s_attr_null_response_count++;
 	}
 	(void)user_data;
+}
+
+static void test_attributes_request_reconnect_safety(void)
+{
+	TEST_START("Attributes Request Reconnect Safety");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_attr_response_received = false;
+	s_attr_response_count = 0;
+	s_attr_null_response_count = 0;
+	memset(s_attr_response_buf, 0, sizeof(s_attr_response_buf));
+
+	const char *keys[] = { "firmware_version" };
+	TEST_ASSERT(tb_attributes_request_client(client, keys, 1,
+					attr_response_cb, NULL,
+					5000) == 0,
+		    "first attribute request succeeds");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	TEST_ASSERT(s_attr_null_response_count == 1,
+		    "pending attribute request is failed on disconnect");
+
+	mqtt_app_mock_simulate_connect();
+	TEST_ASSERT(tb_attributes_request_client(client, keys, 1,
+					attr_response_cb, NULL,
+					5000) == 0,
+		    "attribute request succeeds after reconnect");
+
+	const char *response = "{\"client\":{\"firmware_version\":\"3.0\"}}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes/response/2",
+				      response, strlen(response));
+	TEST_ASSERT(s_attr_response_count == 2,
+		    "attribute callback called exactly once per request");
+	TEST_ASSERT(strstr(s_attr_response_buf, "firmware_version") != NULL,
+		    "attribute response is delivered after reconnect");
+
+	destroy_test_client(client);
 }
 
 static void test_attributes_request(void)
@@ -668,15 +711,65 @@ static void test_server_side_rpc(void)
  * ============================================================ */
 static bool s_client_rpc_received = false;
 static char s_client_rpc_response[512] = { 0 };
+static int s_client_rpc_null_count = 0;
+static int s_client_rpc_response_count = 0;
 
 static void client_rpc_cb(const char *response_json, void *user_data)
 {
 	s_client_rpc_received = true;
+	s_client_rpc_response_count++;
 	if (response_json) {
 		strncpy(s_client_rpc_response, response_json,
 			sizeof(s_client_rpc_response) - 1);
+		s_client_rpc_response[sizeof(s_client_rpc_response) - 1] = '\0';
+	} else {
+		s_client_rpc_null_count++;
 	}
 	(void)user_data;
+}
+
+static void test_client_side_rpc_reconnect_safety(void)
+{
+	TEST_START("Client RPC Reconnect Safety");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_client_rpc_received = false;
+	s_client_rpc_null_count = 0;
+	s_client_rpc_response_count = 0;
+	memset(s_client_rpc_response, 0, sizeof(s_client_rpc_response));
+
+	TEST_ASSERT(tb_rpc_request(client, "getTime", NULL, client_rpc_cb, NULL,
+			   5000) == 0,
+		    "first client RPC request succeeds");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	TEST_ASSERT(s_client_rpc_null_count == 1,
+		    "pending client RPC request is failed on disconnect");
+
+	mqtt_app_mock_simulate_connect();
+	TEST_ASSERT(tb_rpc_request(client, "getTime", NULL, client_rpc_cb, NULL,
+			   5000) == 0,
+		    "client RPC request succeeds after reconnect");
+
+	const char *id_start = strrchr(mock_publishes[mock_publish_count - 1].topic,
+				      '/');
+	TEST_ASSERT(id_start != NULL,
+		    "reconnected client RPC publish includes request ID");
+	uint32_t req_id = (uint32_t)strtoul(id_start + 1, NULL, 10);
+
+	char resp_topic[128];
+	snprintf(resp_topic, sizeof(resp_topic),
+		 "v1/devices/me/rpc/response/%u", req_id);
+	mqtt_app_mock_deliver_message(resp_topic, "{\"time\":1700000010}",
+			      strlen("{\"time\":1700000010}"));
+
+	TEST_ASSERT(s_client_rpc_response_count == 2,
+		    "client RPC callback called exactly once per request");
+	TEST_ASSERT(strstr(s_client_rpc_response, "1700000010") != NULL,
+		    "client RPC response is delivered after reconnect");
+
+	destroy_test_client(client);
 }
 
 static void test_client_side_rpc(void)
@@ -1327,11 +1420,13 @@ int main(void)
 	/* Attributes */
 	test_attributes_send();
 	test_attributes_request();
+	test_attributes_request_reconnect_safety();
 	test_attributes_subscribe_shared();
 
 	/* RPC */
 	test_server_side_rpc();
 	test_client_side_rpc();
+	test_client_side_rpc_reconnect_safety();
 
 	/* Provisioning */
 	test_provisioning();

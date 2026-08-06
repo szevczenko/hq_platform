@@ -90,6 +90,9 @@ int tb_attributes_unsubscribe(tb_client_t *client);
 
 void tb_attributes_deinit(tb_client_t *client);
 
+/* Internal lifecycle hook used by tb_client on transport disconnect. */
+void tb_attributes_handle_disconnect(tb_client_t *client);
+
 #ifdef __cplusplus
 }
 #endif

@@ -121,16 +121,6 @@ real device target.
   - Use the callbacks in demos to publish connection state and in the OTA
     demo to drive health confirmation.
 
-- [ ] **Make all stateful ThingsBoard modules reconnect-safe.**
-  - Restore required subscriptions after MQTT reconnection: attribute
-    responses, shared attributes, RPC topics, and firmware chunk responses.
-  - Clear or fail pending attribute and RPC requests when the connection
-    drops; do not retain callbacks that can never receive a reply.
-  - Ensure a fresh MQTT session does not duplicate callback registrations or
-    exhaust subscription slots.
-  - Integration test: drop the broker connection during each API operation,
-    reconnect, then verify the module receives the next valid message once.
-
 - [ ] **Implement request deadlines and timeout callbacks.**
   - Attribute and client-RPC requests need explicit timeout tracking rather
     than retaining pending slots indefinitely.
@@ -255,3 +245,17 @@ and device name, and must log its connection lifecycle.
 - [ ] ESP release configuration validates Secure Boot, Flash Encryption, TLS
   server authentication, and rollback health confirmation.
 - [ ] POSIX unit tests and the ThingsBoard integration suite pass in CI.
+
+## CI Job Setup (Current State: Manual Testing)
+
+At the moment, verification is run manually. Add CI jobs to automate the same
+checks.
+
+- [ ] Create a CI job for POSIX build (`cmake -S . -B build_posix`).
+- [ ] Create a CI job for ThingsBoard unit tests (`tb_tests`).
+- [ ] Create a CI job for broker reconnect integration
+  (`tb_reconnect_integration_tests`) using a disposable MQTT broker service.
+- [ ] Create a CI job for firmware update integration script(s) against local
+  ThingsBoard docker stack.
+- [ ] Publish test logs/artifacts from CI for failed runs.
+- [ ] Keep manual test scripts as a local fallback until CI is stable.
