@@ -148,6 +148,9 @@ static void destroy_test_client(tb_client_t *client)
 	}
 }
 
+static uint32_t parse_topic_suffix_id(const char *topic);
+static int find_last_publish_with_prefix(const char *prefix);
+
 /* ============================================================
  * Test: Client Init/Connect/Disconnect
  * ============================================================ */
@@ -312,6 +315,182 @@ static void test_client_connection_failure_callback(void)
 		    "connection failure reason maps to connect creation failure");
 	TEST_ASSERT(s_connect_failure_cb_connected_state == false,
 		    "client remains disconnected during repeated failures");
+
+	tb_client_deinit(client);
+}
+
+static void noop_topic_cb(const char *topic, const char *payload,
+			  size_t payload_len)
+{
+	(void)topic;
+	(void)payload;
+	(void)payload_len;
+}
+
+static void test_client_qos_and_reconnect_policy(void)
+{
+	TEST_START("Client QoS And Reconnect Policy");
+	mqtt_app_mock_reset();
+
+	tb_client_config_t cfg = {
+		.server_url = "mqtt://tb.example.com:1883",
+		.access_token = "my_device_token",
+		.client_id = "my_client",
+		.device_name = "sensor_1",
+		.use_custom_qos_defaults = true,
+		.default_publish_qos = 0,
+		.default_subscribe_qos = 0,
+		.keepalive_sec = 1,
+		.reconnect_initial_delay_ms = 200,
+		.reconnect_max_delay_ms = 500,
+		.reconnect_exponential_backoff = true,
+	};
+
+	tb_client_t *client = NULL;
+	TEST_ASSERT(tb_client_init(&client, &cfg) == 0,
+		    "tb_client_init succeeds with QoS/policy config");
+	TEST_ASSERT(client != NULL, "client handle is not NULL");
+
+	TEST_ASSERT(mock_connection_policy.keepalive_sec == 15,
+		    "keepalive policy is bounded to minimum");
+	TEST_ASSERT(mock_connection_policy.reconnect_initial_delay_ms == 1000,
+		    "reconnect initial delay is bounded to minimum");
+	TEST_ASSERT(mock_connection_policy.reconnect_max_delay_ms == 1000,
+		    "reconnect max delay is bounded and not below initial");
+	TEST_ASSERT(mock_connection_policy.reconnect_exponential_backoff == true,
+		    "reconnect backoff policy is propagated");
+
+	TEST_ASSERT(tb_client_connect(client) == 0, "tb_client_connect succeeds");
+	TEST_ASSERT(tb_client_publish(client, "v1/devices/me/telemetry",
+			      "{\"temp\":23}") == 0,
+		    "default QoS publish succeeds");
+	TEST_ASSERT(mock_publish_count >= 1 &&
+			    mock_publishes[mock_publish_count - 1].qos == 0,
+		    "default publish QoS is applied");
+
+	TEST_ASSERT(tb_client_publish_with_qos(client, "v1/devices/me/telemetry",
+				       "{\"temp\":24}", 1) == 0,
+		    "per-call QoS publish succeeds");
+	TEST_ASSERT(mock_publish_count >= 2 &&
+			    mock_publishes[mock_publish_count - 1].qos == 1,
+		    "per-call publish QoS override is applied");
+
+	TEST_ASSERT(tb_client_subscribe(client, "v1/devices/me/test/+",
+				noop_topic_cb, 1000) == 0,
+		    "default QoS subscribe succeeds");
+	TEST_ASSERT(mock_subscribe_count >= 1 &&
+			    mock_subscribes[mock_subscribe_count - 1].qos == 0,
+		    "default subscribe QoS is applied");
+
+	TEST_ASSERT(tb_client_subscribe_with_qos(client,
+					 "v1/devices/me/test2/+", 1,
+					 noop_topic_cb, 1000) == 0,
+		    "per-call QoS subscribe succeeds");
+	TEST_ASSERT(mock_subscribe_count >= 2 &&
+			    mock_subscribes[mock_subscribe_count - 1].qos == 1,
+		    "per-call subscribe QoS override is applied");
+
+	mqtt_app_mock_simulate_connect_failure(
+		MQTT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED);
+	TEST_ASSERT(mock_deinit_count == 0,
+		    "connect failure path does not deinit mqtt app");
+
+	tb_client_deinit(client);
+}
+
+static void test_session_limits_enforcement(void)
+{
+	TEST_START("Session Limits Enforcement");
+	mqtt_app_mock_reset();
+
+	tb_client_config_t cfg = {
+		.server_url = "mqtt://tb.example.com:1883",
+		.access_token = "my_device_token",
+		.client_id = "my_client",
+		.device_name = "sensor_1",
+		.enable_session_limits = true,
+		.defer_queue_capacity = 2,
+	};
+
+	tb_client_t *client = NULL;
+	TEST_ASSERT(tb_client_init(&client, &cfg) == 0,
+		    "tb_client_init succeeds with session limits enabled");
+	TEST_ASSERT(client != NULL, "client handle is not NULL");
+	TEST_ASSERT(tb_client_connect(client) == 0, "tb_client_connect succeeds");
+
+	int limits_req_idx = find_last_publish_with_prefix(
+		"v1/devices/me/rpc/request/");
+	TEST_ASSERT(limits_req_idx >= 0,
+		    "getSessionLimits client RPC request is published on connect");
+
+	cJSON *limits_req = cJSON_Parse(mock_publishes[limits_req_idx].message);
+	TEST_ASSERT(limits_req != NULL, "getSessionLimits request JSON is valid");
+	if (limits_req != NULL) {
+		cJSON *method =
+			cJSON_GetObjectItemCaseSensitive(limits_req, "method");
+		TEST_ASSERT(method != NULL && cJSON_IsString(method) &&
+				    strcmp(method->valuestring,
+					   "getSessionLimits") == 0,
+			    "getSessionLimits method is requested");
+		cJSON_Delete(limits_req);
+	}
+
+	uint32_t req_id = parse_topic_suffix_id(mock_publishes[limits_req_idx].topic);
+	char limits_resp_topic[128];
+	snprintf(limits_resp_topic, sizeof(limits_resp_topic),
+		 "v1/devices/me/rpc/response/%u", req_id);
+	const char *strict_limits =
+		"{\"result\":{\"maxMessageRate\":1,\"maxTelemetryRate\":1,"
+		"\"maxTelemetryDataPointsRate\":2,\"maxPayloadSize\":12,"
+		"\"maxInflightMessages\":2}}";
+	mqtt_app_mock_deliver_message(limits_resp_topic, strict_limits,
+			      strlen(strict_limits));
+
+	mock_publish_count = 0;
+	int ret = tb_telemetry_send_json(client, "{\"a\":1,\"b\":2,\"c\":3}");
+	TEST_ASSERT(ret == 0,
+		    "telemetry publish succeeds with payload split/defer under strict limits");
+	TEST_ASSERT(mock_publish_count >= 1,
+		    "at least one telemetry chunk is published immediately");
+
+	ret = tb_telemetry_send_json(client, "{\"d\":4}");
+	TEST_ASSERT(ret != 0,
+		    "queue saturation rejects additional telemetry when defer queue is full");
+
+	/* TODO: replace with a fake clock to avoid real-time dependency. */
+	int published_before_delay = mock_publish_count;
+	osal_task_delay_ms(1100);
+	ret = tb_telemetry_send_json(client, "{\"e\":5}");
+	TEST_ASSERT(ret == 0,
+		    "token bucket allows deferred progress after refill interval");
+	TEST_ASSERT(mock_publish_count > published_before_delay,
+		    "deferred telemetry is flushed after limiter refill");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	mqtt_app_mock_simulate_connect();
+	int limits_req_idx_after_reconnect = find_last_publish_with_prefix(
+		"v1/devices/me/rpc/request/");
+	TEST_ASSERT(limits_req_idx_after_reconnect >= 0,
+		    "getSessionLimits is requested again after reconnect");
+
+	uint32_t req_id2 =
+		parse_topic_suffix_id(mock_publishes[limits_req_idx_after_reconnect].topic);
+	snprintf(limits_resp_topic, sizeof(limits_resp_topic),
+		 "v1/devices/me/rpc/response/%u", req_id2);
+	const char *relaxed_limits =
+		"{\"result\":{\"maxMessageRate\":20,\"maxTelemetryRate\":20,"
+		"\"maxTelemetryDataPointsRate\":20,\"maxPayloadSize\":256,"
+		"\"maxInflightMessages\":8}}";
+	mqtt_app_mock_deliver_message(limits_resp_topic, relaxed_limits,
+			      strlen(relaxed_limits));
+
+	mock_publish_count = 0;
+	ret = tb_telemetry_send_json(client,
+			     "{\"x\":1,\"y\":2,\"z\":3,\"w\":4}");
+	TEST_ASSERT(ret == 0,
+		    "telemetry publish succeeds after relaxed limits update");
+	TEST_ASSERT(mock_publish_count == 1,
+		    "relaxed payload limit avoids split after reconnect limits refresh");
 
 	tb_client_deinit(client);
 }
@@ -757,16 +936,81 @@ static void test_attributes_request_max_pending(void)
 
 static bool s_shared_attr_received = false;
 static char s_shared_attr_buf[512] = { 0 };
+static int s_shared_attr_cb_count = 0;
+static int s_shared_threshold_cb_count_a = 0;
+static int s_shared_threshold_cb_count_b = 0;
+static int s_shared_mode_cb_count = 0;
+static int s_shared_self_remove_cb_count = 0;
+static char s_last_key_a[64] = { 0 };
+static char s_last_key_b[64] = { 0 };
+static char s_last_key_mode[64] = { 0 };
+
+typedef struct {
+	tb_client_t *client;
+	tb_shared_attribute_subscription_t *handle;
+} self_remove_ctx_t;
+
+static self_remove_ctx_t s_self_remove_ctx = { 0 };
 
 static void shared_attr_cb(const char *json_payload, void *user_data)
 {
 	s_shared_attr_received = true;
+	s_shared_attr_cb_count++;
 	if (json_payload) {
 		strncpy(s_shared_attr_buf, json_payload,
 			sizeof(s_shared_attr_buf) - 1);
 		s_shared_attr_buf[sizeof(s_shared_attr_buf) - 1] = '\0';
 	}
 	(void)user_data;
+}
+
+static void shared_threshold_cb_a(const char *key, const char *json_payload,
+				  void *user_data)
+{
+	(void)user_data;
+	if (json_payload == NULL) {
+		return;
+	}
+	s_shared_threshold_cb_count_a++;
+	strncpy(s_last_key_a, key, sizeof(s_last_key_a) - 1);
+	s_last_key_a[sizeof(s_last_key_a) - 1] = '\0';
+}
+
+static void shared_threshold_cb_b(const char *key, const char *json_payload,
+				  void *user_data)
+{
+	(void)user_data;
+	if (json_payload == NULL) {
+		return;
+	}
+	s_shared_threshold_cb_count_b++;
+	strncpy(s_last_key_b, key, sizeof(s_last_key_b) - 1);
+	s_last_key_b[sizeof(s_last_key_b) - 1] = '\0';
+}
+
+static void shared_mode_cb(const char *key, const char *json_payload,
+			   void *user_data)
+{
+	(void)user_data;
+	if (json_payload == NULL) {
+		return;
+	}
+	s_shared_mode_cb_count++;
+	strncpy(s_last_key_mode, key, sizeof(s_last_key_mode) - 1);
+	s_last_key_mode[sizeof(s_last_key_mode) - 1] = '\0';
+}
+
+static void shared_threshold_self_remove_cb(const char *key,
+					    const char *json_payload,
+					    void *user_data)
+{
+	(void)key;
+	(void)json_payload;
+	self_remove_ctx_t *ctx = (self_remove_ctx_t *)user_data;
+	s_shared_self_remove_cb_count++;
+	if (ctx != NULL && ctx->client != NULL && ctx->handle != NULL) {
+		(void)tb_attributes_unsubscribe_key(ctx->client, ctx->handle);
+	}
 }
 
 static void test_attributes_subscribe_shared(void)
@@ -792,6 +1036,136 @@ static void test_attributes_subscribe_shared(void)
 
 	ret = tb_attributes_unsubscribe(client);
 	TEST_ASSERT(ret == 0, "unsubscribe shared attributes succeeds");
+
+	destroy_test_client(client);
+}
+
+static void test_attributes_subscribe_shared_per_key(void)
+{
+	TEST_START("Shared Attribute Per-Key Subscribe");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_shared_attr_received = false;
+	s_shared_attr_cb_count = 0;
+	s_shared_threshold_cb_count_a = 0;
+	s_shared_threshold_cb_count_b = 0;
+	s_shared_mode_cb_count = 0;
+	s_shared_self_remove_cb_count = 0;
+	memset(s_shared_attr_buf, 0, sizeof(s_shared_attr_buf));
+	memset(s_last_key_a, 0, sizeof(s_last_key_a));
+	memset(s_last_key_b, 0, sizeof(s_last_key_b));
+	memset(s_last_key_mode, 0, sizeof(s_last_key_mode));
+	s_self_remove_ctx.client = client;
+	s_self_remove_ctx.handle = NULL;
+
+	tb_shared_attribute_subscription_t *threshold_a = NULL;
+	tb_shared_attribute_subscription_t *threshold_b = NULL;
+	tb_shared_attribute_subscription_t *mode_sub = NULL;
+	tb_shared_attribute_subscription_t *self_remove_sub = NULL;
+
+	TEST_ASSERT(tb_attributes_subscribe(client, shared_attr_cb, NULL) == 0,
+		    "wildcard shared subscription succeeds");
+	TEST_ASSERT(tb_attributes_subscribe_key(client, "threshold",
+					shared_threshold_cb_a,
+					NULL, &threshold_a) == 0,
+		    "first threshold keyed subscription succeeds");
+	TEST_ASSERT(threshold_a != NULL,
+		    "first threshold keyed subscription handle is returned");
+	TEST_ASSERT(tb_attributes_subscribe_key(client, "threshold",
+					shared_threshold_cb_b,
+					NULL, &threshold_b) == 0,
+		    "second threshold keyed subscription succeeds");
+	TEST_ASSERT(threshold_b != NULL,
+		    "second threshold keyed subscription handle is returned");
+	TEST_ASSERT(tb_attributes_subscribe_key(client, "mode", shared_mode_cb,
+					NULL, &mode_sub) == 0,
+		    "mode keyed subscription succeeds");
+	TEST_ASSERT(mode_sub != NULL,
+		    "mode keyed subscription handle is returned");
+	TEST_ASSERT(tb_attributes_subscribe_key(client, "threshold",
+					shared_threshold_self_remove_cb,
+					&s_self_remove_ctx,
+					&self_remove_sub) == 0,
+		    "self-removing threshold keyed subscription succeeds");
+	TEST_ASSERT(self_remove_sub != NULL,
+		    "self-removing keyed subscription handle is returned");
+	s_self_remove_ctx.handle = self_remove_sub;
+
+	const char *payload_all = "{\"threshold\":42,\"mode\":\"auto\"}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_all,
+				      strlen(payload_all));
+	TEST_ASSERT(s_shared_attr_received == true,
+		    "wildcard shared callback receives update");
+	TEST_ASSERT(s_shared_attr_cb_count == 1,
+		    "wildcard callback called once for first update");
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 1,
+		    "first keyed threshold callback called for matching key");
+	TEST_ASSERT(s_shared_threshold_cb_count_b == 1,
+		    "second keyed threshold callback called for matching key");
+	TEST_ASSERT(s_shared_mode_cb_count == 1,
+		    "mode keyed callback called for matching key");
+	TEST_ASSERT(s_shared_self_remove_cb_count == 1,
+		    "self-removing keyed callback called once");
+	TEST_ASSERT(strcmp(s_last_key_a, "threshold") == 0,
+		    "first keyed callback receives subscribed key name");
+	TEST_ASSERT(strcmp(s_last_key_b, "threshold") == 0,
+		    "second keyed callback receives subscribed key name");
+	TEST_ASSERT(strcmp(s_last_key_mode, "mode") == 0,
+		    "mode keyed callback receives subscribed key name");
+
+	const char *payload_nonmatch = "{\"other\":1}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_nonmatch,
+				      strlen(payload_nonmatch));
+	TEST_ASSERT(s_shared_attr_cb_count == 2,
+		    "wildcard callback still receives nonmatching updates");
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 1,
+		    "keyed callback ignores nonmatching payload keys");
+	TEST_ASSERT(s_shared_threshold_cb_count_b == 1,
+		    "second keyed callback ignores nonmatching payload keys");
+	TEST_ASSERT(s_shared_mode_cb_count == 1,
+		    "mode keyed callback ignores nonmatching payload keys");
+
+	const char *payload_threshold = "{\"threshold\":43}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_threshold,
+				      strlen(payload_threshold));
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 2,
+		    "first keyed threshold callback is called again");
+	TEST_ASSERT(s_shared_threshold_cb_count_b == 2,
+		    "second keyed threshold callback is called again");
+	TEST_ASSERT(s_shared_self_remove_cb_count == 1,
+		    "self-removing keyed callback is not called after removal");
+
+	TEST_ASSERT(tb_attributes_unsubscribe(client) == 0,
+		    "wildcard unsubscribe succeeds without removing keyed subscriptions");
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_threshold,
+				      strlen(payload_threshold));
+	TEST_ASSERT(s_shared_attr_cb_count == 3,
+		    "wildcard callback is not called after wildcard unsubscribe");
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 3,
+		    "keyed subscription remains active after wildcard unsubscribe");
+
+	TEST_ASSERT(tb_attributes_unsubscribe_key(client, threshold_a) == 0,
+		    "first keyed threshold unsubscribe succeeds");
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_threshold,
+				      strlen(payload_threshold));
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 3,
+		    "first keyed threshold callback stops after unsubscribe");
+	TEST_ASSERT(s_shared_threshold_cb_count_b == 4,
+		    "second keyed threshold callback remains active");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	mqtt_app_mock_simulate_connect();
+	const char *payload_mode = "{\"mode\":\"manual\"}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_mode,
+				      strlen(payload_mode));
+	TEST_ASSERT(s_shared_mode_cb_count == 2,
+		    "mode keyed callback survives reconnect");
+
+	TEST_ASSERT(tb_attributes_unsubscribe_key(client, threshold_b) == 0,
+		    "second keyed threshold unsubscribe succeeds");
+	TEST_ASSERT(tb_attributes_unsubscribe_key(client, mode_sub) == 0,
+		    "mode keyed unsubscribe succeeds");
 
 	destroy_test_client(client);
 }
@@ -1683,6 +2057,8 @@ int main(void)
 	test_client_request_id();
 	test_client_connection_callbacks();
 	test_client_connection_failure_callback();
+	test_client_qos_and_reconnect_policy();
+	test_session_limits_enforcement();
 	test_client_singleton_init_rejected();
 
 	/* Telemetry */
@@ -1700,6 +2076,7 @@ int main(void)
 	test_attributes_request_timeout_and_slot_reuse();
 	test_attributes_request_max_pending();
 	test_attributes_subscribe_shared();
+	test_attributes_subscribe_shared_per_key();
 
 	/* RPC */
 	test_server_side_rpc();

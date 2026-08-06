@@ -26,6 +26,15 @@ typedef void (*tb_attribute_response_cb_t)(tb_request_result_t result,
 typedef void (*tb_shared_attribute_cb_t)(const char *json_payload,
                                          void *user_data);
 
+/** Opaque handle for per-key shared-attribute subscriptions */
+typedef struct tb_shared_attribute_subscription
+    tb_shared_attribute_subscription_t;
+
+/** Callback for per-key shared attribute updates */
+typedef void (*tb_shared_attribute_key_cb_t)(const char *key,
+                         const char *json_payload,
+                         void *user_data);
+
 /*
  * Note: Stateful APIs in this module (attribute requests and shared-attribute
  * subscribe/unsubscribe) are singleton-scoped and must use one tb_client_t
@@ -85,9 +94,27 @@ int tb_attributes_subscribe(tb_client_t *client, tb_shared_attribute_cb_t cb,
                             void *user_data);
 
 /**
+ * @brief Subscribe to updates for one shared attribute key.
+ *
+ * Multiple keyed subscriptions may coexist. Each successful call returns an
+ * independent handle that can be removed later.
+ */
+int tb_attributes_subscribe_key(
+    tb_client_t *client, const char *key, tb_shared_attribute_key_cb_t cb,
+    void *user_data, tb_shared_attribute_subscription_t **subscription);
+
+/**
  * @brief Unsubscribe from shared attribute updates
  */
 int tb_attributes_unsubscribe(tb_client_t *client);
+
+/**
+ * @brief Remove a keyed shared-attribute subscription by handle.
+ *
+ * Safe to call from within the keyed callback itself.
+ */
+int tb_attributes_unsubscribe_key(
+    tb_client_t *client, tb_shared_attribute_subscription_t *subscription);
 
 void tb_attributes_deinit(tb_client_t *client);
 

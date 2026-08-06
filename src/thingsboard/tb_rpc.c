@@ -128,15 +128,6 @@ static void rpc_timeout_timer_cb(osal_timer_id_t timer_id)
 
 static void teardown_rpc_resources(void)
 {
-    return (int32_t)(now_ms - deadline_ms) >= 0;
-}
-
-static void complete_pending_requests(tb_request_result_t result)
-{
-    tb_client_rpc_cb_t callbacks[TB_RPC_MAX_PENDING] = { 0 };
-    void *user_data[TB_RPC_MAX_PENDING] = { 0 };
-    int callback_count = 0;
-
     if (!s_rpc_init) {
         return;
     }

@@ -16,8 +16,14 @@
 #define RETRY_COUNT 3
 #define MAX_SUBSCRIPTIONS 10
 #define TIMEOUT_DEFAULT_MS 5000
-#define RECONNECT_DELAY_MS 30000
-#define PING_INTERVAL_MS 30000
+#define DEFAULT_KEEPALIVE_SEC 60U
+#define DEFAULT_RECONNECT_INITIAL_DELAY_MS 30000U
+#define DEFAULT_RECONNECT_MAX_DELAY_MS 300000U
+#define MIN_KEEPALIVE_SEC 15U
+#define MAX_KEEPALIVE_SEC 1200U
+#define MIN_RECONNECT_DELAY_MS 1000U
+#define MAX_RECONNECT_DELAY_MS 3600000U
+#define MIN_PING_INTERVAL_MS 1000U
 #define COMMAND_QUEUE_SIZE 8
 #define MQTT_APP_TOPIC_MAX_LEN 256
 #define MQTT_APP_MESSAGE_MAX_LEN 512
@@ -46,6 +52,7 @@ typedef struct {
 
 typedef struct {
 	char topic[MQTT_APP_TOPIC_MAX_LEN];
+	int qos;
 	mqtt_message_callback_t callback;
 	bool active;
 } mqtt_subscription_t;
@@ -63,6 +70,11 @@ typedef struct {
 	char publish_message[MQTT_APP_MESSAGE_MAX_LEN];
 	int retries;
 	struct mg_mqtt_opts publish_opts;
+	uint16_t keepalive_sec;
+	uint32_t reconnect_initial_delay_ms;
+	uint32_t reconnect_max_delay_ms;
+	bool reconnect_exponential_backoff;
+	uint32_t reconnect_attempt;
 	bool reconnect_enabled;
 	bool shutdown_requested;
 } mqtt_state_t;
@@ -102,15 +114,78 @@ static mqtt_timers_t mqtt_timers = { 0 };
 static mqtt_sync_t mqtt_sync = { 0 };
 static mqtt_ack_flags_t mqtt_acks = { 0 };
 static mqtt_callbacks_t mqtt_callbacks = { 0 };
+static mqtt_connection_policy_t mqtt_policy = {
+	.keepalive_sec = DEFAULT_KEEPALIVE_SEC,
+	.reconnect_initial_delay_ms = DEFAULT_RECONNECT_INITIAL_DELAY_MS,
+	.reconnect_max_delay_ms = DEFAULT_RECONNECT_MAX_DELAY_MS,
+	.reconnect_exponential_backoff = false,
+};
 
 static void ev_handler(struct mg_connection *nc, int ev, void *ev_data);
 static void mqtt_queue_cmd(mqtt_cmd_type_t type);
 static void mqtt_queue_cmd_wakeup(mqtt_cmd_type_t type);
 static void mqtt_reset_runtime_timers(void);
+static void apply_connection_policy(const mqtt_connection_policy_t *policy);
 static bool create_timers(void);
 static void destroy_timers(void);
 static bool create_sync_objects(void);
 static void destroy_sync_objects(void);
+
+static uint16_t clamp_keepalive_sec(uint16_t value)
+{
+	if (value == 0)
+		return DEFAULT_KEEPALIVE_SEC;
+	if (value < MIN_KEEPALIVE_SEC)
+		return MIN_KEEPALIVE_SEC;
+	if (value > MAX_KEEPALIVE_SEC)
+		return MAX_KEEPALIVE_SEC;
+	return value;
+}
+
+static uint32_t clamp_reconnect_delay_ms(uint32_t value, uint32_t fallback)
+{
+	if (value == 0)
+		return fallback;
+	if (value < MIN_RECONNECT_DELAY_MS)
+		return MIN_RECONNECT_DELAY_MS;
+	if (value > MAX_RECONNECT_DELAY_MS)
+		return MAX_RECONNECT_DELAY_MS;
+	return value;
+}
+
+static uint32_t compute_ping_interval_ms(uint16_t keepalive_sec)
+{
+	uint32_t interval = ((uint32_t)keepalive_sec * 1000U) / 2U;
+
+	if (interval < MIN_PING_INTERVAL_MS)
+		interval = MIN_PING_INTERVAL_MS;
+
+	return interval;
+}
+
+static uint32_t compute_reconnect_delay_ms(void)
+{
+	uint32_t delay = mqtt_state.reconnect_initial_delay_ms;
+
+	if (!mqtt_state.reconnect_exponential_backoff) {
+		return delay;
+	}
+
+	for (uint32_t i = 0;
+	     i < mqtt_state.reconnect_attempt && delay < mqtt_state.reconnect_max_delay_ms;
+	     i++) {
+		if (delay > mqtt_state.reconnect_max_delay_ms / 2U) {
+			delay = mqtt_state.reconnect_max_delay_ms;
+			break;
+		}
+		delay *= 2U;
+	}
+
+	if (delay > mqtt_state.reconnect_max_delay_ms)
+		delay = mqtt_state.reconnect_max_delay_ms;
+
+	return delay;
+}
 
 /* ---------- Subscription helpers (called only from Mongoose thread) ------- */
 
@@ -140,6 +215,7 @@ static void clear_subscription(mqtt_subscription_t *sub)
 {
 	if (sub) {
 		memset(sub->topic, 0, sizeof(sub->topic));
+		sub->qos = 0;
 		sub->callback = NULL;
 		sub->active = false;
 	}
@@ -171,10 +247,20 @@ static void resubscribe_all(void)
 	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
 
 	for (int i = 0; i < topic_count; i++) {
+		int qos = 0;
+
+		for (int j = 0; j < MAX_SUBSCRIPTIONS; j++) {
+			if (mqtt_state.subscriptions[j].active &&
+			    strcmp(mqtt_state.subscriptions[j].topic, topics[i]) == 0) {
+				qos = mqtt_state.subscriptions[j].qos;
+				break;
+			}
+		}
+
 		mg_mqtt_sub(mqtt_state.nc,
 			    &(struct mg_mqtt_opts){
 				    .topic = mg_str(topics[i]),
-				    .qos = 0,
+				    .qos = qos,
 			    });
 	}
 }
@@ -259,8 +345,14 @@ static void setup_tls(struct mg_connection *nc, const char *address)
 
 static void schedule_reconnect(void)
 {
+	uint32_t delay_ms = compute_reconnect_delay_ms();
+
 	(void)osal_timer_stop(mqtt_timers.reconnect, 0);
+	(void)osal_timer_change_period(mqtt_timers.reconnect, delay_ms, 0);
 	(void)osal_timer_start(mqtt_timers.reconnect, 0);
+
+	if (mqtt_state.reconnect_attempt < 31U)
+		mqtt_state.reconnect_attempt++;
 }
 
 static void mqtt_connect(void)
@@ -285,7 +377,7 @@ static void mqtt_connect(void)
 	opts.user      = mg_str(username ? username : "");
 	opts.pass      = mg_str(password ? password : "");
 	opts.client_id = mg_str(client_id && client_id[0] ? client_id : "hq_");
-	opts.keepalive = 60;
+	opts.keepalive = mqtt_state.keepalive_sec;
 	opts.clean     = true;
 
 	osal_log_info("MQTT connecting address=%s client_id=%s", address,
@@ -310,12 +402,16 @@ static void mqtt_connected(void)
 
 	mqtt_state.connected = true;
 	mqtt_state.reconnect_enabled = true;
+	mqtt_state.reconnect_attempt = 0;
 	(void)osal_timer_stop(mqtt_timers.reconnect, 0);
 
 	osal_log_info("MQTT connected");
 	resubscribe_all();
 
 	(void)osal_timer_stop(mqtt_timers.ping, 0);
+	(void)osal_timer_change_period(
+		mqtt_timers.ping,
+		compute_ping_interval_ms(mqtt_state.keepalive_sec), 0);
 	(void)osal_timer_start(mqtt_timers.ping, 0);
 
 	if (mqtt_callbacks.connect_cb)
@@ -360,6 +456,7 @@ static void mqtt_disconnect_internal(void)
 	bool was_connected = mqtt_state.connected;
 
 	mqtt_state.reconnect_enabled = false;
+	mqtt_state.reconnect_attempt = 0;
 	mqtt_reset_runtime_timers();
 
 	if (mqtt_state.nc != NULL) {
@@ -739,6 +836,41 @@ static void config_update_callback(void)
 	mqtt_queue_cmd_wakeup(MQTT_CMD_TYPE_APPLY_CONFIG);
 }
 
+static void apply_connection_policy(const mqtt_connection_policy_t *policy)
+{
+	uint16_t keepalive_sec = DEFAULT_KEEPALIVE_SEC;
+	uint32_t reconnect_initial_ms = DEFAULT_RECONNECT_INITIAL_DELAY_MS;
+	uint32_t reconnect_max_ms = DEFAULT_RECONNECT_MAX_DELAY_MS;
+	bool reconnect_backoff = false;
+
+	if (policy != NULL) {
+		keepalive_sec = policy->keepalive_sec;
+		reconnect_initial_ms = policy->reconnect_initial_delay_ms;
+		reconnect_max_ms = policy->reconnect_max_delay_ms;
+		reconnect_backoff = policy->reconnect_exponential_backoff;
+	}
+
+	keepalive_sec = clamp_keepalive_sec(keepalive_sec);
+	reconnect_initial_ms = clamp_reconnect_delay_ms(
+		reconnect_initial_ms, DEFAULT_RECONNECT_INITIAL_DELAY_MS);
+	reconnect_max_ms = clamp_reconnect_delay_ms(
+		reconnect_max_ms, DEFAULT_RECONNECT_MAX_DELAY_MS);
+
+	if (reconnect_max_ms < reconnect_initial_ms)
+		reconnect_max_ms = reconnect_initial_ms;
+
+	mqtt_state.keepalive_sec = keepalive_sec;
+	mqtt_state.reconnect_initial_delay_ms = reconnect_initial_ms;
+	mqtt_state.reconnect_max_delay_ms = reconnect_max_ms;
+	mqtt_state.reconnect_exponential_backoff = reconnect_backoff;
+	mqtt_state.reconnect_attempt = 0;
+
+	mqtt_policy.keepalive_sec = keepalive_sec;
+	mqtt_policy.reconnect_initial_delay_ms = reconnect_initial_ms;
+	mqtt_policy.reconnect_max_delay_ms = reconnect_max_ms;
+	mqtt_policy.reconnect_exponential_backoff = reconnect_backoff;
+}
+
 /* ---------- Timer/sync creation ------------------------------------------- */
 
 static bool create_timers(void)
@@ -757,11 +889,13 @@ static bool create_timers(void)
 			      0) != OSAL_SUCCESS)
 		goto fail_suback;
 	if (osal_timer_create(&mqtt_timers.reconnect, "mqtt_reconnect",
-			      RECONNECT_DELAY_MS, false, reconnect_timer_cb,
+			      DEFAULT_RECONNECT_INITIAL_DELAY_MS, false,
+			      reconnect_timer_cb,
 			      NULL, NULL, 0) != OSAL_SUCCESS)
 		goto fail_unsuback;
 	if (osal_timer_create(&mqtt_timers.ping, "mqtt_ping",
-			      PING_INTERVAL_MS, true, ping_timer_cb,
+			      compute_ping_interval_ms(DEFAULT_KEEPALIVE_SEC),
+			      true, ping_timer_cb,
 			      NULL, NULL, 0) != OSAL_SUCCESS)
 		goto fail_reconnect;
 	return true;
@@ -868,6 +1002,7 @@ void mqtt_app_init(void)
 	}
 
 	memset(&mqtt_acks, 0, sizeof(mqtt_acks));
+	apply_connection_policy(&mqtt_policy);
 	mqtt_state.reconnect_enabled = true;
 	mqtt_state.shutdown_requested = false;
 
@@ -932,6 +1067,7 @@ bool mqtt_app_subscribe(const char *topic, int qos,
 	mqtt_subscription_t *existing = find_subscription(topic);
 	if (existing) {
 		existing->callback = callback;
+		existing->qos = qos;
 		(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
 		return true;
 	}
@@ -945,6 +1081,7 @@ bool mqtt_app_subscribe(const char *topic, int qos,
 
 	strncpy(sub->topic, topic, sizeof(sub->topic) - 1);
 	sub->topic[sizeof(sub->topic) - 1] = '\0';
+	sub->qos = qos;
 	sub->callback = callback;
 	sub->active = true;
 	(void)osal_mutex_give(mqtt_sync.subscriptions_lock);
@@ -1080,4 +1217,9 @@ void mqtt_app_set_disconnect_callback(mqtt_disconnect_callback_t cb)
 void mqtt_app_set_connect_failure_callback(mqtt_connect_failure_callback_t cb)
 {
 	mqtt_callbacks.connect_failure_cb = cb;
+}
+
+void mqtt_app_set_connection_policy(const mqtt_connection_policy_t *policy)
+{
+	apply_connection_policy(policy);
 }

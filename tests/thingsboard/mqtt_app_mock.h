@@ -27,6 +27,7 @@ typedef struct {
 
 typedef struct {
     char topic[MOCK_MAX_TOPIC_LEN];
+    int qos;
 } mock_subscribe_record_t;
 
 /* Globals for test inspection */
@@ -35,6 +36,8 @@ extern int mock_publish_count;
 extern mock_subscribe_record_t mock_subscribes[];
 extern int mock_subscribe_count;
 extern bool mock_connected;
+extern int mock_deinit_count;
+extern mqtt_connection_policy_t mock_connection_policy;
 
 /* Reset all mock state */
 void mqtt_app_mock_reset(void);

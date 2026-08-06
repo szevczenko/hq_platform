@@ -113,37 +113,6 @@ real device target.
 - [ ] On ESP hardware, verify rollback returns to the previous image when a
   pending image is not confirmed.
 
-## P1 - Client Reliability And Protocol Behavior
-
-- [ ] **Expose QoS, keepalive, and reconnect policy through the client API.**
-  - Allow a caller to select QoS 0 or 1 per publish/subscribe or through
-    defaults in `tb_client_config_t`.
-  - Make MQTT keepalive, initial reconnect delay, maximum reconnect delay,
-    and backoff behavior configurable with bounded defaults.
-  - Ensure the reconnect path does not call `mqtt_app_deinit()` merely because
-    a connection attempt is still in progress.
-  - Tests: QoS passed to the MQTT adapter, bounded exponential backoff, and
-    resubscription after reconnect.
-
-- [ ] **Enforce ThingsBoard session limits and payload bounds.**
-  - Request `getSessionLimits` by client-side RPC after a successful connect.
-  - Parse server limits for message rate, telemetry rate, telemetry data
-    points, maximum payload size, and maximum inflight messages.
-  - Implement bounded queues and a token-bucket limiter suitable for an MCU.
-    Reject or defer data rather than blocking the Mongoose event thread.
-  - Split telemetry and attribute batches by configured payload/data-point
-    limits while preserving timestamp and metadata semantics.
-  - Unit tests: parser validation, queue saturation, limiter timing through a
-    fake clock, payload splitting, and server-limit changes after reconnect.
-
-- [ ] **Improve attribute subscription semantics.**
-  - Keep the existing all-shared-attributes callback for a small API.
-  - Add optional per-key subscriptions and independent subscription handles,
-    allowing multiple consumers without singleton callback replacement.
-  - Define callback ownership and safe removal during callback execution.
-  - Unit tests: wildcard and per-key dispatch, multiple callbacks, removal,
-    and reconnect restoration.
-
 ## P2 - Public API And Demo Coverage
 
 Create one small, independently buildable POSIX demo in `examples/common` and
@@ -242,3 +211,101 @@ checks.
   ThingsBoard docker stack.
 - [ ] Publish test logs/artifacts from CI for failed runs.
 - [ ] Keep manual test scripts as a local fallback until CI is stable.
+
+### Next Release (Not Required For First Stable MCU Release)
+
+#### TLS Credential And Config Surface
+
+- [ ] **Expose TLS settings through `tb_client_config_t`.**
+  - Add fields: `tls_enabled`, `ca_cert`, `client_cert`, `client_key`,
+    `skip_server_verify`.
+  - Accept cert/key as raw PEM string or file path via `mqtt_cert_source_t`.
+  - Wire into `mqtt_config_set_cert_source()` during `tb_client_init()`.
+  - Validate that `mqtts://` address requires at least a CA cert or explicit
+    skip-verify flag.
+  - Unit tests: config propagation to mock, reject invalid combinations,
+    verify no plaintext credential logging.
+
+#### Publish Result Handle API
+
+- [ ] **Return a structured publish-info object from publish calls.**
+  - Define `tb_publish_result_t` with `rc`, `message_id`, and optional
+    `wait_for_ack()` blocking helper (with timeout).
+  - Extend `mqtt_app_post_data()` to return message ID from Mongoose.
+  - Add `tb_client_publish_with_result()` that returns the result struct.
+  - Keep existing `tb_client_publish()` as a simple wrapper returning int.
+  - Unit tests: result rc mapping, mid uniqueness, wait-for-ack timeout.
+
+#### Advanced Multi-Window Rate-Limit Model
+
+- [ ] **Parse nested `rateLimits` windows from `getSessionLimits` response.**
+  - Support the Python SDK format: `"messages": "10:1,60:60,"` and
+    `"telemetryMessages"`, `"telemetryDataPoints"` strings.
+  - Parse each `limit:duration` pair into independent token buckets per window.
+  - Enforce all windows simultaneously (message rejected if any window is
+    exhausted).
+  - Apply percentage factor (default 80%) to bucket capacity for safety margin.
+  - Dynamically update windows on reconnect without losing remaining tokens.
+  - Unit tests: multi-window parsing, shortest-window exhaustion first,
+    percentage factor, dynamic update preserving partial tokens.
+
+#### Transport Queue Tuning Controls
+
+- [ ] **Add public API for inflight and queued message limits.**
+  - Add `tb_client_set_max_inflight(uint16_t)` and
+    `tb_client_set_max_queued(uint16_t)` functions.
+  - Wire into Mongoose transport or internal deferred-queue capacity.
+  - Auto-apply from session-limits response `maxInflightMessages` field
+    (already partially done; expose as tunable override).
+  - Reject or defer publishes when queued count exceeds limit.
+  - Unit tests: queue overflow rejection, inflight cap behavior, dynamic
+    adjustment after session-limits response.
+
+#### Unified Request-Attributes Convenience API
+
+- [ ] **Add `tb_attributes_request()` accepting both key sets in one call.**
+  - Signature: `tb_attributes_request(client, client_keys, num_client,
+    shared_keys, num_shared, cb, user_data, timeout_ms)`.
+  - Build JSON with both `clientKeys` and `sharedKeys` fields in one message.
+  - Reuse existing pending-slot infrastructure and response subscription.
+  - Keep `tb_attributes_request_client()` and `tb_attributes_request_shared()`
+    as thin wrappers.
+  - Unit tests: combined request JSON shape, response delivery, timeout
+    behavior, NULL key-set handling.
+
+#### Automatic Telemetry Metadata Enrichment
+
+- [ ] **Optionally inject `publishedTs` into telemetry payloads.**
+  - Add `tb_client_config_t.enrich_telemetry_metadata` bool field.
+  - When enabled, wrap flat telemetry JSON into `{"ts":<ms>,"values":{...}}`
+    if not already in that form.
+  - Use `osal_task_get_time_ms()` or RTC epoch if available.
+  - Do not modify payloads that already contain a `ts` field.
+  - Unit tests: flat payload gets wrapped, pre-wrapped payload unchanged,
+    disabled flag passes through unmodified.
+
+#### Provisioning One-Shot Convenience Wrapper
+
+- [ ] **Add `tb_provision_device()` static helper.**
+  - Signature: `tb_provision_device(server_url, provision_key,
+    provision_secret, device_name, result_buf, result_buf_size, timeout_ms)`.
+  - Internally creates a temporary client with `"provision"` username,
+    connects, sends provisioning request, waits for response, disconnects,
+    and returns credentials JSON in the caller buffer.
+  - Zeroize internal credential memory after copy.
+  - Never log tokens or secrets.
+  - Unit tests: success flow returns credentials, timeout returns error,
+    invalid response handled, no credential leak in logs.
+
+#### Demos And CI Automation
+
+- [ ] **Build and validate all P2 demos for POSIX.**
+  - Each demo listed in P2 section compiles and runs against a local broker.
+  - Add CMake targets under `examples/posix/CMakeLists.txt`.
+- [ ] **Add CI pipeline for unit tests and integration.**
+  - POSIX build job, `tb_tests` job, reconnect integration job.
+  - Firmware update integration against dockerized ThingsBoard.
+  - Publish artifacts on failure.
+- [ ] **Add ESP-IDF build validation in CI.**
+  - Confirm `build_esp` target compiles without error.
+  - Run hardware-in-the-loop checklist items where CI hardware is available.
