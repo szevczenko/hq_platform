@@ -28,10 +28,13 @@ typedef void (*tb_server_rpc_cb_t)(const char *method, const char *params_json,
 
 /**
  * @brief Callback for client-side RPC responses
+ * @param result         Request result status
  * @param response_json  JSON response from server
  * @param user_data      User-supplied context
  */
-typedef void (*tb_client_rpc_cb_t)(const char *response_json, void *user_data);
+typedef void (*tb_client_rpc_cb_t)(tb_request_result_t result,
+                                   const char *response_json,
+                                   void *user_data);
 
 /**
  * @brief Subscribe to server-side RPC requests
