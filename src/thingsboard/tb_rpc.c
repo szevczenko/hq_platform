@@ -126,6 +126,28 @@ static void rpc_timeout_timer_cb(osal_timer_id_t timer_id)
     }
 }
 
+static void teardown_rpc_resources(void)
+{
+    return (int32_t)(now_ms - deadline_ms) >= 0;
+}
+
+static void complete_pending_requests(tb_request_result_t result)
+{
+    tb_client_rpc_cb_t callbacks[TB_RPC_MAX_PENDING] = { 0 };
+    void *user_data[TB_RPC_MAX_PENDING] = { 0 };
+    int callback_count = 0;
+
+    if (!s_rpc_init) {
+        return;
+    }
+
+    (void)osal_timer_stop(s_rpc_timeout_timer, 0);
+    (void)osal_timer_delete(s_rpc_timeout_timer, 0);
+    (void)osal_mutex_delete(s_rpc_mutex);
+    memset(s_rpc_pending, 0, sizeof(s_rpc_pending));
+    s_rpc_init = false;
+}
+
 static bool ensure_rpc_init(void)
 {
     if (s_rpc_init) {
@@ -151,8 +173,13 @@ static bool ensure_rpc_init(void)
     }
 
     memset(s_rpc_pending, 0, sizeof(s_rpc_pending));
+    if (osal_timer_start(s_rpc_timeout_timer, 0) != OSAL_SUCCESS) {
+        (void)osal_timer_delete(s_rpc_timeout_timer, 0);
+        (void)osal_mutex_delete(s_rpc_mutex);
+        s_rpc_init_failed = true;
+        return false;
+    }
     s_rpc_init = true;
-    (void)osal_timer_start(s_rpc_timeout_timer, 0);
     return true;
 }
 
@@ -230,7 +257,16 @@ static void client_rpc_response_handler(const char *topic, const char *payload,
         return;
     }
 
-    cb(TB_REQUEST_RESULT_SUCCESS, payload, ud);
+    char *payload_copy = malloc(payload_len + 1);
+    if (payload_copy == NULL) {
+        cb(TB_REQUEST_RESULT_ERROR, NULL, ud);
+        return;
+    }
+
+    memcpy(payload_copy, payload, payload_len);
+    payload_copy[payload_len] = '\0';
+    cb(TB_REQUEST_RESULT_SUCCESS, payload_copy, ud);
+    free(payload_copy);
 }
 
 int tb_rpc_subscribe_server(tb_client_t *client, tb_server_rpc_cb_t cb,
@@ -433,4 +469,6 @@ void tb_rpc_deinit(tb_client_t *client)
     s_server_rpc_subscribed = false;
     s_client_rpc_subscribed = false;
     s_owner_client = NULL;
+    teardown_rpc_resources();
+    s_rpc_init_failed = false;
 }
