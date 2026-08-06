@@ -12,6 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "mqtt_app.h"
+
 /* Track mock state for assertions */
 #define MOCK_MAX_PUBLISHES 32
 #define MOCK_MAX_TOPIC_LEN 256
@@ -40,5 +42,11 @@ void mqtt_app_mock_reset(void);
 /* Simulate receiving a message on a subscribed topic */
 void mqtt_app_mock_deliver_message(const char *topic, const char *payload,
                                    size_t payload_len);
+
+/* Simulate transport lifecycle events */
+void mqtt_app_mock_simulate_connect(void);
+void mqtt_app_mock_simulate_remote_disconnect(void);
+void mqtt_app_mock_simulate_error_disconnect(void);
+void mqtt_app_mock_simulate_connect_failure(mqtt_connect_failure_reason_t reason);
 
 #endif /* MQTT_APP_MOCK_H */

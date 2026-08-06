@@ -55,19 +55,15 @@ device-client capability.
     image, apply a signed OTA image, force a failed boot, verify rollback, and
     verify encrypted OTA slots across reset.
 
-- [ ] **Implement an OTA health-confirmation policy.**
-  - Define a health milestone: OSAL initialized, network operational, MQTT
-    connected, and a successful ThingsBoard telemetry publish, or an explicit
-    application callback for products that can operate offline.
+- [ ] **Finalize OTA health-confirmation deadline behavior.**
+  - A health milestone and explicit confirmation flow are implemented.
   - Add a deadline; if the milestone is not met, leave the image pending so
     ESP-IDF rollback can restore the prior image.
   - Integration test: boot a pending image with forced network/MQTT failure
     and verify it is not confirmed.
 
-- [ ] **Persist firmware-update state.**
-  - On restart, report the correct state and choose a documented policy:
-    restart the download, resume only if the OTA backend can safely resume, or
-    abort and begin a clean transfer.
+- [ ] **Complete power-loss/restart validation for persisted OTA state.**
+  - OTA state persistence and restart behavior are implemented.
   - Test reset/power-loss at begin, mid-chunk, post-download, and post-boot
     partition selection.
 
@@ -119,16 +115,11 @@ real device target.
 
 ## P1 - Client Reliability And Protocol Behavior
 
-- [ ] **Add public connection-state callbacks.**
-  - Add connect, disconnect, and connection-failure callbacks to
-    `tb_client_config_t` or a registration API, with a user-data pointer and
-    a reason code when available.
-  - Keep callbacks out of transport locks and document their execution
-    context.
+- [ ] **Adopt connection-state callbacks across demos.**
+  - Public connect/disconnect/connection-failure callbacks with user-data and
+    reason codes are implemented and covered by unit tests.
   - Use the callbacks in demos to publish connection state and in the OTA
     demo to drive health confirmation.
-  - Unit tests: callback order on initial connect, remote close, explicit
-    disconnect, reconnect, and callback reentrancy restrictions.
 
 - [ ] **Make all stateful ThingsBoard modules reconnect-safe.**
   - Restore required subscriptions after MQTT reconnection: attribute

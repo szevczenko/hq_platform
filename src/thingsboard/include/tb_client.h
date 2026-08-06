@@ -22,11 +22,40 @@ extern "C" {
 
 typedef struct tb_client tb_client_t;
 
+typedef enum {
+	TB_CLIENT_DISCONNECT_REASON_REMOTE_CLOSE = 0,
+	TB_CLIENT_DISCONNECT_REASON_ERROR,
+	TB_CLIENT_DISCONNECT_REASON_EXPLICIT
+} tb_client_disconnect_reason_t;
+
+typedef enum {
+	TB_CLIENT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED = 0,
+	TB_CLIENT_CONNECT_FAILURE_REASON_CONNACK_REJECTED,
+	TB_CLIENT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR
+} tb_client_connect_failure_reason_t;
+
+typedef void (*tb_client_connect_callback_t)(tb_client_t *client,
+					     void *user_data);
+typedef void (*tb_client_disconnect_callback_t)(
+	tb_client_t *client, tb_client_disconnect_reason_t reason,
+	void *user_data);
+typedef void (*tb_client_connect_failure_callback_t)(
+	tb_client_t *client, tb_client_connect_failure_reason_t reason,
+	void *user_data);
+
 typedef struct {
     char server_url[TB_CLIENT_CONFIG_STR_SIZE];    /**< ThingsBoard MQTT URL e.g. "mqtt://host:1883" */
     char access_token[TB_CLIENT_CONFIG_STR_SIZE];  /**< Device access token (used as MQTT username) */
     char client_id[TB_CLIENT_CONFIG_STR_SIZE];     /**< MQTT client ID (empty = use access_token) */
     char device_name[TB_CLIENT_CONFIG_STR_SIZE];   /**< Device name for logging */
+    /*
+     * Connection-state callbacks run in MQTT event-loop context and must not
+     * block. They are invoked without MQTT transport internal locks held.
+     */
+    tb_client_connect_callback_t on_connect;
+    tb_client_disconnect_callback_t on_disconnect;
+    tb_client_connect_failure_callback_t on_connect_failure;
+    void *connection_user_data;
 } tb_client_config_t;
 
 /**

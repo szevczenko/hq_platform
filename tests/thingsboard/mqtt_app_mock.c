@@ -21,6 +21,7 @@ bool mock_connected = false;
 
 static mqtt_connect_callback_t s_connect_cb = NULL;
 static mqtt_disconnect_callback_t s_disconnect_cb = NULL;
+static mqtt_connect_failure_callback_t s_connect_failure_cb = NULL;
 
 #define MOCK_MAX_SUBS 16
 static struct {
@@ -36,6 +37,7 @@ void mqtt_app_mock_reset(void)
     mock_connected = false;
     s_connect_cb = NULL;
     s_disconnect_cb = NULL;
+    s_connect_failure_cb = NULL;
     memset(mock_publishes, 0, sizeof(mock_publishes));
     memset(mock_subscribes, 0, sizeof(mock_subscribes));
     memset(s_subscriptions, 0, sizeof(s_subscriptions));
@@ -94,9 +96,10 @@ void mqtt_app_init(void)
 
 void mqtt_app_deinit(void)
 {
+    bool was_connected = mock_connected;
     mock_connected = false;
-    if (s_disconnect_cb) {
-        s_disconnect_cb();
+    if (was_connected && s_disconnect_cb) {
+        s_disconnect_cb(MQTT_DISCONNECT_REASON_EXPLICIT);
     }
 }
 
@@ -165,6 +168,44 @@ void mqtt_app_set_connect_callback(mqtt_connect_callback_t cb)
 void mqtt_app_set_disconnect_callback(mqtt_disconnect_callback_t cb)
 {
     s_disconnect_cb = cb;
+}
+
+void mqtt_app_set_connect_failure_callback(mqtt_connect_failure_callback_t cb)
+{
+    s_connect_failure_cb = cb;
+}
+
+void mqtt_app_mock_simulate_connect(void)
+{
+    mock_connected = true;
+    if (s_connect_cb) {
+        s_connect_cb();
+    }
+}
+
+void mqtt_app_mock_simulate_remote_disconnect(void)
+{
+    bool was_connected = mock_connected;
+    mock_connected = false;
+    if (was_connected && s_disconnect_cb) {
+        s_disconnect_cb(MQTT_DISCONNECT_REASON_REMOTE_CLOSE);
+    }
+}
+
+void mqtt_app_mock_simulate_error_disconnect(void)
+{
+    bool was_connected = mock_connected;
+    mock_connected = false;
+    if (was_connected && s_disconnect_cb) {
+        s_disconnect_cb(MQTT_DISCONNECT_REASON_ERROR);
+    }
+}
+
+void mqtt_app_mock_simulate_connect_failure(mqtt_connect_failure_reason_t reason)
+{
+    if (s_connect_failure_cb) {
+        s_connect_failure_cb(reason);
+    }
 }
 
 /* --- mqtt_config.h mock implementation --- */
