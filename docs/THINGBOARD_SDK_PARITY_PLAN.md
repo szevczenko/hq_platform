@@ -173,17 +173,17 @@ and device name, and must log its connection lifecycle.
 
 ## Shared Test And Delivery Work
 
-- [ ] Keep `tests/thingsboard/tb_tests.c` as the unit-test entry point, but
+- [x] Keep `tests/thingsboard/tb_tests.c` as the unit-test entry point, but
   split it into focused source files when module coverage becomes difficult to
   navigate.
-- [ ] Add deterministic MQTT adapter mocks for connect/disconnect, SUBACK,
+- [x] Add deterministic MQTT adapter mocks for connect/disconnect, SUBACK,
   PUBACK, delayed responses, dropped connections, and subscription replay.
 - [ ] Add a POSIX integration test job against a disposable ThingsBoard and
   MQTT broker deployment. Cover telemetry, attributes, RPC, claim,
   provisioning, TLS, and OTA checksum/signature rejection.
-- [ ] Add an ESP hardware-in-the-loop checklist for Wi-Fi loss, broker loss,
+- [x] Add an ESP hardware-in-the-loop checklist for Wi-Fi loss, broker loss,
   OTA resume/abort, signed OTA, rollback, Secure Boot, and Flash Encryption.
-- [ ] Document the supported ThingsBoard server version, required device
+- [x] Document the supported ThingsBoard server version, required device
   profile permissions, and custom OTA signature attributes.
 
 ## Definition Of Done

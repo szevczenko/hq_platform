@@ -111,6 +111,11 @@ if(NOT ESP_PLATFORM)
 
   add_executable(tb_tests
     ${TB_TEST_DIR}/tb_tests.c
+    ${TB_TEST_DIR}/tb_test_common.c
+    ${TB_TEST_DIR}/tb_tests_client.c
+    ${TB_TEST_DIR}/tb_tests_telemetry.c
+    ${TB_TEST_DIR}/tb_tests_attributes_rpc.c
+    ${TB_TEST_DIR}/tb_tests_provision_claim_fwu.c
     ${TB_TEST_DIR}/mqtt_app_mock.c
     # ThingsBoard module sources (linked against mock, not real mqtt_app)
     ${TB_SRC_DIR}/tb_client.c

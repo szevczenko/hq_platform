@@ -9,6 +9,7 @@ TB_URL="${TB_URL:-http://127.0.0.1:8080}"
 TB_API_KEY_FILE="${TB_API_KEY_FILE:-$PROJECT_DIR/docker/thingboard/api_key}"
 TB_USERNAME="${TB_USERNAME:-}"
 TB_PASSWORD="${TB_PASSWORD:-}"
+BUILD_DIR="${TB_FW_BUILD_DIR:-build_posix}"
 
 DEVICE_NAME="${TB_FW_DEVICE_NAME:-fw_demo_device_01}"
 DEVICE_TYPE="${TB_FW_DEVICE_TYPE:-default}"
@@ -52,16 +53,17 @@ need_cmd python3
 need_cmd sha256sum
 need_cmd head
 
-if [[ ! -f "$TB_API_KEY_FILE" ]]; then
-    fail "API key file not found: $TB_API_KEY_FILE"
+AUTH_HEADER=""
+if [[ -f "$TB_API_KEY_FILE" ]]; then
+    TB_API_KEY="$(tr -d '[:space:]' < "$TB_API_KEY_FILE")"
+    if [[ -n "$TB_API_KEY" ]]; then
+        AUTH_HEADER="X-Authorization: ApiKey $TB_API_KEY"
+    fi
 fi
 
-TB_API_KEY="$(tr -d '[:space:]' < "$TB_API_KEY_FILE")"
-if [[ -z "$TB_API_KEY" ]]; then
-    fail "API key file is empty: $TB_API_KEY_FILE"
+if [[ -z "$AUTH_HEADER" && ( -z "$TB_USERNAME" || -z "$TB_PASSWORD" ) ]]; then
+    fail "Provide either a non-empty API key file at $TB_API_KEY_FILE or TB_USERNAME/TB_PASSWORD for tenant-admin login."
 fi
-
-AUTH_HEADER="X-Authorization: ApiKey $TB_API_KEY"
 
 set_auth_bearer_from_login() {
     if [[ -z "$TB_USERNAME" || -z "$TB_PASSWORD" ]]; then
@@ -174,9 +176,16 @@ wait_for_tb() {
     local delay=2
 
     for ((i=1; i<=attempts; i++)); do
-        if curl -sS --fail -H "$AUTH_HEADER" "$TB_URL/api/auth/user" >/dev/null 2>&1; then
-            log "ThingsBoard API is reachable"
-            return 0
+        if [[ -n "$AUTH_HEADER" ]]; then
+            if curl -sS --fail -H "$AUTH_HEADER" "$TB_URL/api/auth/user" >/dev/null 2>&1; then
+                log "ThingsBoard API is reachable"
+                return 0
+            fi
+        else
+            if curl -sS "$TB_URL" >/dev/null 2>&1; then
+                log "ThingsBoard endpoint is reachable"
+                return 0
+            fi
         fi
         sleep "$delay"
     done
@@ -294,7 +303,7 @@ device_after_assign_json="$(api_post_json "/api/device" "$device_save_payload")"
 printf '%s\n' "$device_after_assign_json" > "$JSON_DIR/device_after_assign.json"
 
 log "Building firmware update demo in WSL"
-cmake -B build_wsl \
+cmake -B "$BUILD_DIR" \
     -DHQ_DEFCONFIG=defconfig/posix.defconfig \
     -DHQ_BUILD_EXAMPLES=ON \
     -DFW_DEMO_CLIENT_ID=fw_demo_01 \
@@ -306,10 +315,10 @@ cmake -B build_wsl \
     -DFW_DEMO_RECONNECT_DELAY_MS="$RECONNECT_DELAY_MS" \
     -DFW_DEMO_CHUNK_SIZE="$CHUNK_SIZE" \
     . | tee -a "$LOG_FILE"
-cmake --build build_wsl --target thingboard_firmware_update_demo -j4 | tee -a "$LOG_FILE"
+cmake --build "$BUILD_DIR" --target thingboard_firmware_update_demo -j4 | tee -a "$LOG_FILE"
 
 log "Running demo for ${RUN_SECONDS}s"
-timeout "${RUN_SECONDS}s" ./build_wsl/examples/thingboard_firmware_update_demo | tee "$OUT_DIR/demo_runtime.log" || true
+timeout "${RUN_SECONDS}s" "./$BUILD_DIR/examples/thingboard_firmware_update_demo" | tee "$OUT_DIR/demo_runtime.log" || true
 
 log "Fetching latest firmware telemetry from ThingsBoard"
 telemetry_json="$(api_get "/api/plugins/telemetry/DEVICE/$device_id/values/timeseries?keys=fw_state,fw_error,current_fw_title,current_fw_version")"
