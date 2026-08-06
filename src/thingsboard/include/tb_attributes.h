@@ -18,8 +18,7 @@ extern "C" {
 #endif
 
 /** Callback for attribute request response */
-typedef void (*tb_attribute_response_cb_t)(tb_request_result_t result,
-                                           const char *json_response,
+typedef void (*tb_attribute_response_cb_t)(const char *json_response,
                                            void *user_data);
 
 /** Callback for shared attribute updates */

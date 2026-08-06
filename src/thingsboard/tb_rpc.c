@@ -15,8 +15,6 @@
 #include "cJSON.h"
 #include "osal_log.h"
 #include "osal_mutex.h"
-#include "osal_task.h"
-#include "osal_timer.h"
 
 
 
@@ -31,7 +29,6 @@
 #define TB_RPC_MAX_TOPIC_LEN  128
 #define TB_RPC_TIMEOUT_MS     5000
 #define TB_RPC_MAX_PENDING    8
-#define TB_RPC_SWEEP_PERIOD_MS 50
 
 /* Server-side RPC state */
 static tb_server_rpc_cb_t s_server_rpc_cb = NULL;
@@ -41,7 +38,6 @@ static bool s_server_rpc_subscribed = false;
 /* Client-side RPC pending requests */
 typedef struct {
     uint32_t request_id;
-    uint32_t deadline_ms;
     tb_client_rpc_cb_t cb;
     void *user_data;
     bool active;
@@ -50,110 +46,16 @@ typedef struct {
 static tb_rpc_pending_t s_rpc_pending[TB_RPC_MAX_PENDING];
 static osal_mutex_id_t s_rpc_mutex;
 static bool s_rpc_init = false;
-static bool s_rpc_init_failed = false;
-static osal_timer_id_t s_rpc_timeout_timer;
 static bool s_client_rpc_subscribed = false;
 static tb_client_t *s_owner_client = NULL;
 
-static bool time_reached(uint32_t now_ms, uint32_t deadline_ms)
+static void ensure_rpc_init(void)
 {
-    return (int32_t)(now_ms - deadline_ms) >= 0;
-}
-
-static void complete_pending_requests(tb_request_result_t result)
-{
-    tb_client_rpc_cb_t callbacks[TB_RPC_MAX_PENDING] = { 0 };
-    void *user_data[TB_RPC_MAX_PENDING] = { 0 };
-    int callback_count = 0;
-
     if (!s_rpc_init) {
-        return;
+        osal_mutex_create(&s_rpc_mutex, "tb_rpc");
+        memset(s_rpc_pending, 0, sizeof(s_rpc_pending));
+        s_rpc_init = true;
     }
-
-    osal_mutex_take(s_rpc_mutex);
-    for (int i = 0; i < TB_RPC_MAX_PENDING; i++) {
-        if (!s_rpc_pending[i].active) {
-            continue;
-        }
-
-        callbacks[callback_count] = s_rpc_pending[i].cb;
-        user_data[callback_count] = s_rpc_pending[i].user_data;
-        callback_count++;
-        s_rpc_pending[i].active = false;
-    }
-    osal_mutex_give(s_rpc_mutex);
-
-    for (int i = 0; i < callback_count; i++) {
-        if (callbacks[i] != NULL) {
-            callbacks[i](result, NULL, user_data[i]);
-        }
-    }
-}
-
-static void rpc_timeout_timer_cb(osal_timer_id_t timer_id)
-{
-    tb_client_rpc_cb_t callbacks[TB_RPC_MAX_PENDING] = { 0 };
-    void *user_data[TB_RPC_MAX_PENDING] = { 0 };
-    int callback_count = 0;
-    uint32_t now_ms;
-
-    (void)timer_id;
-
-    if (!s_rpc_init) {
-        return;
-    }
-
-    now_ms = osal_task_get_time_ms();
-
-    osal_mutex_take(s_rpc_mutex);
-    for (int i = 0; i < TB_RPC_MAX_PENDING; i++) {
-        if (!s_rpc_pending[i].active ||
-            !time_reached(now_ms, s_rpc_pending[i].deadline_ms)) {
-            continue;
-        }
-
-        callbacks[callback_count] = s_rpc_pending[i].cb;
-        user_data[callback_count] = s_rpc_pending[i].user_data;
-        callback_count++;
-        s_rpc_pending[i].active = false;
-    }
-    osal_mutex_give(s_rpc_mutex);
-
-    for (int i = 0; i < callback_count; i++) {
-        if (callbacks[i] != NULL) {
-            callbacks[i](TB_REQUEST_RESULT_TIMEOUT, NULL, user_data[i]);
-        }
-    }
-}
-
-static bool ensure_rpc_init(void)
-{
-    if (s_rpc_init) {
-        return true;
-    }
-
-    if (s_rpc_init_failed) {
-        return false;
-    }
-
-    if (osal_mutex_create(&s_rpc_mutex, "tb_rpc") != OSAL_SUCCESS) {
-        s_rpc_init_failed = true;
-        return false;
-    }
-
-    if (osal_timer_create(&s_rpc_timeout_timer, "tb_rpc_timeout",
-                          TB_RPC_SWEEP_PERIOD_MS, true,
-                          rpc_timeout_timer_cb, NULL, NULL,
-                          0) != OSAL_SUCCESS) {
-        (void)osal_mutex_delete(s_rpc_mutex);
-        s_rpc_init_failed = true;
-        return false;
-    }
-
-    memset(s_rpc_pending, 0, sizeof(s_rpc_pending));
-    s_rpc_init = true;
-    (void)osal_timer_start(s_rpc_timeout_timer, 0);
-    return true;
 }
 
 static void server_rpc_handler(const char *topic, const char *payload,
@@ -201,36 +103,22 @@ static void client_rpc_response_handler(const char *topic, const char *payload,
     /* Extract request ID from topic: v1/devices/me/rpc/response/{id} */
     const char *id_str = topic + strlen(TB_RPC_CLIENT_RESP_TOPIC);
     uint32_t req_id = (uint32_t)strtoul(id_str, NULL, 10);
-    tb_client_rpc_cb_t cb = NULL;
-    void *ud = NULL;
-    bool timed_out = false;
-    uint32_t now_ms = osal_task_get_time_ms();
-
-    (void)payload_len;
 
     osal_mutex_take(s_rpc_mutex);
     for (int i = 0; i < TB_RPC_MAX_PENDING; i++) {
         if (s_rpc_pending[i].active && s_rpc_pending[i].request_id == req_id) {
-            cb = s_rpc_pending[i].cb;
-            ud = s_rpc_pending[i].user_data;
-            timed_out = time_reached(now_ms, s_rpc_pending[i].deadline_ms);
+            tb_client_rpc_cb_t cb = s_rpc_pending[i].cb;
+            void *ud = s_rpc_pending[i].user_data;
             s_rpc_pending[i].active = false;
             osal_mutex_give(s_rpc_mutex);
-            break;
+
+            if (cb != NULL) {
+                cb(payload, ud);
+            }
+            return;
         }
     }
-
-    if (cb == NULL) {
-        osal_mutex_give(s_rpc_mutex);
-        return;
-    }
-
-    if (timed_out) {
-        cb(TB_REQUEST_RESULT_TIMEOUT, NULL, ud);
-        return;
-    }
-
-    cb(TB_REQUEST_RESULT_SUCCESS, payload, ud);
+    osal_mutex_give(s_rpc_mutex);
 }
 
 int tb_rpc_subscribe_server(tb_client_t *client, tb_server_rpc_cb_t cb,
@@ -308,9 +196,7 @@ int tb_rpc_request(tb_client_t *client, const char *method,
         return -1;
     }
 
-    if (!ensure_rpc_init()) {
-        return -1;
-    }
+    ensure_rpc_init();
 
     /* Subscribe to response topic if not already */
     if (!s_client_rpc_subscribed) {
@@ -325,7 +211,6 @@ int tb_rpc_request(tb_client_t *client, const char *method,
     }
 
     uint32_t req_id = tb_client_get_next_request_id(client);
-    uint32_t effective_timeout = timeout_ms > 0 ? timeout_ms : TB_RPC_TIMEOUT_MS;
 
     /* Register pending request */
     /* TODO(osal): use timed mutex lock once OSAL exposes mutex take with timeout.
@@ -344,23 +229,20 @@ int tb_rpc_request(tb_client_t *client, const char *method,
         return -1;
     }
     s_rpc_pending[slot].request_id = req_id;
-    s_rpc_pending[slot].deadline_ms = osal_task_get_time_ms() + effective_timeout;
     s_rpc_pending[slot].cb = cb;
     s_rpc_pending[slot].user_data = user_data;
     s_rpc_pending[slot].active = true;
     osal_mutex_give(s_rpc_mutex);
+
+    /* TODO(thingsboard): enforce RPC response timeout_ms for pending slots.
+     * Currently timeout_ms is used for subscribe timing and lock TODO only. */
 
     /* Build request JSON: {"method":"name","params":{...}} */
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
         osal_mutex_take(s_rpc_mutex);
         s_rpc_pending[slot].active = false;
-        tb_client_rpc_cb_t slot_cb = s_rpc_pending[slot].cb;
-        void *slot_ud = s_rpc_pending[slot].user_data;
         osal_mutex_give(s_rpc_mutex);
-        if (slot_cb != NULL) {
-            slot_cb(TB_REQUEST_RESULT_ERROR, NULL, slot_ud);
-        }
         return -1;
     }
 
@@ -382,12 +264,7 @@ int tb_rpc_request(tb_client_t *client, const char *method,
     if (json == NULL) {
         osal_mutex_take(s_rpc_mutex);
         s_rpc_pending[slot].active = false;
-        tb_client_rpc_cb_t slot_cb = s_rpc_pending[slot].cb;
-        void *slot_ud = s_rpc_pending[slot].user_data;
         osal_mutex_give(s_rpc_mutex);
-        if (slot_cb != NULL) {
-            slot_cb(TB_REQUEST_RESULT_ERROR, NULL, slot_ud);
-        }
         return -1;
     }
 
@@ -400,12 +277,7 @@ int tb_rpc_request(tb_client_t *client, const char *method,
     if (ret != 0) {
         osal_mutex_take(s_rpc_mutex);
         s_rpc_pending[slot].active = false;
-        tb_client_rpc_cb_t slot_cb = s_rpc_pending[slot].cb;
-        void *slot_ud = s_rpc_pending[slot].user_data;
         osal_mutex_give(s_rpc_mutex);
-        if (slot_cb != NULL) {
-            slot_cb(TB_REQUEST_RESULT_ERROR, NULL, slot_ud);
-        }
     }
 
     return ret;
@@ -413,12 +285,33 @@ int tb_rpc_request(tb_client_t *client, const char *method,
 
 void tb_rpc_handle_disconnect(tb_client_t *client)
 {
+    tb_client_rpc_cb_t callbacks[TB_RPC_MAX_PENDING] = { 0 };
+    void *user_data[TB_RPC_MAX_PENDING] = { 0 };
+    int callback_count = 0;
+
     if (client == NULL || s_owner_client == NULL || s_owner_client != client ||
         !s_rpc_init) {
         return;
     }
 
-    complete_pending_requests(TB_REQUEST_RESULT_CANCELLED);
+    osal_mutex_take(s_rpc_mutex);
+    for (int i = 0; i < TB_RPC_MAX_PENDING; i++) {
+        if (!s_rpc_pending[i].active) {
+            continue;
+        }
+
+        callbacks[callback_count] = s_rpc_pending[i].cb;
+        user_data[callback_count] = s_rpc_pending[i].user_data;
+        callback_count++;
+        s_rpc_pending[i].active = false;
+    }
+    osal_mutex_give(s_rpc_mutex);
+
+    for (int i = 0; i < callback_count; i++) {
+        if (callbacks[i] != NULL) {
+            callbacks[i](NULL, user_data[i]);
+        }
+    }
 }
 
 void tb_rpc_deinit(tb_client_t *client)

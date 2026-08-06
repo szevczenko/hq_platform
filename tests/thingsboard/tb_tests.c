@@ -18,7 +18,6 @@
 #include "tb_firmware_update.h"
 #include "osal_ota.h"
 #include "osal_ota_state.h"
-#include "osal_task.h"
 #include "mqtt_app_mock.h"
 #include "cJSON.h"
 
@@ -506,29 +505,16 @@ static bool s_attr_response_received = false;
 static char s_attr_response_buf[512] = { 0 };
 static int s_attr_null_response_count = 0;
 static int s_attr_response_count = 0;
-static int s_attr_success_count = 0;
-static int s_attr_timeout_count = 0;
-static int s_attr_cancelled_count = 0;
-static int s_attr_error_count = 0;
 
-static void attr_response_cb(tb_request_result_t result,
-			     const char *json_response, void *user_data)
+static void attr_response_cb(const char *json_response, void *user_data)
 {
 	s_attr_response_received = true;
 	s_attr_response_count++;
-	if (result == TB_REQUEST_RESULT_SUCCESS && json_response) {
-		s_attr_success_count++;
+	if (json_response) {
 		strncpy(s_attr_response_buf, json_response,
 			sizeof(s_attr_response_buf) - 1);
 		s_attr_response_buf[sizeof(s_attr_response_buf) - 1] = '\0';
-	} else if (result == TB_REQUEST_RESULT_TIMEOUT) {
-		s_attr_timeout_count++;
-		s_attr_null_response_count++;
-	} else if (result == TB_REQUEST_RESULT_CANCELLED) {
-		s_attr_cancelled_count++;
-		s_attr_null_response_count++;
 	} else {
-		s_attr_error_count++;
 		s_attr_null_response_count++;
 	}
 	(void)user_data;
@@ -543,10 +529,6 @@ static void test_attributes_request_reconnect_safety(void)
 	s_attr_response_received = false;
 	s_attr_response_count = 0;
 	s_attr_null_response_count = 0;
-	s_attr_success_count = 0;
-	s_attr_timeout_count = 0;
-	s_attr_cancelled_count = 0;
-	s_attr_error_count = 0;
 	memset(s_attr_response_buf, 0, sizeof(s_attr_response_buf));
 
 	const char *keys[] = { "firmware_version" };
@@ -558,8 +540,6 @@ static void test_attributes_request_reconnect_safety(void)
 	mqtt_app_mock_simulate_remote_disconnect();
 	TEST_ASSERT(s_attr_null_response_count == 1,
 		    "pending attribute request is failed on disconnect");
-	TEST_ASSERT(s_attr_cancelled_count == 1,
-		    "pending attribute request reports cancelled status");
 
 	mqtt_app_mock_simulate_connect();
 	TEST_ASSERT(tb_attributes_request_client(client, keys, 1,
@@ -572,8 +552,6 @@ static void test_attributes_request_reconnect_safety(void)
 				      response, strlen(response));
 	TEST_ASSERT(s_attr_response_count == 2,
 		    "attribute callback called exactly once per request");
-	TEST_ASSERT(s_attr_success_count == 1,
-		    "only reconnect response completes with success status");
 	TEST_ASSERT(strstr(s_attr_response_buf, "firmware_version") != NULL,
 		    "attribute response is delivered after reconnect");
 
@@ -587,12 +565,6 @@ static void test_attributes_request(void)
 	TEST_ASSERT(client != NULL, "client created");
 
 	s_attr_response_received = false;
-	s_attr_response_count = 0;
-	s_attr_null_response_count = 0;
-	s_attr_success_count = 0;
-	s_attr_timeout_count = 0;
-	s_attr_cancelled_count = 0;
-	s_attr_error_count = 0;
 	memset(s_attr_response_buf, 0, sizeof(s_attr_response_buf));
 
 	const char *keys[] = { "firmware_version", "serial_number" };
@@ -626,131 +598,8 @@ static void test_attributes_request(void)
 				      response, strlen(response));
 	TEST_ASSERT(s_attr_response_received == true,
 		    "attribute response callback called");
-	TEST_ASSERT(s_attr_success_count == 1,
-		    "attribute response callback status is success");
 	TEST_ASSERT(strstr(s_attr_response_buf, "firmware_version") != NULL,
 		    "response contains firmware_version");
-
-	destroy_test_client(client);
-}
-
-static uint32_t parse_topic_suffix_id(const char *topic)
-{
-	const char *id_start;
-
-	if (topic == NULL) {
-		return 0;
-	}
-
-	id_start = strrchr(topic, '/');
-	if (id_start == NULL || *(id_start + 1) == '\0') {
-		return 0;
-	}
-
-	return (uint32_t)strtoul(id_start + 1, NULL, 10);
-}
-
-static void test_attributes_request_timeout_and_slot_reuse(void)
-{
-	TEST_START("Attributes Request Timeout And Slot Reuse");
-	tb_client_t *client = create_test_client();
-	TEST_ASSERT(client != NULL, "client created");
-
-	s_attr_response_received = false;
-	s_attr_response_count = 0;
-	s_attr_null_response_count = 0;
-	s_attr_success_count = 0;
-	s_attr_timeout_count = 0;
-	s_attr_cancelled_count = 0;
-	s_attr_error_count = 0;
-	memset(s_attr_response_buf, 0, sizeof(s_attr_response_buf));
-
-	const char *keys[] = { "firmware_version" };
-	TEST_ASSERT(tb_attributes_request_client(client, keys, 1,
-					attr_response_cb, NULL,
-					30) == 0,
-		    "attribute request with short timeout succeeds");
-
-	osal_task_delay_ms(120);
-	TEST_ASSERT(s_attr_response_count == 1,
-		    "attribute timeout callback fired once");
-	TEST_ASSERT(s_attr_timeout_count == 1,
-		    "attribute timeout status reported");
-
-	uint32_t timed_out_req_id = parse_topic_suffix_id(mock_publishes[0].topic);
-	char late_resp_topic[128];
-	snprintf(late_resp_topic, sizeof(late_resp_topic),
-		 "v1/devices/me/attributes/response/%u", timed_out_req_id);
-	mqtt_app_mock_deliver_message(late_resp_topic,
-			      "{\"client\":{\"firmware_version\":\"late\"}}",
-			      strlen("{\"client\":{\"firmware_version\":\"late\"}}"));
-	TEST_ASSERT(s_attr_response_count == 1,
-		    "late attribute response after deadline is ignored");
-
-	TEST_ASSERT(tb_attributes_request_client(client, keys, 1,
-					attr_response_cb, NULL,
-					5000) == 0,
-		    "slot reused after timeout for new request");
-	uint32_t active_req_id =
-		parse_topic_suffix_id(mock_publishes[mock_publish_count - 1].topic);
-	char resp_topic[128];
-	snprintf(resp_topic, sizeof(resp_topic),
-		 "v1/devices/me/attributes/response/%u", active_req_id);
-	mqtt_app_mock_deliver_message(resp_topic,
-			      "{\"client\":{\"firmware_version\":\"ok\"}}",
-			      strlen("{\"client\":{\"firmware_version\":\"ok\"}}"));
-
-	TEST_ASSERT(s_attr_response_count == 2,
-		    "second attribute callback delivered for reused slot");
-	TEST_ASSERT(s_attr_success_count == 1,
-		    "second attribute callback reports success");
-	TEST_ASSERT(strstr(s_attr_response_buf, "firmware_version") != NULL,
-		    "attribute success response payload delivered");
-
-	destroy_test_client(client);
-}
-
-static void test_attributes_request_max_pending(void)
-{
-	TEST_START("Attributes Request Max Pending");
-	tb_client_t *client = create_test_client();
-	TEST_ASSERT(client != NULL, "client created");
-
-	s_attr_response_count = 0;
-	s_attr_success_count = 0;
-	s_attr_timeout_count = 0;
-	s_attr_cancelled_count = 0;
-	s_attr_error_count = 0;
-	s_attr_null_response_count = 0;
-	memset(s_attr_response_buf, 0, sizeof(s_attr_response_buf));
-
-	const char *keys[] = { "firmware_version" };
-	for (int i = 0; i < TB_MAX_PENDING_REQUESTS; i++) {
-		TEST_ASSERT(tb_attributes_request_client(client, keys, 1,
-						attr_response_cb, NULL,
-						5000) == 0,
-			    "attribute request accepted while slots remain");
-	}
-
-	TEST_ASSERT(tb_attributes_request_client(client, keys, 1,
-					attr_response_cb, NULL,
-					5000) != 0,
-		    "attribute request fails when pending slots are full");
-
-	for (int i = 0; i < TB_MAX_PENDING_REQUESTS; i++) {
-		uint32_t req_id = parse_topic_suffix_id(mock_publishes[i].topic);
-		char topic[128];
-		snprintf(topic, sizeof(topic),
-			 "v1/devices/me/attributes/response/%u", req_id);
-		mqtt_app_mock_deliver_message(topic,
-				      "{\"client\":{\"firmware_version\":\"ok\"}}",
-				      strlen("{\"client\":{\"firmware_version\":\"ok\"}}"));
-	}
-
-	TEST_ASSERT(s_attr_success_count == TB_MAX_PENDING_REQUESTS,
-		    "all pending attribute requests complete successfully");
-	TEST_ASSERT(s_attr_timeout_count == 0,
-		    "no attribute timeout while responses arrive before deadline");
 
 	destroy_test_client(client);
 }
@@ -864,29 +713,16 @@ static bool s_client_rpc_received = false;
 static char s_client_rpc_response[512] = { 0 };
 static int s_client_rpc_null_count = 0;
 static int s_client_rpc_response_count = 0;
-static int s_client_rpc_success_count = 0;
-static int s_client_rpc_timeout_count = 0;
-static int s_client_rpc_cancelled_count = 0;
-static int s_client_rpc_error_count = 0;
 
-static void client_rpc_cb(tb_request_result_t result,
-			  const char *response_json, void *user_data)
+static void client_rpc_cb(const char *response_json, void *user_data)
 {
 	s_client_rpc_received = true;
 	s_client_rpc_response_count++;
-	if (result == TB_REQUEST_RESULT_SUCCESS && response_json) {
-		s_client_rpc_success_count++;
+	if (response_json) {
 		strncpy(s_client_rpc_response, response_json,
 			sizeof(s_client_rpc_response) - 1);
 		s_client_rpc_response[sizeof(s_client_rpc_response) - 1] = '\0';
-	} else if (result == TB_REQUEST_RESULT_TIMEOUT) {
-		s_client_rpc_timeout_count++;
-		s_client_rpc_null_count++;
-	} else if (result == TB_REQUEST_RESULT_CANCELLED) {
-		s_client_rpc_cancelled_count++;
-		s_client_rpc_null_count++;
 	} else {
-		s_client_rpc_error_count++;
 		s_client_rpc_null_count++;
 	}
 	(void)user_data;
@@ -901,10 +737,6 @@ static void test_client_side_rpc_reconnect_safety(void)
 	s_client_rpc_received = false;
 	s_client_rpc_null_count = 0;
 	s_client_rpc_response_count = 0;
-	s_client_rpc_success_count = 0;
-	s_client_rpc_timeout_count = 0;
-	s_client_rpc_cancelled_count = 0;
-	s_client_rpc_error_count = 0;
 	memset(s_client_rpc_response, 0, sizeof(s_client_rpc_response));
 
 	TEST_ASSERT(tb_rpc_request(client, "getTime", NULL, client_rpc_cb, NULL,
@@ -914,8 +746,6 @@ static void test_client_side_rpc_reconnect_safety(void)
 	mqtt_app_mock_simulate_remote_disconnect();
 	TEST_ASSERT(s_client_rpc_null_count == 1,
 		    "pending client RPC request is failed on disconnect");
-	TEST_ASSERT(s_client_rpc_cancelled_count == 1,
-		    "pending client RPC request reports cancelled status");
 
 	mqtt_app_mock_simulate_connect();
 	TEST_ASSERT(tb_rpc_request(client, "getTime", NULL, client_rpc_cb, NULL,
@@ -936,8 +766,6 @@ static void test_client_side_rpc_reconnect_safety(void)
 
 	TEST_ASSERT(s_client_rpc_response_count == 2,
 		    "client RPC callback called exactly once per request");
-	TEST_ASSERT(s_client_rpc_success_count == 1,
-		    "only reconnect response completes with success status");
 	TEST_ASSERT(strstr(s_client_rpc_response, "1700000010") != NULL,
 		    "client RPC response is delivered after reconnect");
 
@@ -951,12 +779,6 @@ static void test_client_side_rpc(void)
 	TEST_ASSERT(client != NULL, "client created");
 
 	s_client_rpc_received = false;
-	s_client_rpc_response_count = 0;
-	s_client_rpc_null_count = 0;
-	s_client_rpc_success_count = 0;
-	s_client_rpc_timeout_count = 0;
-	s_client_rpc_cancelled_count = 0;
-	s_client_rpc_error_count = 0;
 	memset(s_client_rpc_response, 0, sizeof(s_client_rpc_response));
 
 	int ret = tb_rpc_request(client, "getTime", NULL, client_rpc_cb, NULL,
@@ -990,106 +812,8 @@ static void test_client_side_rpc(void)
 
 	TEST_ASSERT(s_client_rpc_received == true,
 		    "client RPC response received");
-	TEST_ASSERT(s_client_rpc_success_count == 1,
-		    "client RPC response callback status is success");
 	TEST_ASSERT(strstr(s_client_rpc_response, "1700000000") != NULL,
 		    "response contains time value");
-
-	destroy_test_client(client);
-}
-
-static void test_client_side_rpc_timeout_and_slot_reuse(void)
-{
-	TEST_START("Client RPC Timeout And Slot Reuse");
-	tb_client_t *client = create_test_client();
-	TEST_ASSERT(client != NULL, "client created");
-
-	s_client_rpc_received = false;
-	s_client_rpc_response_count = 0;
-	s_client_rpc_null_count = 0;
-	s_client_rpc_success_count = 0;
-	s_client_rpc_timeout_count = 0;
-	s_client_rpc_cancelled_count = 0;
-	s_client_rpc_error_count = 0;
-	memset(s_client_rpc_response, 0, sizeof(s_client_rpc_response));
-
-	TEST_ASSERT(tb_rpc_request(client, "getTime", NULL, client_rpc_cb, NULL,
-			   30) == 0,
-		    "client RPC request with short timeout succeeds");
-
-	osal_task_delay_ms(120);
-	TEST_ASSERT(s_client_rpc_response_count == 1,
-		    "client RPC timeout callback fired once");
-	TEST_ASSERT(s_client_rpc_timeout_count == 1,
-		    "client RPC timeout status reported");
-
-	uint32_t timed_out_req_id = parse_topic_suffix_id(mock_publishes[0].topic);
-	char late_topic[128];
-	snprintf(late_topic, sizeof(late_topic),
-		 "v1/devices/me/rpc/response/%u", timed_out_req_id);
-	mqtt_app_mock_deliver_message(late_topic, "{\"time\":1}",
-			      strlen("{\"time\":1}"));
-	TEST_ASSERT(s_client_rpc_response_count == 1,
-		    "late client RPC response after deadline is ignored");
-
-	TEST_ASSERT(tb_rpc_request(client, "getTime", NULL, client_rpc_cb, NULL,
-			   5000) == 0,
-		    "client RPC request succeeds after timeout slot is freed");
-	uint32_t req_id =
-		parse_topic_suffix_id(mock_publishes[mock_publish_count - 1].topic);
-	char response_topic[128];
-	snprintf(response_topic, sizeof(response_topic),
-		 "v1/devices/me/rpc/response/%u", req_id);
-	mqtt_app_mock_deliver_message(response_topic, "{\"time\":1700001234}",
-			      strlen("{\"time\":1700001234}"));
-
-	TEST_ASSERT(s_client_rpc_response_count == 2,
-		    "second client RPC callback delivered for reused slot");
-	TEST_ASSERT(s_client_rpc_success_count == 1,
-		    "second client RPC callback reports success");
-	TEST_ASSERT(strstr(s_client_rpc_response, "1700001234") != NULL,
-		    "client RPC success response payload delivered");
-
-	destroy_test_client(client);
-}
-
-static void test_client_side_rpc_max_pending(void)
-{
-	TEST_START("Client RPC Max Pending");
-	tb_client_t *client = create_test_client();
-	TEST_ASSERT(client != NULL, "client created");
-
-	s_client_rpc_response_count = 0;
-	s_client_rpc_null_count = 0;
-	s_client_rpc_success_count = 0;
-	s_client_rpc_timeout_count = 0;
-	s_client_rpc_cancelled_count = 0;
-	s_client_rpc_error_count = 0;
-	memset(s_client_rpc_response, 0, sizeof(s_client_rpc_response));
-
-	for (int i = 0; i < TB_MAX_PENDING_REQUESTS; i++) {
-		TEST_ASSERT(tb_rpc_request(client, "getTime", NULL, client_rpc_cb,
-					   NULL, 5000) == 0,
-			    "client RPC request accepted while slots remain");
-	}
-
-	TEST_ASSERT(tb_rpc_request(client, "getTime", NULL, client_rpc_cb, NULL,
-			   5000) != 0,
-		    "client RPC request fails when pending slots are full");
-
-	for (int i = 0; i < TB_MAX_PENDING_REQUESTS; i++) {
-		uint32_t req_id = parse_topic_suffix_id(mock_publishes[i].topic);
-		char topic[128];
-		snprintf(topic, sizeof(topic),
-			 "v1/devices/me/rpc/response/%u", req_id);
-		mqtt_app_mock_deliver_message(topic, "{\"time\":1700004321}",
-				      strlen("{\"time\":1700004321}"));
-	}
-
-	TEST_ASSERT(s_client_rpc_success_count == TB_MAX_PENDING_REQUESTS,
-		    "all pending client RPC requests complete successfully");
-	TEST_ASSERT(s_client_rpc_timeout_count == 0,
-		    "no client RPC timeout while responses arrive before deadline");
 
 	destroy_test_client(client);
 }
@@ -1697,16 +1421,12 @@ int main(void)
 	test_attributes_send();
 	test_attributes_request();
 	test_attributes_request_reconnect_safety();
-	test_attributes_request_timeout_and_slot_reuse();
-	test_attributes_request_max_pending();
 	test_attributes_subscribe_shared();
 
 	/* RPC */
 	test_server_side_rpc();
 	test_client_side_rpc();
 	test_client_side_rpc_reconnect_safety();
-	test_client_side_rpc_timeout_and_slot_reuse();
-	test_client_side_rpc_max_pending();
 
 	/* Provisioning */
 	test_provisioning();

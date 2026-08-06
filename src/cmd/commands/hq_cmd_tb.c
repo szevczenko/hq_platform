@@ -321,27 +321,10 @@ static void cmd_attr_json(const char *args)
     }
 }
 
-static const char *tb_result_str(tb_request_result_t result)
-{
-    switch (result) {
-    case TB_REQUEST_RESULT_SUCCESS:
-        return "success";
-    case TB_REQUEST_RESULT_TIMEOUT:
-        return "timeout";
-    case TB_REQUEST_RESULT_CANCELLED:
-        return "cancelled";
-    case TB_REQUEST_RESULT_ERROR:
-    default:
-        return "error";
-    }
-}
-
-static void attr_response_print(tb_request_result_t result,
-                                const char *json_response, void *user_data)
+static void attr_response_print(const char *json_response, void *user_data)
 {
     (void)user_data;
-    print_line("Attribute response [%s]: %s", tb_result_str(result),
-               json_response ? json_response : "(null)");
+    print_line("Attribute response: %s", json_response ? json_response : "(null)");
 }
 
 static void cmd_attr_request(const char *args)
@@ -436,12 +419,10 @@ static void cmd_rpc_unsubscribe(void)
     }
 }
 
-static void client_rpc_print(tb_request_result_t result,
-                             const char *response_json, void *user_data)
+static void client_rpc_print(const char *response_json, void *user_data)
 {
     (void)user_data;
-    print_line("RPC response [%s]: %s", tb_result_str(result),
-               response_json ? response_json : "(null)");
+    print_line("RPC response: %s", response_json ? response_json : "(null)");
 }
 
 static void cmd_rpc_call(const char *args)
