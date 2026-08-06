@@ -419,3 +419,75 @@ target_link_libraries(thingboard_claim_demo
 set_target_properties(thingboard_claim_demo PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
+
+# -- thingboard_provision_demo example --
+# Configure via cmake -D flags:
+#   -DPROV_DEMO_BOOTSTRAP_CLIENT_ID="tb_provision_demo_bootstrap"
+#   -DPROV_DEMO_BOOTSTRAP_USERNAME="provision"
+#   -DPROV_DEMO_BOOTSTRAP_PASSWORD=""
+#   -DPROV_DEMO_BOOTSTRAP_DEVICE_NAME="Provision Bootstrap"
+#   -DPROV_DEMO_MQTT_URL="mqtt://broker:1883"
+#   -DPROV_DEMO_PROVISION_KEY="your_key"
+#   -DPROV_DEMO_PROVISION_SECRET="your_secret"
+#   -DPROV_DEMO_DEVICE_NAME="Provisioned Device Demo"
+#   -DPROV_DEMO_STORAGE_PATH="tb_provisioned_credentials.json"
+#   -DPROV_DEMO_REQUEST_TIMEOUT_MS=10000
+#   -DPROV_DEMO_RECONNECT_DELAY_MS=3000
+
+add_executable(thingboard_provision_demo
+  ${CMAKE_CURRENT_LIST_DIR}/../common/thingboard_provision_demo.c
+)
+
+target_include_directories(thingboard_provision_demo
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/thingsboard/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/mongoose
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/posix
+  PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+  PRIVATE ${HQ_CONFIG_DIR}
+)
+
+if(DEFINED PROV_DEMO_BOOTSTRAP_CLIENT_ID)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_BOOTSTRAP_CLIENT_ID="${PROV_DEMO_BOOTSTRAP_CLIENT_ID}")
+endif()
+if(DEFINED PROV_DEMO_BOOTSTRAP_USERNAME)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_BOOTSTRAP_USERNAME="${PROV_DEMO_BOOTSTRAP_USERNAME}")
+endif()
+if(DEFINED PROV_DEMO_BOOTSTRAP_PASSWORD)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_BOOTSTRAP_PASSWORD="${PROV_DEMO_BOOTSTRAP_PASSWORD}")
+endif()
+if(DEFINED PROV_DEMO_BOOTSTRAP_DEVICE_NAME)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_BOOTSTRAP_DEVICE_NAME="${PROV_DEMO_BOOTSTRAP_DEVICE_NAME}")
+endif()
+if(DEFINED PROV_DEMO_MQTT_URL)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_MQTT_URL="${PROV_DEMO_MQTT_URL}")
+endif()
+if(DEFINED PROV_DEMO_PROVISION_KEY)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_PROVISION_KEY="${PROV_DEMO_PROVISION_KEY}")
+endif()
+if(DEFINED PROV_DEMO_PROVISION_SECRET)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_PROVISION_SECRET="${PROV_DEMO_PROVISION_SECRET}")
+endif()
+if(DEFINED PROV_DEMO_DEVICE_NAME)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_DEVICE_NAME="${PROV_DEMO_DEVICE_NAME}")
+endif()
+if(DEFINED PROV_DEMO_STORAGE_PATH)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_STORAGE_PATH="${PROV_DEMO_STORAGE_PATH}")
+endif()
+if(DEFINED PROV_DEMO_REQUEST_TIMEOUT_MS)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_REQUEST_TIMEOUT_MS=${PROV_DEMO_REQUEST_TIMEOUT_MS})
+endif()
+if(DEFINED PROV_DEMO_RECONNECT_DELAY_MS)
+  target_compile_definitions(thingboard_provision_demo PRIVATE CONFIG_PROV_DEMO_RECONNECT_DELAY_MS=${PROV_DEMO_RECONNECT_DELAY_MS})
+endif()
+
+target_link_libraries(thingboard_provision_demo
+  hq_thingsboard
+  hq_mongoose
+  hq_cjson
+  pthread
+)
+
+set_target_properties(thingboard_provision_demo PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)

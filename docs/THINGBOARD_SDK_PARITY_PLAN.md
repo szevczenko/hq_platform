@@ -148,7 +148,7 @@ and device name, and must log its connection lifecycle.
   - Mirrors Python: `claiming_device_pe_only.py`.
   - Tests: request JSON shape and publish failure.
 
-- [ ] **`thingboard_provision_demo`**
+- [x] **`thingboard_provision_demo`**
   - Request credentials with the provisioning token, validate the response,
     store credentials through an OSAL secure/persistent-storage interface, and
     reconnect as the provisioned device.

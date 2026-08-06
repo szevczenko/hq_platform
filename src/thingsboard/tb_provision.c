@@ -21,6 +21,7 @@
 static tb_provision_cb_t s_provision_cb = NULL;
 static void *s_provision_user_data = NULL;
 static bool s_provision_subscribed = false;
+static tb_client_t *s_owner_client = NULL;
 
 static void provision_response_handler(const char *topic, const char *payload,
 				       size_t payload_len)
@@ -53,6 +54,11 @@ int tb_provision_request(tb_client_t *client, const tb_provision_request_t *req,
 	if (req->provision_device_key == NULL ||
 	    req->provision_device_secret == NULL) {
 		return -1;
+	}
+
+	if (s_owner_client != client) {
+		s_owner_client = client;
+		s_provision_subscribed = false;
 	}
 
 	/* Subscribe to response topic */
@@ -113,4 +119,16 @@ int tb_provision_request(tb_client_t *client, const tb_provision_request_t *req,
 	int ret = tb_client_publish(client, TB_PROVISION_REQUEST_TOPIC, json);
 	cJSON_free(json);
 	return ret;
+}
+
+void tb_provision_deinit(tb_client_t *client)
+{
+	if (client == NULL || s_owner_client == NULL || s_owner_client != client) {
+		return;
+	}
+
+	s_provision_cb = NULL;
+	s_provision_user_data = NULL;
+	s_provision_subscribed = false;
+	s_owner_client = NULL;
 }

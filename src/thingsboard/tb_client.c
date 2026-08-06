@@ -18,6 +18,7 @@
 #include "osal_log.h"
 #include "osal_task.h"
 #include "tb_attributes.h"
+#include "tb_provision.h"
 #include "tb_rpc.h"
 
 typedef struct {
@@ -717,6 +718,7 @@ void tb_client_deinit(tb_client_t *client)
         return;
     }
     tb_attributes_deinit(client);
+    tb_provision_deinit(client);
     tb_rpc_deinit(client);
     if (client->mqtt_started) {
         tb_client_disconnect(client);

@@ -47,6 +47,9 @@ int tb_provision_request(tb_client_t *client, const tb_provision_request_t *req,
                          tb_provision_cb_t cb, void *user_data,
                          uint32_t timeout_ms);
 
+/* Internal lifecycle hook used by tb_client on deinit. */
+void tb_provision_deinit(tb_client_t *client);
+
 #ifdef __cplusplus
 }
 #endif

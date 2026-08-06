@@ -1794,15 +1794,25 @@ static void test_client_side_rpc_max_pending(void)
  * ============================================================ */
 static bool s_provision_received = false;
 static char s_provision_response[512] = { 0 };
+static int s_provision_response_count = 0;
 
 static void provision_cb(const char *response_json, void *user_data)
 {
 	s_provision_received = true;
+	s_provision_response_count++;
+	memset(s_provision_response, 0, sizeof(s_provision_response));
 	if (response_json) {
 		strncpy(s_provision_response, response_json,
 			sizeof(s_provision_response) - 1);
 	}
 	(void)user_data;
+}
+
+static void reset_provision_cb_state(void)
+{
+	s_provision_received = false;
+	s_provision_response_count = 0;
+	memset(s_provision_response, 0, sizeof(s_provision_response));
 }
 
 static void test_provisioning(void)
@@ -1811,7 +1821,7 @@ static void test_provisioning(void)
 	tb_client_t *client = create_test_client();
 	TEST_ASSERT(client != NULL, "client created");
 
-	s_provision_received = false;
+	reset_provision_cb_state();
 
 	tb_provision_request_t req = {
 		.device_name = "new_device",
@@ -1851,6 +1861,188 @@ static void test_provisioning(void)
 	TEST_ASSERT(s_provision_received == true, "provision callback called");
 	TEST_ASSERT(strstr(s_provision_response, "abc123") != NULL,
 		    "provision response contains token");
+
+	destroy_test_client(client);
+}
+
+static void test_provisioning_request_credentials_type_shapes(void)
+{
+	TEST_START("Provisioning Request Credential Type Shapes");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	reset_provision_cb_state();
+
+	tb_provision_request_t access_token_req = {
+		.device_name = "new_device_token",
+		.provision_device_key = "my_provision_key",
+		.provision_device_secret = "my_provision_secret",
+		.credentials_type = "ACCESS_TOKEN",
+		.token = "tok_value",
+	};
+
+	mock_publish_count = 0;
+	TEST_ASSERT(tb_provision_request(client, &access_token_req,
+				 provision_cb, NULL,
+				 10000) == 0,
+		    "access token provisioning request succeeds");
+	TEST_ASSERT(mock_publish_count == 1,
+		    "access token provisioning request is published");
+	cJSON *root = cJSON_Parse(mock_publishes[0].message);
+	TEST_ASSERT(root != NULL, "access token provisioning JSON valid");
+	if (root) {
+		cJSON *ctype = cJSON_GetObjectItemCaseSensitive(root,
+							"credentialsType");
+		cJSON *token = cJSON_GetObjectItemCaseSensitive(root, "token");
+		TEST_ASSERT(cJSON_IsString(ctype) &&
+				strcmp(ctype->valuestring, "ACCESS_TOKEN") == 0,
+			    "access token request includes credentialsType");
+		TEST_ASSERT(cJSON_IsString(token) &&
+				strcmp(token->valuestring, "tok_value") == 0,
+			    "access token request includes token field");
+		cJSON_Delete(root);
+	}
+
+	tb_provision_request_t basic_req = {
+		.device_name = "new_device_basic",
+		.provision_device_key = "my_provision_key",
+		.provision_device_secret = "my_provision_secret",
+		.credentials_type = "MQTT_BASIC",
+		.username = "u1",
+		.password = "p1",
+		.client_id = "cid1",
+	};
+
+	mock_publish_count = 0;
+	TEST_ASSERT(tb_provision_request(client, &basic_req,
+				 provision_cb, NULL,
+				 10000) == 0,
+		    "mqtt basic provisioning request succeeds");
+	TEST_ASSERT(mock_publish_count == 1,
+		    "mqtt basic provisioning request is published");
+	root = cJSON_Parse(mock_publishes[0].message);
+	TEST_ASSERT(root != NULL, "mqtt basic provisioning JSON valid");
+	if (root) {
+		cJSON *ctype = cJSON_GetObjectItemCaseSensitive(root,
+							"credentialsType");
+		cJSON *username = cJSON_GetObjectItemCaseSensitive(root, "username");
+		cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
+		cJSON *client_id = cJSON_GetObjectItemCaseSensitive(root, "clientId");
+		TEST_ASSERT(cJSON_IsString(ctype) &&
+				strcmp(ctype->valuestring, "MQTT_BASIC") == 0,
+			    "mqtt basic request includes credentialsType");
+		TEST_ASSERT(cJSON_IsString(username) &&
+				strcmp(username->valuestring, "u1") == 0,
+			    "mqtt basic request includes username");
+		TEST_ASSERT(cJSON_IsString(password) &&
+				strcmp(password->valuestring, "p1") == 0,
+			    "mqtt basic request includes password");
+		TEST_ASSERT(cJSON_IsString(client_id) &&
+				strcmp(client_id->valuestring, "cid1") == 0,
+			    "mqtt basic request includes clientId");
+		cJSON_Delete(root);
+	}
+
+	tb_provision_request_t x509_req = {
+		.device_name = "new_device_x509",
+		.provision_device_key = "my_provision_key",
+		.provision_device_secret = "my_provision_secret",
+		.credentials_type = "X509_CERTIFICATE",
+		.certificate_hash = "abc_hash",
+	};
+
+	mock_publish_count = 0;
+	TEST_ASSERT(tb_provision_request(client, &x509_req,
+				 provision_cb, NULL,
+				 10000) == 0,
+		    "x509 provisioning request succeeds");
+	TEST_ASSERT(mock_publish_count == 1,
+		    "x509 provisioning request is published");
+	root = cJSON_Parse(mock_publishes[0].message);
+	TEST_ASSERT(root != NULL, "x509 provisioning JSON valid");
+	if (root) {
+		cJSON *ctype = cJSON_GetObjectItemCaseSensitive(root,
+							"credentialsType");
+		cJSON *hash = cJSON_GetObjectItemCaseSensitive(root, "hash");
+		TEST_ASSERT(cJSON_IsString(ctype) &&
+				strcmp(ctype->valuestring, "X509_CERTIFICATE") == 0,
+			    "x509 request includes credentialsType");
+		TEST_ASSERT(cJSON_IsString(hash) &&
+				strcmp(hash->valuestring, "abc_hash") == 0,
+			    "x509 request includes hash field");
+		cJSON_Delete(root);
+	}
+
+	destroy_test_client(client);
+}
+
+static void test_provisioning_invalid_response_and_publish_failure(void)
+{
+	TEST_START("Provisioning Invalid Response And Publish Failure");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	reset_provision_cb_state();
+
+	tb_provision_request_t req = {
+		.device_name = "new_device",
+		.provision_device_key = "my_provision_key",
+		.provision_device_secret = "my_provision_secret",
+	};
+
+	TEST_ASSERT(tb_provision_request(client, &req, provision_cb, NULL,
+				 10000) == 0,
+		    "provision request succeeds before invalid response");
+
+	const char *invalid_resp = "{invalid_json";
+	mqtt_app_mock_deliver_message("/provision/response", invalid_resp,
+			      strlen(invalid_resp));
+	TEST_ASSERT(s_provision_received == true,
+		    "invalid provisioning response still triggers callback");
+	TEST_ASSERT(strstr(s_provision_response, "invalid_json") != NULL,
+		    "invalid provisioning payload is delivered unchanged");
+
+	mqtt_app_mock_simulate_error_disconnect();
+	TEST_ASSERT(tb_provision_request(client, &req, provision_cb, NULL,
+				 10000) != 0,
+		    "provision request fails when publish transport is down");
+
+	destroy_test_client(client);
+}
+
+static void test_provisioning_reconnect_and_reissue(void)
+{
+	TEST_START("Provisioning Reconnect And Reissue");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	reset_provision_cb_state();
+
+	tb_provision_request_t req = {
+		.device_name = "new_device",
+		.provision_device_key = "my_provision_key",
+		.provision_device_secret = "my_provision_secret",
+	};
+
+	TEST_ASSERT(tb_provision_request(client, &req, provision_cb, NULL,
+				 10000) == 0,
+		    "first provision request succeeds");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	mqtt_app_mock_simulate_connect();
+
+	reset_provision_cb_state();
+	TEST_ASSERT(tb_provision_request(client, &req, provision_cb, NULL,
+				 10000) == 0,
+		    "provision request succeeds after reconnect");
+
+	const char *resp =
+		"{\"credentialsType\":\"ACCESS_TOKEN\",\"credentialsValue\":\"abc123\"}";
+	mqtt_app_mock_deliver_message("/provision/response", resp, strlen(resp));
+	TEST_ASSERT(s_provision_response_count == 1,
+		    "provision callback called once after reconnect request");
+	TEST_ASSERT(strstr(s_provision_response, "credentialsType") != NULL,
+		    "provision response payload delivered after reconnect");
 
 	destroy_test_client(client);
 }
@@ -2430,6 +2622,9 @@ int main(void)
 
 	/* Provisioning */
 	test_provisioning();
+	test_provisioning_request_credentials_type_shapes();
+	test_provisioning_invalid_response_and_publish_failure();
+	test_provisioning_reconnect_and_reissue();
 
 	/* Claiming */
 	test_claim_device();
