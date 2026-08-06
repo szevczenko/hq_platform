@@ -171,3 +171,63 @@ target_link_libraries(thingboard_firmware_update_demo
 set_target_properties(thingboard_firmware_update_demo PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
+
+# -- thingboard_telemetry_attributes_demo example --
+# Configure via cmake -D flags:
+#   -DTA_DEMO_CLIENT_ID="tb_telem_attr_0001"
+#   -DTA_DEMO_USERNAME="token"
+#   -DTA_DEMO_PASSWORD="pass"
+#   -DTA_DEMO_DEVICE_NAME="Telemetry Attributes Demo"
+#   -DTA_DEMO_MQTT_URL="mqtt://broker:1883"
+#   -DTA_DEMO_SEND_PERIOD_MS=7000
+#   -DTA_DEMO_RECONNECT_DELAY_MS=3000
+#   -DTA_DEMO_ENABLE_QOS_DEMO=1
+
+add_executable(thingboard_telemetry_attributes_demo
+  ${CMAKE_CURRENT_LIST_DIR}/../common/thingboard_telemetry_attributes_demo.c
+)
+
+target_include_directories(thingboard_telemetry_attributes_demo
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/thingsboard/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/mongoose
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/posix
+  PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+  PRIVATE ${HQ_CONFIG_DIR}
+)
+
+if(DEFINED TA_DEMO_CLIENT_ID)
+  target_compile_definitions(thingboard_telemetry_attributes_demo PRIVATE CONFIG_TA_DEMO_CLIENT_ID="${TA_DEMO_CLIENT_ID}")
+endif()
+if(DEFINED TA_DEMO_USERNAME)
+  target_compile_definitions(thingboard_telemetry_attributes_demo PRIVATE CONFIG_TA_DEMO_USERNAME="${TA_DEMO_USERNAME}")
+endif()
+if(DEFINED TA_DEMO_PASSWORD)
+  target_compile_definitions(thingboard_telemetry_attributes_demo PRIVATE CONFIG_TA_DEMO_PASSWORD="${TA_DEMO_PASSWORD}")
+endif()
+if(DEFINED TA_DEMO_DEVICE_NAME)
+  target_compile_definitions(thingboard_telemetry_attributes_demo PRIVATE CONFIG_TA_DEMO_DEVICE_NAME="${TA_DEMO_DEVICE_NAME}")
+endif()
+if(DEFINED TA_DEMO_MQTT_URL)
+  target_compile_definitions(thingboard_telemetry_attributes_demo PRIVATE CONFIG_TA_DEMO_MQTT_URL="${TA_DEMO_MQTT_URL}")
+endif()
+if(DEFINED TA_DEMO_SEND_PERIOD_MS)
+  target_compile_definitions(thingboard_telemetry_attributes_demo PRIVATE CONFIG_TA_DEMO_SEND_PERIOD_MS=${TA_DEMO_SEND_PERIOD_MS})
+endif()
+if(DEFINED TA_DEMO_RECONNECT_DELAY_MS)
+  target_compile_definitions(thingboard_telemetry_attributes_demo PRIVATE CONFIG_TA_DEMO_RECONNECT_DELAY_MS=${TA_DEMO_RECONNECT_DELAY_MS})
+endif()
+if(DEFINED TA_DEMO_ENABLE_QOS_DEMO)
+  target_compile_definitions(thingboard_telemetry_attributes_demo PRIVATE CONFIG_TA_DEMO_ENABLE_QOS_DEMO=${TA_DEMO_ENABLE_QOS_DEMO})
+endif()
+
+target_link_libraries(thingboard_telemetry_attributes_demo
+  hq_thingsboard
+  hq_mongoose
+  hq_cjson
+  pthread
+)
+
+set_target_properties(thingboard_telemetry_attributes_demo PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
