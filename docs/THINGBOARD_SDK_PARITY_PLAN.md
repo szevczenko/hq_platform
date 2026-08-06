@@ -115,23 +115,6 @@ real device target.
 
 ## P1 - Client Reliability And Protocol Behavior
 
-- [ ] **Adopt connection-state callbacks across demos.**
-  - Public connect/disconnect/connection-failure callbacks with user-data and
-    reason codes are implemented and covered by unit tests.
-  - Use the callbacks in demos to publish connection state and in the OTA
-    demo to drive health confirmation.
-
-- [ ] **Implement request deadlines and timeout callbacks.**
-  - Attribute and client-RPC requests need explicit timeout tracking rather
-    than retaining pending slots indefinitely.
-  - Add a portable timer-driven cleanup path. Call the API callback with a
-    result/error status; preserve the JSON callback payload for successful
-    results.
-  - Add cancellation on client deinitialization and disconnect.
-  - Unit tests: response before deadline, response after deadline, timeout
-    slot reuse, cancellation, and simultaneous requests up to
-    `TB_MAX_PENDING_REQUESTS`.
-
 - [ ] **Expose QoS, keepalive, and reconnect policy through the client API.**
   - Allow a caller to select QoS 0 or 1 per publish/subscribe or through
     defaults in `tb_client_config_t`.

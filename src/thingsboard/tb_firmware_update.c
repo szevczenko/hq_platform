@@ -458,11 +458,13 @@ static int fw_start_download(void)
 	return fw_request_chunk();
 }
 
-static void fw_attributes_cb(const char *response_json, void *user_data)
+static void fw_attributes_cb(tb_request_result_t result,
+			     const char *response_json, void *user_data)
 {
 	(void)user_data;
 
-	if (response_json == NULL || s_fw.in_progress) {
+	if (result != TB_REQUEST_RESULT_SUCCESS || response_json == NULL ||
+	    s_fw.in_progress) {
 		return;
 	}
 

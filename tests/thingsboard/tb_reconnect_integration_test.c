@@ -50,6 +50,7 @@ static volatile int g_disconnect_count = 0;
 
 static volatile int g_attr_null_count = 0;
 static volatile int g_attr_data_count = 0;
+static volatile int g_attr_cancelled_count = 0;
 static char g_attr_last_payload[512] = { 0 };
 static volatile uint32_t g_attr_last_req_id = 0;
 
@@ -60,6 +61,7 @@ static volatile uint32_t g_last_server_rpc_id = 0;
 
 static volatile int g_client_rpc_null_count = 0;
 static volatile int g_client_rpc_data_count = 0;
+static volatile int g_client_rpc_cancelled_count = 0;
 static char g_client_rpc_last_payload[512] = { 0 };
 
 static const char *g_broker_stop_cmd = NULL;
@@ -82,10 +84,16 @@ static void on_disconnect(tb_client_t *client,
 	g_disconnect_count++;
 }
 
-static void on_attr_response(const char *json_response, void *user_data)
+static void on_attr_response(tb_request_result_t result,
+			     const char *json_response, void *user_data)
 {
 	(void)user_data;
-	if (json_response == NULL) {
+	if (result == TB_REQUEST_RESULT_CANCELLED) {
+		g_attr_cancelled_count++;
+		g_attr_null_count++;
+		return;
+	}
+	if (result != TB_REQUEST_RESULT_SUCCESS || json_response == NULL) {
 		g_attr_null_count++;
 		return;
 	}
@@ -113,10 +121,16 @@ static void on_server_rpc(const char *method, const char *params_json,
 	(void)tb_rpc_respond(g_client, request_id, "{\"ok\":true}");
 }
 
-static void on_client_rpc(const char *response_json, void *user_data)
+static void on_client_rpc(tb_request_result_t result,
+			  const char *response_json, void *user_data)
 {
 	(void)user_data;
-	if (response_json == NULL) {
+	if (result == TB_REQUEST_RESULT_CANCELLED) {
+		g_client_rpc_cancelled_count++;
+		g_client_rpc_null_count++;
+		return;
+	}
+	if (result != TB_REQUEST_RESULT_SUCCESS || response_json == NULL) {
 		g_client_rpc_null_count++;
 		return;
 	}
@@ -196,6 +210,7 @@ static void test_attribute_request_reconnect(void)
 	TEST_START("Attribute Request Reconnect");
 
 	g_attr_null_count = 0;
+	g_attr_cancelled_count = 0;
 	g_attr_data_count = 0;
 	g_attr_last_req_id = 0;
 	memset(g_attr_last_payload, 0, sizeof(g_attr_last_payload));
@@ -220,6 +235,8 @@ static void test_attribute_request_reconnect(void)
 		    "client reconnected after broker restart");
 	TEST_ASSERT(g_attr_null_count >= 1,
 		    "pending attribute callback failed on disconnect");
+	TEST_ASSERT(g_attr_cancelled_count >= 1,
+		    "pending attribute callback reported cancelled status");
 
 	g_attr_last_req_id = 0;
 	TEST_ASSERT(tb_attributes_request_client(g_client, keys, 1,
@@ -280,6 +297,7 @@ static void test_shared_attr_rpc_and_fw_reconnect(void)
 	g_server_rpc_count = 0;
 	g_last_server_rpc_id = 0;
 	g_client_rpc_null_count = 0;
+	g_client_rpc_cancelled_count = 0;
 	g_client_rpc_data_count = 0;
 	memset(g_client_rpc_last_payload, 0, sizeof(g_client_rpc_last_payload));
 

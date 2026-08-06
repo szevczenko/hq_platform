@@ -34,6 +34,13 @@ typedef enum {
 	TB_CLIENT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR
 } tb_client_connect_failure_reason_t;
 
+typedef enum {
+    TB_REQUEST_RESULT_SUCCESS = 0,
+    TB_REQUEST_RESULT_TIMEOUT,
+    TB_REQUEST_RESULT_CANCELLED,
+    TB_REQUEST_RESULT_ERROR
+} tb_request_result_t;
+
 typedef void (*tb_client_connect_callback_t)(tb_client_t *client,
 					     void *user_data);
 typedef void (*tb_client_disconnect_callback_t)(
