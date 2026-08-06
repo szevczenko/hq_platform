@@ -935,16 +935,81 @@ static void test_attributes_request_max_pending(void)
 
 static bool s_shared_attr_received = false;
 static char s_shared_attr_buf[512] = { 0 };
+static int s_shared_attr_cb_count = 0;
+static int s_shared_threshold_cb_count_a = 0;
+static int s_shared_threshold_cb_count_b = 0;
+static int s_shared_mode_cb_count = 0;
+static int s_shared_self_remove_cb_count = 0;
+static char s_last_key_a[64] = { 0 };
+static char s_last_key_b[64] = { 0 };
+static char s_last_key_mode[64] = { 0 };
+
+typedef struct {
+	tb_client_t *client;
+	tb_shared_attribute_subscription_t *handle;
+} self_remove_ctx_t;
+
+static self_remove_ctx_t s_self_remove_ctx = { 0 };
 
 static void shared_attr_cb(const char *json_payload, void *user_data)
 {
 	s_shared_attr_received = true;
+	s_shared_attr_cb_count++;
 	if (json_payload) {
 		strncpy(s_shared_attr_buf, json_payload,
 			sizeof(s_shared_attr_buf) - 1);
 		s_shared_attr_buf[sizeof(s_shared_attr_buf) - 1] = '\0';
 	}
 	(void)user_data;
+}
+
+static void shared_threshold_cb_a(const char *key, const char *json_payload,
+				  void *user_data)
+{
+	(void)user_data;
+	if (json_payload == NULL) {
+		return;
+	}
+	s_shared_threshold_cb_count_a++;
+	strncpy(s_last_key_a, key, sizeof(s_last_key_a) - 1);
+	s_last_key_a[sizeof(s_last_key_a) - 1] = '\0';
+}
+
+static void shared_threshold_cb_b(const char *key, const char *json_payload,
+				  void *user_data)
+{
+	(void)user_data;
+	if (json_payload == NULL) {
+		return;
+	}
+	s_shared_threshold_cb_count_b++;
+	strncpy(s_last_key_b, key, sizeof(s_last_key_b) - 1);
+	s_last_key_b[sizeof(s_last_key_b) - 1] = '\0';
+}
+
+static void shared_mode_cb(const char *key, const char *json_payload,
+			   void *user_data)
+{
+	(void)user_data;
+	if (json_payload == NULL) {
+		return;
+	}
+	s_shared_mode_cb_count++;
+	strncpy(s_last_key_mode, key, sizeof(s_last_key_mode) - 1);
+	s_last_key_mode[sizeof(s_last_key_mode) - 1] = '\0';
+}
+
+static void shared_threshold_self_remove_cb(const char *key,
+					    const char *json_payload,
+					    void *user_data)
+{
+	(void)key;
+	(void)json_payload;
+	self_remove_ctx_t *ctx = (self_remove_ctx_t *)user_data;
+	s_shared_self_remove_cb_count++;
+	if (ctx != NULL && ctx->client != NULL && ctx->handle != NULL) {
+		(void)tb_attributes_unsubscribe_key(ctx->client, ctx->handle);
+	}
 }
 
 static void test_attributes_subscribe_shared(void)
@@ -970,6 +1035,136 @@ static void test_attributes_subscribe_shared(void)
 
 	ret = tb_attributes_unsubscribe(client);
 	TEST_ASSERT(ret == 0, "unsubscribe shared attributes succeeds");
+
+	destroy_test_client(client);
+}
+
+static void test_attributes_subscribe_shared_per_key(void)
+{
+	TEST_START("Shared Attribute Per-Key Subscribe");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_shared_attr_received = false;
+	s_shared_attr_cb_count = 0;
+	s_shared_threshold_cb_count_a = 0;
+	s_shared_threshold_cb_count_b = 0;
+	s_shared_mode_cb_count = 0;
+	s_shared_self_remove_cb_count = 0;
+	memset(s_shared_attr_buf, 0, sizeof(s_shared_attr_buf));
+	memset(s_last_key_a, 0, sizeof(s_last_key_a));
+	memset(s_last_key_b, 0, sizeof(s_last_key_b));
+	memset(s_last_key_mode, 0, sizeof(s_last_key_mode));
+	s_self_remove_ctx.client = client;
+	s_self_remove_ctx.handle = NULL;
+
+	tb_shared_attribute_subscription_t *threshold_a = NULL;
+	tb_shared_attribute_subscription_t *threshold_b = NULL;
+	tb_shared_attribute_subscription_t *mode_sub = NULL;
+	tb_shared_attribute_subscription_t *self_remove_sub = NULL;
+
+	TEST_ASSERT(tb_attributes_subscribe(client, shared_attr_cb, NULL) == 0,
+		    "wildcard shared subscription succeeds");
+	TEST_ASSERT(tb_attributes_subscribe_key(client, "threshold",
+					shared_threshold_cb_a,
+					NULL, &threshold_a) == 0,
+		    "first threshold keyed subscription succeeds");
+	TEST_ASSERT(threshold_a != NULL,
+		    "first threshold keyed subscription handle is returned");
+	TEST_ASSERT(tb_attributes_subscribe_key(client, "threshold",
+					shared_threshold_cb_b,
+					NULL, &threshold_b) == 0,
+		    "second threshold keyed subscription succeeds");
+	TEST_ASSERT(threshold_b != NULL,
+		    "second threshold keyed subscription handle is returned");
+	TEST_ASSERT(tb_attributes_subscribe_key(client, "mode", shared_mode_cb,
+					NULL, &mode_sub) == 0,
+		    "mode keyed subscription succeeds");
+	TEST_ASSERT(mode_sub != NULL,
+		    "mode keyed subscription handle is returned");
+	TEST_ASSERT(tb_attributes_subscribe_key(client, "threshold",
+					shared_threshold_self_remove_cb,
+					&s_self_remove_ctx,
+					&self_remove_sub) == 0,
+		    "self-removing threshold keyed subscription succeeds");
+	TEST_ASSERT(self_remove_sub != NULL,
+		    "self-removing keyed subscription handle is returned");
+	s_self_remove_ctx.handle = self_remove_sub;
+
+	const char *payload_all = "{\"threshold\":42,\"mode\":\"auto\"}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_all,
+				      strlen(payload_all));
+	TEST_ASSERT(s_shared_attr_received == true,
+		    "wildcard shared callback receives update");
+	TEST_ASSERT(s_shared_attr_cb_count == 1,
+		    "wildcard callback called once for first update");
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 1,
+		    "first keyed threshold callback called for matching key");
+	TEST_ASSERT(s_shared_threshold_cb_count_b == 1,
+		    "second keyed threshold callback called for matching key");
+	TEST_ASSERT(s_shared_mode_cb_count == 1,
+		    "mode keyed callback called for matching key");
+	TEST_ASSERT(s_shared_self_remove_cb_count == 1,
+		    "self-removing keyed callback called once");
+	TEST_ASSERT(strcmp(s_last_key_a, "threshold") == 0,
+		    "first keyed callback receives subscribed key name");
+	TEST_ASSERT(strcmp(s_last_key_b, "threshold") == 0,
+		    "second keyed callback receives subscribed key name");
+	TEST_ASSERT(strcmp(s_last_key_mode, "mode") == 0,
+		    "mode keyed callback receives subscribed key name");
+
+	const char *payload_nonmatch = "{\"other\":1}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_nonmatch,
+				      strlen(payload_nonmatch));
+	TEST_ASSERT(s_shared_attr_cb_count == 2,
+		    "wildcard callback still receives nonmatching updates");
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 1,
+		    "keyed callback ignores nonmatching payload keys");
+	TEST_ASSERT(s_shared_threshold_cb_count_b == 1,
+		    "second keyed callback ignores nonmatching payload keys");
+	TEST_ASSERT(s_shared_mode_cb_count == 1,
+		    "mode keyed callback ignores nonmatching payload keys");
+
+	const char *payload_threshold = "{\"threshold\":43}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_threshold,
+				      strlen(payload_threshold));
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 2,
+		    "first keyed threshold callback is called again");
+	TEST_ASSERT(s_shared_threshold_cb_count_b == 2,
+		    "second keyed threshold callback is called again");
+	TEST_ASSERT(s_shared_self_remove_cb_count == 1,
+		    "self-removing keyed callback is not called after removal");
+
+	TEST_ASSERT(tb_attributes_unsubscribe(client) == 0,
+		    "wildcard unsubscribe succeeds without removing keyed subscriptions");
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_threshold,
+				      strlen(payload_threshold));
+	TEST_ASSERT(s_shared_attr_cb_count == 3,
+		    "wildcard callback is not called after wildcard unsubscribe");
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 3,
+		    "keyed subscription remains active after wildcard unsubscribe");
+
+	TEST_ASSERT(tb_attributes_unsubscribe_key(client, threshold_a) == 0,
+		    "first keyed threshold unsubscribe succeeds");
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_threshold,
+				      strlen(payload_threshold));
+	TEST_ASSERT(s_shared_threshold_cb_count_a == 3,
+		    "first keyed threshold callback stops after unsubscribe");
+	TEST_ASSERT(s_shared_threshold_cb_count_b == 4,
+		    "second keyed threshold callback remains active");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	mqtt_app_mock_simulate_connect();
+	const char *payload_mode = "{\"mode\":\"manual\"}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes", payload_mode,
+				      strlen(payload_mode));
+	TEST_ASSERT(s_shared_mode_cb_count == 2,
+		    "mode keyed callback survives reconnect");
+
+	TEST_ASSERT(tb_attributes_unsubscribe_key(client, threshold_b) == 0,
+		    "second keyed threshold unsubscribe succeeds");
+	TEST_ASSERT(tb_attributes_unsubscribe_key(client, mode_sub) == 0,
+		    "mode keyed unsubscribe succeeds");
 
 	destroy_test_client(client);
 }
@@ -1880,6 +2075,7 @@ int main(void)
 	test_attributes_request_timeout_and_slot_reuse();
 	test_attributes_request_max_pending();
 	test_attributes_subscribe_shared();
+	test_attributes_subscribe_shared_per_key();
 
 	/* RPC */
 	test_server_side_rpc();

@@ -115,14 +115,6 @@ real device target.
 
 ## P1 - Client Reliability And Protocol Behavior
 
-- [ ] **Improve attribute subscription semantics.**
-  - Keep the existing all-shared-attributes callback for a small API.
-  - Add optional per-key subscriptions and independent subscription handles,
-    allowing multiple consumers without singleton callback replacement.
-  - Define callback ownership and safe removal during callback execution.
-  - Unit tests: wildcard and per-key dispatch, multiple callbacks, removal,
-    and reconnect restoration.
-
 ## P2 - Public API And Demo Coverage
 
 Create one small, independently buildable POSIX demo in `examples/common` and

@@ -26,6 +26,8 @@
 #define TB_ATTR_REQUEST_TIMEOUT_MS 5000
 #define TB_ATTR_MAX_TOPIC_LEN 128
 #define TB_ATTR_SWEEP_PERIOD_MS 50
+#define TB_ATTR_MAX_KEY_SUBS 8
+#define TB_ATTR_MAX_KEY_LEN 64
 
 /* Pending attribute request tracking */
 typedef struct {
@@ -50,6 +52,101 @@ static tb_client_t *s_owner_client = NULL;
 static tb_shared_attribute_cb_t s_shared_cb = NULL;
 static void *s_shared_user_data = NULL;
 static bool s_shared_subscribed = false;
+
+static void shared_attr_handler(const char *topic, const char *payload,
+				size_t payload_len);
+
+struct tb_shared_attribute_subscription {
+	char key[TB_ATTR_MAX_KEY_LEN];
+	tb_shared_attribute_key_cb_t cb;
+	void *user_data;
+	bool active;
+	bool dispatching;
+	bool pending_remove;
+};
+
+static tb_shared_attribute_subscription_t s_key_subs[TB_ATTR_MAX_KEY_SUBS];
+
+static void clear_key_subscription(tb_shared_attribute_subscription_t *sub)
+{
+	if (sub == NULL) {
+		return;
+	}
+
+	memset(sub, 0, sizeof(*sub));
+}
+
+static bool has_key_subscribers(void)
+{
+	for (int i = 0; i < TB_ATTR_MAX_KEY_SUBS; i++) {
+		if (s_key_subs[i].active && s_key_subs[i].cb != NULL) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool has_any_shared_subscribers(void)
+{
+	return s_shared_cb != NULL || has_key_subscribers();
+}
+
+static int ensure_shared_topic_subscription(tb_client_t *client)
+{
+	if (s_shared_subscribed) {
+		return 0;
+	}
+
+	int ret = tb_client_subscribe(client, TB_ATTRIBUTE_TOPIC,
+				      shared_attr_handler,
+				      TB_ATTR_REQUEST_TIMEOUT_MS);
+	if (ret == 0) {
+		s_shared_subscribed = true;
+	}
+	return ret;
+}
+
+static void maybe_unsubscribe_shared_topic(tb_client_t *client)
+{
+	if (!s_shared_subscribed || has_any_shared_subscribers()) {
+		return;
+	}
+
+	if (tb_client_unsubscribe(client, TB_ATTRIBUTE_TOPIC,
+				  TB_ATTR_REQUEST_TIMEOUT_MS) == 0) {
+		s_shared_subscribed = false;
+	}
+}
+
+static cJSON *select_shared_attrs_root(cJSON *root)
+{
+	if (!cJSON_IsObject(root)) {
+		return NULL;
+	}
+
+	cJSON *shared = cJSON_GetObjectItemCaseSensitive(root, "shared");
+	if (cJSON_IsObject(shared)) {
+		return shared;
+	}
+
+	return root;
+}
+
+static tb_shared_attribute_subscription_t *find_key_sub_slot_by_handle(
+	tb_shared_attribute_subscription_t *subscription)
+{
+	if (subscription == NULL) {
+		return NULL;
+	}
+
+	for (int i = 0; i < TB_ATTR_MAX_KEY_SUBS; i++) {
+		if (&s_key_subs[i] == subscription) {
+			return &s_key_subs[i];
+		}
+	}
+
+	return NULL;
+}
 
 static bool time_reached(uint32_t now_ms, uint32_t deadline_ms)
 {
@@ -249,17 +346,74 @@ static void shared_attr_handler(const char *topic, const char *payload,
 				size_t payload_len)
 {
 	(void)topic;
-	if (s_shared_cb != NULL) {
-		char *buf = malloc(payload_len + 1);
-		if (buf != NULL) {
-			memcpy(buf, payload, payload_len);
-			buf[payload_len] = '\0';
-			s_shared_cb(buf, s_shared_user_data);
-			free(buf);
-		} else {
+
+	if (s_shared_cb == NULL && !has_key_subscribers()) {
+		return;
+	}
+
+	char *buf = malloc(payload_len + 1);
+	if (buf == NULL) {
+		if (s_shared_cb != NULL) {
 			s_shared_cb(NULL, s_shared_user_data);
 		}
+		for (int i = 0; i < TB_ATTR_MAX_KEY_SUBS; i++) {
+			if (s_key_subs[i].active && s_key_subs[i].cb != NULL) {
+				s_key_subs[i].dispatching = true;
+				s_key_subs[i].cb(s_key_subs[i].key, NULL,
+						s_key_subs[i].user_data);
+				s_key_subs[i].dispatching = false;
+				if (s_key_subs[i].pending_remove ||
+				    !s_key_subs[i].active) {
+					clear_key_subscription(&s_key_subs[i]);
+				}
+			}
+		}
+		return;
 	}
+
+	memcpy(buf, payload, payload_len);
+	buf[payload_len] = '\0';
+
+	if (s_shared_cb != NULL) {
+		s_shared_cb(buf, s_shared_user_data);
+	}
+
+	cJSON *root = cJSON_Parse(buf);
+	cJSON *attrs = select_shared_attrs_root(root);
+
+	if (attrs != NULL) {
+		for (int i = 0; i < TB_ATTR_MAX_KEY_SUBS; i++) {
+			if (!s_key_subs[i].active || s_key_subs[i].cb == NULL) {
+				continue;
+			}
+
+			if (cJSON_GetObjectItemCaseSensitive(attrs,
+						    s_key_subs[i].key) == NULL) {
+				continue;
+			}
+
+			char key_copy[TB_ATTR_MAX_KEY_LEN];
+			strncpy(key_copy, s_key_subs[i].key, sizeof(key_copy) - 1);
+			key_copy[sizeof(key_copy) - 1] = '\0';
+
+			tb_shared_attribute_key_cb_t key_cb = s_key_subs[i].cb;
+			void *ud = s_key_subs[i].user_data;
+
+			s_key_subs[i].dispatching = true;
+			key_cb(key_copy, buf, ud);
+			s_key_subs[i].dispatching = false;
+
+			if (s_key_subs[i].pending_remove || !s_key_subs[i].active) {
+				clear_key_subscription(&s_key_subs[i]);
+			}
+		}
+	}
+
+	if (root != NULL) {
+		cJSON_Delete(root);
+	}
+
+	free(buf);
 }
 
 void tb_attributes_handle_disconnect(tb_client_t *client)
@@ -298,6 +452,7 @@ void tb_attributes_deinit(tb_client_t *client)
 	s_shared_subscribed = false;
 	s_shared_cb = NULL;
 	s_shared_user_data = NULL;
+	memset(s_key_subs, 0, sizeof(s_key_subs));
 	s_owner_client = NULL;
 	s_pending_init_failed = false;
 }
@@ -527,17 +682,52 @@ int tb_attributes_subscribe(tb_client_t *client, tb_shared_attribute_cb_t cb,
 	s_shared_cb = cb;
 	s_shared_user_data = user_data;
 
-	if (!s_shared_subscribed) {
-		int ret = tb_client_subscribe(client, TB_ATTRIBUTE_TOPIC,
-					      shared_attr_handler,
-					      TB_ATTR_REQUEST_TIMEOUT_MS);
-		if (ret == 0) {
-			s_shared_subscribed = true;
-			return 0;
-		}
+	return ensure_shared_topic_subscription(client);
+}
 
+int tb_attributes_subscribe_key(
+	tb_client_t *client, const char *key, tb_shared_attribute_key_cb_t cb,
+	void *user_data, tb_shared_attribute_subscription_t **subscription)
+{
+	if (client == NULL || key == NULL || cb == NULL || subscription == NULL) {
+		return -1;
+	}
+
+	if (!ensure_owner_client(client)) {
+		return -1;
+	}
+
+	if (key[0] == '\0') {
+		return -1;
+	}
+
+	tb_shared_attribute_subscription_t *slot = NULL;
+	for (int i = 0; i < TB_ATTR_MAX_KEY_SUBS; i++) {
+		if (!s_key_subs[i].active && !s_key_subs[i].dispatching) {
+			slot = &s_key_subs[i];
+			break;
+		}
+	}
+	if (slot == NULL) {
+		return -1;
+	}
+
+	clear_key_subscription(slot);
+	strncpy(slot->key, key, sizeof(slot->key) - 1);
+	slot->key[sizeof(slot->key) - 1] = '\0';
+	slot->cb = cb;
+	slot->user_data = user_data;
+	slot->active = true;
+	slot->dispatching = false;
+	slot->pending_remove = false;
+
+	int ret = ensure_shared_topic_subscription(client);
+	if (ret != 0) {
+		clear_key_subscription(slot);
 		return ret;
 	}
+
+	*subscription = slot;
 	return 0;
 }
 
@@ -553,11 +743,34 @@ int tb_attributes_unsubscribe(tb_client_t *client)
 
 	s_shared_cb = NULL;
 	s_shared_user_data = NULL;
+	maybe_unsubscribe_shared_topic(client);
+	return 0;
+}
 
-	if (s_shared_subscribed) {
-		s_shared_subscribed = false;
-		return tb_client_unsubscribe(client, TB_ATTRIBUTE_TOPIC,
-					     TB_ATTR_REQUEST_TIMEOUT_MS);
+int tb_attributes_unsubscribe_key(
+	tb_client_t *client, tb_shared_attribute_subscription_t *subscription)
+{
+	if (client == NULL || subscription == NULL) {
+		return -1;
 	}
+
+	if (!ensure_owner_client(client)) {
+		return -1;
+	}
+
+	tb_shared_attribute_subscription_t *slot =
+		find_key_sub_slot_by_handle(subscription);
+	if (slot == NULL || (!slot->active && !slot->dispatching)) {
+		return -1;
+	}
+
+	if (slot->dispatching) {
+		slot->active = false;
+		slot->pending_remove = true;
+	} else {
+		clear_key_subscription(slot);
+	}
+
+	maybe_unsubscribe_shared_topic(client);
 	return 0;
 }
