@@ -150,6 +150,34 @@ wsl.exe bash -lc "cd /mnt/c/projekty/hq_platform; TB_FW_RUN_SECONDS=30 TB_FW_STA
 
 ---
 
+### thingboard_reconnect_integration_test.sh
+
+Purpose: Broker-level reconnect integration coverage for stateful ThingsBoard modules.
+
+What it does:
+- Builds `tb_reconnect_integration_tests` (POSIX target).
+- Starts a local Mosquitto broker container on `localhost:1884`.
+- Runs the integration test binary with broker stop/start commands injected via env vars.
+- The test drops broker connection during active API operations, reconnects, and verifies callback recovery paths.
+
+Usage:
+
+```bash
+bash scripts/thingboard_reconnect_integration_test.sh
+```
+
+Main environment overrides:
+- `TB_IT_BROKER_IMAGE` (default: `eclipse-mosquitto:2`)
+- `TB_IT_BROKER_NAME` (default: `hq_tb_it_mosquitto`)
+- `TB_IT_BROKER_PORT` (default: `1884`)
+- `TB_IT_BUILD_DIR` (default: `build_posix`)
+
+Notes:
+- Requires Docker.
+- The script removes its temporary broker container at the end.
+
+---
+
 ### menuconfig.sh
 
 **Purpose:** Open the project Kconfig menu on Linux using Python `kconfiglib`

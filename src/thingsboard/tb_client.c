@@ -15,6 +15,7 @@
 #include "osal_mutex.h"
 #include "osal_log.h"
 #include "tb_attributes.h"
+#include "tb_rpc.h"
 
 struct tb_client {
     tb_client_config_t config;
@@ -79,6 +80,11 @@ static void on_disconnect(mqtt_disconnect_reason_t reason)
         return;
 
     client->connected = false;
+
+    /* Reset module pending state tied to the dropped transport session. */
+    tb_attributes_handle_disconnect(client);
+    tb_rpc_handle_disconnect(client);
+
     osal_log_info("[tb] Disconnected from ThingsBoard");
 
     if (client->config.on_disconnect) {
@@ -167,6 +173,7 @@ void tb_client_deinit(tb_client_t *client)
         return;
     }
     tb_attributes_deinit(client);
+    tb_rpc_deinit(client);
     if (client->mqtt_started) {
         tb_client_disconnect(client);
     }

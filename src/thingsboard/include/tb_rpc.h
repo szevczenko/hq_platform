@@ -68,6 +68,12 @@ int tb_rpc_request(tb_client_t *client, const char *method,
                    const char *params_json, tb_client_rpc_cb_t cb,
                    void *user_data, uint32_t timeout_ms);
 
+/* Internal lifecycle hook used by tb_client on transport disconnect. */
+void tb_rpc_handle_disconnect(tb_client_t *client);
+
+/* Internal lifecycle hook used by tb_client on deinit. */
+void tb_rpc_deinit(tb_client_t *client);
+
 #ifdef __cplusplus
 }
 #endif
