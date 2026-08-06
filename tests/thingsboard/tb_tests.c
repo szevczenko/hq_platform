@@ -316,6 +316,85 @@ static void test_client_connection_failure_callback(void)
 	tb_client_deinit(client);
 }
 
+static void noop_topic_cb(const char *topic, const char *payload,
+			  size_t payload_len)
+{
+	(void)topic;
+	(void)payload;
+	(void)payload_len;
+}
+
+static void test_client_qos_and_reconnect_policy(void)
+{
+	TEST_START("Client QoS And Reconnect Policy");
+	mqtt_app_mock_reset();
+
+	tb_client_config_t cfg = {
+		.server_url = "mqtt://tb.example.com:1883",
+		.access_token = "my_device_token",
+		.client_id = "my_client",
+		.device_name = "sensor_1",
+		.use_custom_qos_defaults = true,
+		.default_publish_qos = 0,
+		.default_subscribe_qos = 0,
+		.keepalive_sec = 1,
+		.reconnect_initial_delay_ms = 200,
+		.reconnect_max_delay_ms = 500,
+		.reconnect_exponential_backoff = true,
+	};
+
+	tb_client_t *client = NULL;
+	TEST_ASSERT(tb_client_init(&client, &cfg) == 0,
+		    "tb_client_init succeeds with QoS/policy config");
+	TEST_ASSERT(client != NULL, "client handle is not NULL");
+
+	TEST_ASSERT(mock_connection_policy.keepalive_sec == 15,
+		    "keepalive policy is bounded to minimum");
+	TEST_ASSERT(mock_connection_policy.reconnect_initial_delay_ms == 1000,
+		    "reconnect initial delay is bounded to minimum");
+	TEST_ASSERT(mock_connection_policy.reconnect_max_delay_ms == 1000,
+		    "reconnect max delay is bounded and not below initial");
+	TEST_ASSERT(mock_connection_policy.reconnect_exponential_backoff == true,
+		    "reconnect backoff policy is propagated");
+
+	TEST_ASSERT(tb_client_connect(client) == 0, "tb_client_connect succeeds");
+	TEST_ASSERT(tb_client_publish(client, "v1/devices/me/telemetry",
+			      "{\"temp\":23}") == 0,
+		    "default QoS publish succeeds");
+	TEST_ASSERT(mock_publish_count >= 1 &&
+			    mock_publishes[mock_publish_count - 1].qos == 0,
+		    "default publish QoS is applied");
+
+	TEST_ASSERT(tb_client_publish_with_qos(client, "v1/devices/me/telemetry",
+				       "{\"temp\":24}", 1) == 0,
+		    "per-call QoS publish succeeds");
+	TEST_ASSERT(mock_publish_count >= 2 &&
+			    mock_publishes[mock_publish_count - 1].qos == 1,
+		    "per-call publish QoS override is applied");
+
+	TEST_ASSERT(tb_client_subscribe(client, "v1/devices/me/test/+",
+				noop_topic_cb, 1000) == 0,
+		    "default QoS subscribe succeeds");
+	TEST_ASSERT(mock_subscribe_count >= 1 &&
+			    mock_subscribes[mock_subscribe_count - 1].qos == 0,
+		    "default subscribe QoS is applied");
+
+	TEST_ASSERT(tb_client_subscribe_with_qos(client,
+					 "v1/devices/me/test2/+", 1,
+					 noop_topic_cb, 1000) == 0,
+		    "per-call QoS subscribe succeeds");
+	TEST_ASSERT(mock_subscribe_count >= 2 &&
+			    mock_subscribes[mock_subscribe_count - 1].qos == 1,
+		    "per-call subscribe QoS override is applied");
+
+	mqtt_app_mock_simulate_connect_failure(
+		MQTT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED);
+	TEST_ASSERT(mock_deinit_count == 0,
+		    "connect failure path does not deinit mqtt app");
+
+	tb_client_deinit(client);
+}
+
 static void test_client_singleton_init_rejected(void)
 {
 	TEST_START("Client Singleton Init Rejected");
@@ -1683,6 +1762,7 @@ int main(void)
 	test_client_request_id();
 	test_client_connection_callbacks();
 	test_client_connection_failure_callback();
+	test_client_qos_and_reconnect_policy();
 	test_client_singleton_init_rejected();
 
 	/* Telemetry */

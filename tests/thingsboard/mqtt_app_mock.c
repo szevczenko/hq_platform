@@ -18,6 +18,13 @@ int mock_publish_count = 0;
 mock_subscribe_record_t mock_subscribes[MOCK_MAX_PUBLISHES];
 int mock_subscribe_count = 0;
 bool mock_connected = false;
+int mock_deinit_count = 0;
+mqtt_connection_policy_t mock_connection_policy = {
+    .keepalive_sec = 60,
+    .reconnect_initial_delay_ms = 30000,
+    .reconnect_max_delay_ms = 300000,
+    .reconnect_exponential_backoff = false,
+};
 
 static mqtt_connect_callback_t s_connect_cb = NULL;
 static mqtt_disconnect_callback_t s_disconnect_cb = NULL;
@@ -35,6 +42,7 @@ void mqtt_app_mock_reset(void)
     mock_publish_count = 0;
     mock_subscribe_count = 0;
     mock_connected = false;
+    mock_deinit_count = 0;
     s_connect_cb = NULL;
     s_disconnect_cb = NULL;
     s_connect_failure_cb = NULL;
@@ -97,6 +105,7 @@ void mqtt_app_init(void)
 void mqtt_app_deinit(void)
 {
     bool was_connected = mock_connected;
+    mock_deinit_count++;
     mock_connected = false;
     if (was_connected && s_disconnect_cb) {
         s_disconnect_cb(MQTT_DISCONNECT_REASON_EXPLICIT);
@@ -127,7 +136,6 @@ bool mqtt_app_is_connected(void)
 bool mqtt_app_subscribe(const char *topic, int qos,
                         mqtt_message_callback_t callback, uint32_t timeout_ms)
 {
-    (void)qos;
     (void)timeout_ms;
 
     for (int i = 0; i < MOCK_MAX_SUBS; i++) {
@@ -139,6 +147,7 @@ bool mqtt_app_subscribe(const char *topic, int qos,
             if (mock_subscribe_count < MOCK_MAX_PUBLISHES) {
                 strncpy(mock_subscribes[mock_subscribe_count].topic, topic,
                         MOCK_MAX_TOPIC_LEN - 1);
+                mock_subscribes[mock_subscribe_count].qos = qos;
                 mock_subscribe_count++;
             }
             return true;
@@ -173,6 +182,13 @@ void mqtt_app_set_disconnect_callback(mqtt_disconnect_callback_t cb)
 void mqtt_app_set_connect_failure_callback(mqtt_connect_failure_callback_t cb)
 {
     s_connect_failure_cb = cb;
+}
+
+void mqtt_app_set_connection_policy(const mqtt_connection_policy_t *policy)
+{
+    if (policy != NULL) {
+        mock_connection_policy = *policy;
+    }
 }
 
 void mqtt_app_mock_simulate_connect(void)

@@ -63,6 +63,17 @@ typedef struct {
     tb_client_disconnect_callback_t on_disconnect;
     tb_client_connect_failure_callback_t on_connect_failure;
     void *connection_user_data;
+
+    /* Optional QoS defaults. Set use_custom_qos_defaults=true to apply. */
+    bool use_custom_qos_defaults;
+    uint8_t default_publish_qos;   /* 0 or 1 */
+    uint8_t default_subscribe_qos; /* 0 or 1 */
+
+    /* Optional MQTT transport policy. Zero values use bounded defaults. */
+    uint16_t keepalive_sec;
+    uint32_t reconnect_initial_delay_ms;
+    uint32_t reconnect_max_delay_ms;
+    bool reconnect_exponential_backoff;
 } tb_client_config_t;
 
 /**
@@ -116,6 +127,17 @@ uint32_t tb_client_get_next_request_id(tb_client_t *client);
 int tb_client_publish(tb_client_t *client, const char *topic, const char *json);
 
 /**
+ * @brief Publish raw JSON string to a topic with explicit QoS
+ * @param client  Client handle
+ * @param topic   MQTT topic
+ * @param json    JSON payload (null-terminated)
+ * @param qos     MQTT QoS level (0 or 1)
+ * @return 0 on success, negative on error
+ */
+int tb_client_publish_with_qos(tb_client_t *client, const char *topic,
+                               const char *json, int qos);
+
+/**
  * @brief Subscribe to a topic with message callback
  * @param client      Client handle
  * @param topic       MQTT topic
@@ -127,6 +149,22 @@ int tb_client_subscribe(tb_client_t *client, const char *topic,
                         void (*callback)(const char *topic, const char *payload,
                                          size_t payload_len),
                         uint32_t timeout_ms);
+
+/**
+ * @brief Subscribe to a topic with explicit QoS
+ * @param client      Client handle
+ * @param topic       MQTT topic
+ * @param qos         MQTT QoS level (0 or 1)
+ * @param callback    Message callback
+ * @param timeout_ms  Subscription timeout
+ * @return 0 on success, negative on error
+ */
+int tb_client_subscribe_with_qos(tb_client_t *client, const char *topic,
+                                 int qos,
+                                 void (*callback)(const char *topic,
+                                                  const char *payload,
+                                                  size_t payload_len),
+                                 uint32_t timeout_ms);
 
 /**
  * @brief Unsubscribe from a topic

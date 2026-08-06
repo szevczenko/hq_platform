@@ -21,12 +21,52 @@ struct tb_client {
     tb_client_config_t config;
     osal_mutex_id_t    mutex;
     uint32_t           request_id;
+    int                publish_qos_default;
+    int                subscribe_qos_default;
     bool               connected;
     bool               mqtt_started;
     bool               initialized;
 };
 
 static tb_client_t *s_active_client = NULL;
+
+#define TB_CLIENT_DEFAULT_PUBLISH_QOS 1
+#define TB_CLIENT_DEFAULT_SUBSCRIBE_QOS 1
+#define TB_CLIENT_DEFAULT_KEEPALIVE_SEC 60U
+#define TB_CLIENT_DEFAULT_RECONNECT_INITIAL_DELAY_MS 30000U
+#define TB_CLIENT_DEFAULT_RECONNECT_MAX_DELAY_MS 300000U
+#define TB_CLIENT_MIN_KEEPALIVE_SEC 15U
+#define TB_CLIENT_MAX_KEEPALIVE_SEC 1200U
+#define TB_CLIENT_MIN_RECONNECT_DELAY_MS 1000U
+#define TB_CLIENT_MAX_RECONNECT_DELAY_MS 3600000U
+
+static uint16_t clamp_keepalive_sec(uint16_t value)
+{
+    if (value == 0) {
+        return TB_CLIENT_DEFAULT_KEEPALIVE_SEC;
+    }
+    if (value < TB_CLIENT_MIN_KEEPALIVE_SEC) {
+        return TB_CLIENT_MIN_KEEPALIVE_SEC;
+    }
+    if (value > TB_CLIENT_MAX_KEEPALIVE_SEC) {
+        return TB_CLIENT_MAX_KEEPALIVE_SEC;
+    }
+    return value;
+}
+
+static uint32_t clamp_reconnect_delay_ms(uint32_t value, uint32_t fallback)
+{
+    if (value == 0) {
+        return fallback;
+    }
+    if (value < TB_CLIENT_MIN_RECONNECT_DELAY_MS) {
+        return TB_CLIENT_MIN_RECONNECT_DELAY_MS;
+    }
+    if (value > TB_CLIENT_MAX_RECONNECT_DELAY_MS) {
+        return TB_CLIENT_MAX_RECONNECT_DELAY_MS;
+    }
+    return value;
+}
 
 static tb_client_disconnect_reason_t map_disconnect_reason(
     mqtt_disconnect_reason_t reason)
@@ -135,8 +175,20 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
     ctx->config.client_id[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
     ctx->config.device_name[TB_CLIENT_CONFIG_STR_SIZE - 1] = '\0';
     ctx->request_id = 0;
+    ctx->publish_qos_default = TB_CLIENT_DEFAULT_PUBLISH_QOS;
+    ctx->subscribe_qos_default = TB_CLIENT_DEFAULT_SUBSCRIBE_QOS;
     ctx->connected = false;
     ctx->mqtt_started = false;
+
+    if (ctx->config.use_custom_qos_defaults) {
+        if (ctx->config.default_publish_qos <= 1) {
+            ctx->publish_qos_default = (int)ctx->config.default_publish_qos;
+        }
+        if (ctx->config.default_subscribe_qos <= 1) {
+            ctx->subscribe_qos_default =
+                (int)ctx->config.default_subscribe_qos;
+        }
+    }
 
     if (osal_mutex_create(&ctx->mutex, "tb_client") != OSAL_SUCCESS) {
         free(ctx);
@@ -154,6 +206,22 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
     } else {
         mqtt_config_set_string(ctx->config.access_token, MQTT_CONFIG_VALUE_CLIENT_ID);
     }
+
+    mqtt_connection_policy_t policy = {
+        .keepalive_sec = clamp_keepalive_sec(ctx->config.keepalive_sec),
+        .reconnect_initial_delay_ms = clamp_reconnect_delay_ms(
+            ctx->config.reconnect_initial_delay_ms,
+            TB_CLIENT_DEFAULT_RECONNECT_INITIAL_DELAY_MS),
+        .reconnect_max_delay_ms = clamp_reconnect_delay_ms(
+            ctx->config.reconnect_max_delay_ms,
+            TB_CLIENT_DEFAULT_RECONNECT_MAX_DELAY_MS),
+        .reconnect_exponential_backoff =
+            ctx->config.reconnect_exponential_backoff,
+    };
+    if (policy.reconnect_max_delay_ms < policy.reconnect_initial_delay_ms) {
+        policy.reconnect_max_delay_ms = policy.reconnect_initial_delay_ms;
+    }
+    mqtt_app_set_connection_policy(&policy);
 
     mqtt_app_set_connect_callback(on_connect);
     mqtt_app_set_disconnect_callback(on_disconnect);
@@ -234,14 +302,25 @@ uint32_t tb_client_get_next_request_id(tb_client_t *client)
 
 int tb_client_publish(tb_client_t *client, const char *topic, const char *json)
 {
+    return tb_client_publish_with_qos(client, topic, json,
+                                      client ? client->publish_qos_default :
+                                               TB_CLIENT_DEFAULT_PUBLISH_QOS);
+}
+
+int tb_client_publish_with_qos(tb_client_t *client, const char *topic,
+                               const char *json, int qos)
+{
     if (client == NULL || topic == NULL || json == NULL) {
+        return -1;
+    }
+    if (qos != 0 && qos != 1) {
         return -1;
     }
     if (!mqtt_app_is_connected()) {
         osal_log_warning("[tb] Cannot publish: not connected");
         return -1;
     }
-    bool ok = mqtt_app_post_data(topic, json, 1);
+    bool ok = mqtt_app_post_data(topic, json, qos);
     return ok ? 0 : -1;
 }
 
@@ -250,10 +329,27 @@ int tb_client_subscribe(tb_client_t *client, const char *topic,
                                          size_t payload_len),
                         uint32_t timeout_ms)
 {
+    return tb_client_subscribe_with_qos(
+        client, topic,
+        client ? client->subscribe_qos_default :
+                 TB_CLIENT_DEFAULT_SUBSCRIBE_QOS,
+        callback, timeout_ms);
+}
+
+int tb_client_subscribe_with_qos(tb_client_t *client, const char *topic,
+                                 int qos,
+                                 void (*callback)(const char *topic,
+                                                  const char *payload,
+                                                  size_t payload_len),
+                                 uint32_t timeout_ms)
+{
     if (client == NULL || topic == NULL || callback == NULL) {
         return -1;
     }
-    bool ok = mqtt_app_subscribe(topic, 1, callback, timeout_ms);
+    if (qos != 0 && qos != 1) {
+        return -1;
+    }
+    bool ok = mqtt_app_subscribe(topic, qos, callback, timeout_ms);
     return ok ? 0 : -1;
 }
 

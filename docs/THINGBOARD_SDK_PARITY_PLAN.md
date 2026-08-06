@@ -115,16 +115,6 @@ real device target.
 
 ## P1 - Client Reliability And Protocol Behavior
 
-- [ ] **Expose QoS, keepalive, and reconnect policy through the client API.**
-  - Allow a caller to select QoS 0 or 1 per publish/subscribe or through
-    defaults in `tb_client_config_t`.
-  - Make MQTT keepalive, initial reconnect delay, maximum reconnect delay,
-    and backoff behavior configurable with bounded defaults.
-  - Ensure the reconnect path does not call `mqtt_app_deinit()` merely because
-    a connection attempt is still in progress.
-  - Tests: QoS passed to the MQTT adapter, bounded exponential backoff, and
-    resubscription after reconnect.
-
 - [ ] **Enforce ThingsBoard session limits and payload bounds.**
   - Request `getSessionLimits` by client-side RPC after a successful connect.
   - Parse server limits for message rate, telemetry rate, telemetry data
