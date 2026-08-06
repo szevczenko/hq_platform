@@ -53,6 +53,8 @@ bool mqtt_app_unsubscribe(const char *topic, uint32_t timeout_ms);
 void mqtt_app_set_connect_callback(mqtt_connect_callback_t cb);
 void mqtt_app_set_disconnect_callback(mqtt_disconnect_callback_t cb);
 void mqtt_app_set_connect_failure_callback(mqtt_connect_failure_callback_t cb);
+
+/* Must be called before mqtt_app_init() or while transport is fully stopped. */
 void mqtt_app_set_connection_policy(const mqtt_connection_policy_t *policy);
 
 #endif

@@ -457,8 +457,9 @@ static void test_session_limits_enforcement(void)
 	TEST_ASSERT(ret != 0,
 		    "queue saturation rejects additional telemetry when defer queue is full");
 
+	/* TODO: replace with a fake clock to avoid real-time dependency. */
 	int published_before_delay = mock_publish_count;
-	osal_task_delay_ms(1200);
+	osal_task_delay_ms(1100);
 	ret = tb_telemetry_send_json(client, "{\"e\":5}");
 	TEST_ASSERT(ret == 0,
 		    "token bucket allows deferred progress after refill interval");

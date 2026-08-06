@@ -697,7 +697,7 @@ int tb_attributes_subscribe_key(
 		return -1;
 	}
 
-	if (key[0] == '\0') {
+	if (key[0] == '\0' || strlen(key) >= TB_ATTR_MAX_KEY_LEN) {
 		return -1;
 	}
 

@@ -234,6 +234,12 @@ static bool queue_deferred_message(tb_client_t *client, const char *topic,
         return false;
     }
 
+    /* Reject messages that do not fit the slot buffers instead of truncating. */
+    if (strlen(topic) >= sizeof(((tb_deferred_message_t *)0)->topic) ||
+        strlen(payload) >= sizeof(((tb_deferred_message_t *)0)->payload)) {
+        return false;
+    }
+
     tb_deferred_message_t *slot = &client->deferred[client->deferred_tail];
     strncpy(slot->topic, topic, sizeof(slot->topic) - 1);
     slot->topic[sizeof(slot->topic) - 1] = '\0';
@@ -266,6 +272,7 @@ static bool send_direct_now(tb_client_t *client, const char *topic,
         if (strcmp(topic, TB_TOPIC_TELEMETRY) == 0 &&
             !bucket_consume(&client->datapoint_bucket, (double)datapoints,
                             now_ms)) {
+            /* Refund the message token consumed above. */
             client->msg_bucket.tokens += 1.0;
             if (client->msg_bucket.tokens > client->msg_bucket.capacity) {
                 client->msg_bucket.tokens = client->msg_bucket.capacity;
@@ -274,7 +281,18 @@ static bool send_direct_now(tb_client_t *client, const char *topic,
         }
     }
 
-    return mqtt_app_post_data(topic, payload, qos);
+    if (!mqtt_app_post_data(topic, payload, qos)) {
+        /* Refund consumed tokens so a transport failure does not drain the limiter. */
+        if (client->config.enable_session_limits && topic_is_rate_limited(topic)) {
+            client->msg_bucket.tokens += 1.0;
+            if (client->msg_bucket.tokens > client->msg_bucket.capacity) {
+                client->msg_bucket.tokens = client->msg_bucket.capacity;
+            }
+        }
+        return false;
+    }
+
+    return true;
 }
 
 static void flush_deferred_queue(tb_client_t *client)
