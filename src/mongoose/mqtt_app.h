@@ -15,8 +15,23 @@
 
 typedef void (*mqtt_message_callback_t)(const char *topic, const char *message,
 					size_t message_len);
+
+typedef enum {
+	MQTT_DISCONNECT_REASON_REMOTE_CLOSE = 0,
+	MQTT_DISCONNECT_REASON_ERROR,
+	MQTT_DISCONNECT_REASON_EXPLICIT
+} mqtt_disconnect_reason_t;
+
+typedef enum {
+	MQTT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED = 0,
+	MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED,
+	MQTT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR
+} mqtt_connect_failure_reason_t;
+
 typedef void (*mqtt_connect_callback_t)(void);
-typedef void (*mqtt_disconnect_callback_t)(void);
+typedef void (*mqtt_disconnect_callback_t)(mqtt_disconnect_reason_t reason);
+typedef void (*mqtt_connect_failure_callback_t)(
+	mqtt_connect_failure_reason_t reason);
 
 void mqtt_app_init(void);
 void mqtt_app_deinit(void);
@@ -30,5 +45,6 @@ bool mqtt_app_unsubscribe(const char *topic, uint32_t timeout_ms);
 
 void mqtt_app_set_connect_callback(mqtt_connect_callback_t cb);
 void mqtt_app_set_disconnect_callback(mqtt_disconnect_callback_t cb);
+void mqtt_app_set_connect_failure_callback(mqtt_connect_failure_callback_t cb);
 
 #endif

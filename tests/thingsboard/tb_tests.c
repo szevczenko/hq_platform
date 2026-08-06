@@ -25,6 +25,80 @@ static int tests_run = 0;
 static int tests_passed = 0;
 static int tests_failed = 0;
 
+static int s_conn_event_order[16];
+static int s_conn_event_count = 0;
+static int s_connect_cb_count = 0;
+static int s_disconnect_cb_count = 0;
+static int s_connect_failure_cb_count = 0;
+static tb_client_disconnect_reason_t s_last_disconnect_reason =
+	TB_CLIENT_DISCONNECT_REASON_EXPLICIT;
+static tb_client_connect_failure_reason_t s_last_connect_failure_reason =
+	TB_CLIENT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR;
+static void *s_last_connection_user_data = NULL;
+static bool s_connect_cb_connected_state = false;
+static bool s_disconnect_cb_connected_state = true;
+static bool s_connect_failure_cb_connected_state = true;
+
+enum {
+	CONN_EVENT_CONNECT = 1,
+	CONN_EVENT_DISCONNECT,
+	CONN_EVENT_CONNECT_FAILURE,
+};
+
+static void reset_connection_callback_state(void)
+{
+	s_conn_event_count = 0;
+	s_connect_cb_count = 0;
+	s_disconnect_cb_count = 0;
+	s_connect_failure_cb_count = 0;
+	s_last_disconnect_reason = TB_CLIENT_DISCONNECT_REASON_EXPLICIT;
+	s_last_connect_failure_reason =
+		TB_CLIENT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR;
+	s_last_connection_user_data = NULL;
+	s_connect_cb_connected_state = false;
+	s_disconnect_cb_connected_state = true;
+	s_connect_failure_cb_connected_state = true;
+	memset(s_conn_event_order, 0, sizeof(s_conn_event_order));
+}
+
+static void record_connection_event(int event_id)
+{
+	if (s_conn_event_count < (int)(sizeof(s_conn_event_order) /
+					   sizeof(s_conn_event_order[0]))) {
+		s_conn_event_order[s_conn_event_count++] = event_id;
+	}
+}
+
+static void on_client_connect(tb_client_t *client, void *user_data)
+{
+	s_connect_cb_count++;
+	s_last_connection_user_data = user_data;
+	s_connect_cb_connected_state = tb_client_is_connected(client);
+	record_connection_event(CONN_EVENT_CONNECT);
+}
+
+static void on_client_disconnect(tb_client_t *client,
+				 tb_client_disconnect_reason_t reason,
+				 void *user_data)
+{
+	s_disconnect_cb_count++;
+	s_last_disconnect_reason = reason;
+	s_last_connection_user_data = user_data;
+	s_disconnect_cb_connected_state = tb_client_is_connected(client);
+	record_connection_event(CONN_EVENT_DISCONNECT);
+}
+
+static void on_client_connect_failure(
+	tb_client_t *client, tb_client_connect_failure_reason_t reason,
+	void *user_data)
+{
+	s_connect_failure_cb_count++;
+	s_last_connect_failure_reason = reason;
+	s_last_connection_user_data = user_data;
+	s_connect_failure_cb_connected_state = tb_client_is_connected(client);
+	record_connection_event(CONN_EVENT_CONNECT_FAILURE);
+}
+
 #define FW_SHA256_ABCDEFGH "9ac2197d9258257b1ae8463e4214e4cd0a578bc1517f2415928b91be4283fc48"
 
 #define TEST_ASSERT(condition, message)                                       \
@@ -132,6 +206,138 @@ static void test_client_request_id(void)
 	TEST_ASSERT(id3 == 3, "third request ID is 3");
 
 	destroy_test_client(client);
+}
+
+static void test_client_connection_callbacks(void)
+{
+	TEST_START("Client Connection Callbacks");
+	mqtt_app_mock_reset();
+	reset_connection_callback_state();
+
+	int callback_cookie = 1337;
+	tb_client_config_t cfg = {
+		.server_url = "mqtt://tb.example.com:1883",
+		.access_token = "my_device_token",
+		.client_id = "my_client",
+		.device_name = "sensor_1",
+		.on_connect = on_client_connect,
+		.on_disconnect = on_client_disconnect,
+		.on_connect_failure = on_client_connect_failure,
+		.connection_user_data = &callback_cookie,
+	};
+
+	tb_client_t *client = NULL;
+	TEST_ASSERT(tb_client_init(&client, &cfg) == 0,
+		    "tb_client_init succeeds with connection callbacks");
+	TEST_ASSERT(client != NULL, "client handle is not NULL");
+
+	TEST_ASSERT(tb_client_connect(client) == 0, "tb_client_connect succeeds");
+	TEST_ASSERT(s_connect_cb_count == 1,
+		    "connect callback fires on initial connect");
+	TEST_ASSERT(s_conn_event_count >= 1 &&
+			    s_conn_event_order[0] == CONN_EVENT_CONNECT,
+		    "connect callback is first lifecycle event");
+	TEST_ASSERT(s_last_connection_user_data == &callback_cookie,
+		    "connect callback receives configured user data");
+	TEST_ASSERT(s_connect_cb_connected_state == true,
+		    "client is connected when connect callback runs");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	TEST_ASSERT(s_disconnect_cb_count == 1,
+		    "disconnect callback fires for remote close");
+	TEST_ASSERT(s_last_disconnect_reason ==
+			    TB_CLIENT_DISCONNECT_REASON_REMOTE_CLOSE,
+		    "disconnect callback reason maps to remote close");
+	TEST_ASSERT(s_disconnect_cb_connected_state == false,
+		    "client is disconnected when disconnect callback runs");
+
+	mqtt_app_mock_simulate_connect();
+	TEST_ASSERT(s_connect_cb_count == 2,
+		    "connect callback fires again after reconnect");
+	TEST_ASSERT(s_conn_event_count >= 3 &&
+			    s_conn_event_order[1] == CONN_EVENT_DISCONNECT &&
+			    s_conn_event_order[2] == CONN_EVENT_CONNECT,
+		    "remote close/reconnect callback order is preserved");
+
+	tb_client_disconnect(client);
+	TEST_ASSERT(s_disconnect_cb_count == 2,
+		    "disconnect callback fires for explicit disconnect");
+	TEST_ASSERT(s_last_disconnect_reason ==
+			    TB_CLIENT_DISCONNECT_REASON_EXPLICIT,
+		    "disconnect callback reason maps to explicit disconnect");
+
+	tb_client_deinit(client);
+}
+
+static void test_client_connection_failure_callback(void)
+{
+	TEST_START("Client Connection Failure Callback");
+	mqtt_app_mock_reset();
+	reset_connection_callback_state();
+
+	int callback_cookie = 42;
+	tb_client_config_t cfg = {
+		.server_url = "mqtt://tb.example.com:1883",
+		.access_token = "my_device_token",
+		.on_connect = on_client_connect,
+		.on_disconnect = on_client_disconnect,
+		.on_connect_failure = on_client_connect_failure,
+		.connection_user_data = &callback_cookie,
+	};
+
+	tb_client_t *client = NULL;
+	TEST_ASSERT(tb_client_init(&client, &cfg) == 0,
+		    "tb_client_init succeeds for connection failure test");
+	TEST_ASSERT(client != NULL, "client handle is not NULL");
+
+	mqtt_app_mock_simulate_connect_failure(
+		MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED);
+	TEST_ASSERT(s_connect_failure_cb_count == 1,
+		    "connection failure callback fires for connack reject");
+	TEST_ASSERT(s_last_connect_failure_reason ==
+			    TB_CLIENT_CONNECT_FAILURE_REASON_CONNACK_REJECTED,
+		    "connection failure reason maps to connack rejected");
+	TEST_ASSERT(s_last_connection_user_data == &callback_cookie,
+		    "connection failure callback receives configured user data");
+	TEST_ASSERT(s_connect_failure_cb_connected_state == false,
+		    "client is disconnected when failure callback runs");
+
+	mqtt_app_mock_simulate_connect_failure(
+		MQTT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED);
+	TEST_ASSERT(s_connect_failure_cb_count == 2,
+		    "connection failure callback fires for connect creation failure");
+	TEST_ASSERT(s_last_connect_failure_reason ==
+			    TB_CLIENT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED,
+		    "connection failure reason maps to connect creation failure");
+	TEST_ASSERT(s_connect_failure_cb_connected_state == false,
+		    "client remains disconnected during repeated failures");
+
+	tb_client_deinit(client);
+}
+
+static void test_client_singleton_init_rejected(void)
+{
+	TEST_START("Client Singleton Init Rejected");
+	mqtt_app_mock_reset();
+
+	tb_client_config_t cfg = {
+		.server_url = "mqtt://tb.example.com:1883",
+		.access_token = "my_device_token",
+		.device_name = "sensor_1",
+	};
+
+	tb_client_t *client1 = NULL;
+	tb_client_t *client2 = NULL;
+
+	TEST_ASSERT(tb_client_init(&client1, &cfg) == 0,
+		    "first tb_client_init succeeds");
+	TEST_ASSERT(client1 != NULL, "first client handle is not NULL");
+	TEST_ASSERT(tb_client_init(&client2, &cfg) != 0,
+		    "second tb_client_init fails while first client is active");
+	TEST_ASSERT(client2 == NULL,
+		    "second client handle remains NULL on singleton rejection");
+
+	tb_client_deinit(client1);
 }
 
 /* ============================================================
@@ -1106,6 +1312,9 @@ int main(void)
 	test_client_lifecycle();
 	test_client_init_null_params();
 	test_client_request_id();
+	test_client_connection_callbacks();
+	test_client_connection_failure_callback();
+	test_client_singleton_init_rejected();
 
 	/* Telemetry */
 	test_telemetry_send_int();

@@ -94,6 +94,7 @@ typedef struct {
 typedef struct {
 	mqtt_connect_callback_t connect_cb;
 	mqtt_disconnect_callback_t disconnect_cb;
+	mqtt_connect_failure_callback_t connect_failure_cb;
 } mqtt_callbacks_t;
 
 static mqtt_state_t mqtt_state = { 0 };
@@ -293,6 +294,10 @@ static void mqtt_connect(void)
 	mqtt_state.nc = mg_mqtt_connect(&mgr, address, &opts, ev_handler, NULL);
 	if (!mqtt_state.nc) {
 		osal_log_error("MQTT connection creation failed");
+		if (mqtt_callbacks.connect_failure_cb) {
+			mqtt_callbacks.connect_failure_cb(
+				MQTT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED);
+		}
 		schedule_reconnect();
 		return;
 	}
@@ -317,7 +322,7 @@ static void mqtt_connected(void)
 		mqtt_callbacks.connect_cb();
 }
 
-static void mqtt_disconnected(void)
+static void mqtt_disconnected(mqtt_disconnect_reason_t reason)
 {
 	bool was_connected = mqtt_state.connected;
 
@@ -329,7 +334,13 @@ static void mqtt_disconnected(void)
 	(void)osal_timer_stop(mqtt_timers.ping, 0);
 
 	if (was_connected && mqtt_callbacks.disconnect_cb)
-		mqtt_callbacks.disconnect_cb();
+		mqtt_callbacks.disconnect_cb(reason);
+
+	if (!was_connected && reason == MQTT_DISCONNECT_REASON_ERROR &&
+	    mqtt_callbacks.connect_failure_cb) {
+		mqtt_callbacks.connect_failure_cb(
+			MQTT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR);
+	}
 
 	if (mqtt_state.reconnect_enabled)
 		schedule_reconnect();
@@ -346,6 +357,8 @@ static void mqtt_reset_runtime_timers(void)
 
 static void mqtt_disconnect_internal(void)
 {
+	bool was_connected = mqtt_state.connected;
+
 	mqtt_state.reconnect_enabled = false;
 	mqtt_reset_runtime_timers();
 
@@ -356,6 +369,10 @@ static void mqtt_disconnect_internal(void)
 	}
 
 	mqtt_state.connected = false;
+
+	if (was_connected && mqtt_callbacks.disconnect_cb) {
+		mqtt_callbacks.disconnect_cb(MQTT_DISCONNECT_REASON_EXPLICIT);
+	}
 }
 
 /* ---------- Command handlers (all run in Mongoose thread) ----------------- */
@@ -608,6 +625,10 @@ static void handle_mqtt_command_event(struct mg_mqtt_message *mm)
 		} else {
 			osal_log_error("MQTT CONNACK rejected ack=%u",
 				       (unsigned)mm->ack);
+			if (mqtt_callbacks.connect_failure_cb) {
+				mqtt_callbacks.connect_failure_cb(
+					MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED);
+			}
 			if (mqtt_state.nc != NULL)
 				mqtt_state.nc->is_closing = 1;
 		}
@@ -675,13 +696,13 @@ static void ev_handler(struct mg_connection *nc, int ev, void *ev_data)
 
 	case MG_EV_CLOSE:
 		osal_log_info("ev_handler: CLOSE nc=%p", (void *)nc);
-		mqtt_disconnected();
+		mqtt_disconnected(MQTT_DISCONNECT_REASON_REMOTE_CLOSE);
 		break;
 
 	case MG_EV_ERROR:
 		osal_log_error("ev_handler: ERROR nc=%p err=%s",
 			       (void *)nc, (char *)ev_data);
-		mqtt_disconnected();
+		mqtt_disconnected(MQTT_DISCONNECT_REASON_ERROR);
 		break;
 
 	default:
@@ -1055,4 +1076,9 @@ void mqtt_app_set_connect_callback(mqtt_connect_callback_t cb)
 void mqtt_app_set_disconnect_callback(mqtt_disconnect_callback_t cb)
 {
 	mqtt_callbacks.disconnect_cb = cb;
+}
+
+void mqtt_app_set_connect_failure_callback(mqtt_connect_failure_callback_t cb)
+{
+	mqtt_callbacks.connect_failure_cb = cb;
 }
