@@ -491,3 +491,79 @@ target_link_libraries(thingboard_provision_demo
 set_target_properties(thingboard_provision_demo PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
+
+# -- thingboard_tls_demo example --
+# Configure via cmake -D flags:
+#   -DTLS_DEMO_CLIENT_ID="tb_tls_demo_0001"
+#   -DTLS_DEMO_USERNAME="token"
+#   -DTLS_DEMO_PASSWORD="pass"
+#   -DTLS_DEMO_DEVICE_NAME="TLS Demo Device"
+#   -DTLS_DEMO_MQTT_URL="mqtts://broker:8883"
+#   -DTLS_DEMO_CA_CERT_PATH="ca.crt"
+#   -DTLS_DEMO_CLIENT_CERT_PATH="client.crt"
+#   -DTLS_DEMO_CLIENT_KEY_PATH="client.key"
+#   -DTLS_DEMO_UNKNOWN_CA_PATH="ca_unknown.crt"
+#   -DTLS_DEMO_HOSTNAME_MISMATCH_URL="mqtts://localhost:8884"
+#   -DTLS_DEMO_CONNECT_TIMEOUT_MS=10000
+#   -DTLS_DEMO_RECONNECT_DELAY_MS=3000
+
+add_executable(thingboard_tls_demo
+  ${CMAKE_CURRENT_LIST_DIR}/../common/thingboard_tls_demo.c
+)
+
+target_include_directories(thingboard_tls_demo
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/thingsboard/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/mongoose
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/posix
+  PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+  PRIVATE ${HQ_CONFIG_DIR}
+)
+
+if(DEFINED TLS_DEMO_CLIENT_ID)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_CLIENT_ID="${TLS_DEMO_CLIENT_ID}")
+endif()
+if(DEFINED TLS_DEMO_USERNAME)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_USERNAME="${TLS_DEMO_USERNAME}")
+endif()
+if(DEFINED TLS_DEMO_PASSWORD)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_PASSWORD="${TLS_DEMO_PASSWORD}")
+endif()
+if(DEFINED TLS_DEMO_DEVICE_NAME)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_DEVICE_NAME="${TLS_DEMO_DEVICE_NAME}")
+endif()
+if(DEFINED TLS_DEMO_MQTT_URL)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_MQTT_URL="${TLS_DEMO_MQTT_URL}")
+endif()
+if(DEFINED TLS_DEMO_CA_CERT_PATH)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_CA_CERT_PATH="${TLS_DEMO_CA_CERT_PATH}")
+endif()
+if(DEFINED TLS_DEMO_CLIENT_CERT_PATH)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_CLIENT_CERT_PATH="${TLS_DEMO_CLIENT_CERT_PATH}")
+endif()
+if(DEFINED TLS_DEMO_CLIENT_KEY_PATH)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_CLIENT_KEY_PATH="${TLS_DEMO_CLIENT_KEY_PATH}")
+endif()
+if(DEFINED TLS_DEMO_UNKNOWN_CA_PATH)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_UNKNOWN_CA_PATH="${TLS_DEMO_UNKNOWN_CA_PATH}")
+endif()
+if(DEFINED TLS_DEMO_HOSTNAME_MISMATCH_URL)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_HOSTNAME_MISMATCH_URL="${TLS_DEMO_HOSTNAME_MISMATCH_URL}")
+endif()
+if(DEFINED TLS_DEMO_CONNECT_TIMEOUT_MS)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_CONNECT_TIMEOUT_MS=${TLS_DEMO_CONNECT_TIMEOUT_MS})
+endif()
+if(DEFINED TLS_DEMO_RECONNECT_DELAY_MS)
+  target_compile_definitions(thingboard_tls_demo PRIVATE CONFIG_TLS_DEMO_RECONNECT_DELAY_MS=${TLS_DEMO_RECONNECT_DELAY_MS})
+endif()
+
+target_link_libraries(thingboard_tls_demo
+  hq_thingsboard
+  hq_mongoose
+  hq_cjson
+  pthread
+)
+
+set_target_properties(thingboard_tls_demo PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)

@@ -20,6 +20,7 @@
 #include "osal_ota_state.h"
 #include "osal_task.h"
 #include "mqtt_app_mock.h"
+#include "mqtt_config.h"
 #include "cJSON.h"
 
 static int tests_run = 0;
@@ -210,6 +211,71 @@ static void test_client_request_id(void)
 	TEST_ASSERT(id3 == 3, "third request ID is 3");
 
 	destroy_test_client(client);
+}
+
+static void test_tls_adapter_configuration(void)
+{
+	TEST_START("TLS Adapter Configuration");
+	mqtt_app_mock_reset();
+	mqtt_config_init();
+
+	TEST_ASSERT(mqtt_config_set_string("mqtts://localhost:8883",
+				      MQTT_CONFIG_VALUE_ADDRESS),
+		    "set mqtts address succeeds");
+	TEST_ASSERT(mqtt_config_set_bool(true, MQTT_CONFIG_VALUE_SSL),
+		    "set ssl enabled succeeds");
+	TEST_ASSERT(mqtt_config_set_bool(false, MQTT_CONFIG_VALUE_SKIP_VERIFY),
+		    "set skip verify disabled succeeds");
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+					"ca.crt",
+					MQTT_CONFIG_VALUE_CERT),
+		    "set CA cert source succeeds");
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+					"client.crt",
+					MQTT_CONFIG_VALUE_CLIENT_CERT),
+		    "set client cert source succeeds");
+	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+					"client.key",
+					MQTT_CONFIG_VALUE_CLIENT_KEY),
+		    "set client key source succeeds");
+
+	bool ssl = false;
+	bool skip_verify = true;
+	mqtt_cert_source_t source = MQTT_CERT_SOURCE_NONE;
+	const char *source_value = NULL;
+
+	TEST_ASSERT(mqtt_config_get_bool(&ssl, MQTT_CONFIG_VALUE_SSL),
+		    "get ssl flag succeeds");
+	TEST_ASSERT(ssl == true, "ssl flag is enabled");
+	TEST_ASSERT(mqtt_config_get_bool(&skip_verify,
+				 MQTT_CONFIG_VALUE_SKIP_VERIFY),
+		    "get skip verify flag succeeds");
+	TEST_ASSERT(skip_verify == false, "skip verify flag is disabled");
+
+	TEST_ASSERT(mqtt_config_get_cert_source(&source, &source_value,
+					MQTT_CONFIG_VALUE_CERT),
+		    "get CA cert source succeeds");
+	TEST_ASSERT(source == MQTT_CERT_SOURCE_FILE_PATH,
+		    "CA cert source is file path");
+	TEST_ASSERT(source_value != NULL && strcmp(source_value, "ca.crt") == 0,
+		    "CA cert source value matches");
+
+	TEST_ASSERT(mqtt_config_get_cert_source(&source, &source_value,
+					MQTT_CONFIG_VALUE_CLIENT_CERT),
+		    "get client cert source succeeds");
+	TEST_ASSERT(source == MQTT_CERT_SOURCE_FILE_PATH,
+		    "client cert source is file path");
+	TEST_ASSERT(source_value != NULL &&
+			    strcmp(source_value, "client.crt") == 0,
+		    "client cert source value matches");
+
+	TEST_ASSERT(mqtt_config_get_cert_source(&source, &source_value,
+					MQTT_CONFIG_VALUE_CLIENT_KEY),
+		    "get client key source succeeds");
+	TEST_ASSERT(source == MQTT_CERT_SOURCE_FILE_PATH,
+		    "client key source is file path");
+	TEST_ASSERT(source_value != NULL && strcmp(source_value, "client.key") == 0,
+		    "client key source value matches");
 }
 
 static void test_client_connection_callbacks(void)
@@ -2581,6 +2647,7 @@ int main(void)
 
 	/* Client lifecycle */
 	test_client_lifecycle();
+	test_tls_adapter_configuration();
 	test_client_init_null_params();
 	test_client_request_id();
 	test_client_connection_callbacks();

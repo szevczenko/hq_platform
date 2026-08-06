@@ -181,6 +181,42 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building ThingsBoard reconnect integration test (tb_reconnect_integration_tests)")
 
+  # ---- ThingsBoard TLS broker integration test (real mqtt_app) ----
+  add_executable(tb_tls_integration_tests
+    ${TB_TEST_DIR}/tb_tls_integration_test.c
+    ${TB_SRC_DIR}/tb_client.c
+    ${TB_SRC_DIR}/tb_telemetry.c
+    ${TB_SRC_DIR}/tb_attributes.c
+    ${TB_SRC_DIR}/tb_rpc.c
+    ${TB_SRC_DIR}/tb_provision.c
+    ${TB_SRC_DIR}/tb_claim.c
+    ${TB_SRC_DIR}/tb_firmware_update.c
+  )
+
+  target_include_directories(tb_tls_integration_tests
+    PRIVATE ${TB_SRC_DIR}/include
+    PRIVATE ${TB_TEST_DIR}
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+    PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  if(CONFIG_HQ_PLATFORM_POSIX)
+    target_include_directories(tb_tls_integration_tests
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+    )
+  endif()
+
+  target_link_libraries(tb_tls_integration_tests
+    hq_osal
+    hq_mongoose
+    hq_cjson
+    pthread
+  )
+
+  message(STATUS "Tests: Building ThingsBoard TLS integration test (tb_tls_integration_tests)")
+
 else()
   message(STATUS "Tests: ESP-IDF tests are built as separate projects")
 endif()

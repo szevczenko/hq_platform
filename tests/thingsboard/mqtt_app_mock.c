@@ -230,6 +230,29 @@ static char s_cfg_address[256] = {0};
 static char s_cfg_username[128] = {0};
 static char s_cfg_password[128] = {0};
 static char s_cfg_client_id[128] = {0};
+static bool s_cfg_ssl = false;
+static bool s_cfg_skip_verify = false;
+typedef struct {
+    mqtt_cert_source_t source;
+    char value[512];
+} mock_cert_cfg_t;
+static mock_cert_cfg_t s_cfg_cert = {0};
+static mock_cert_cfg_t s_cfg_client_cert = {0};
+static mock_cert_cfg_t s_cfg_client_key = {0};
+
+static mock_cert_cfg_t *get_cert_cfg(mqtt_config_value_t key)
+{
+    switch (key) {
+    case MQTT_CONFIG_VALUE_CERT:
+        return &s_cfg_cert;
+    case MQTT_CONFIG_VALUE_CLIENT_CERT:
+        return &s_cfg_client_cert;
+    case MQTT_CONFIG_VALUE_CLIENT_KEY:
+        return &s_cfg_client_key;
+    default:
+        return NULL;
+    }
+}
 
 void mqtt_config_init(void)
 {
@@ -237,6 +260,11 @@ void mqtt_config_init(void)
     memset(s_cfg_username, 0, sizeof(s_cfg_username));
     memset(s_cfg_password, 0, sizeof(s_cfg_password));
     memset(s_cfg_client_id, 0, sizeof(s_cfg_client_id));
+    s_cfg_ssl = false;
+    s_cfg_skip_verify = false;
+    memset(&s_cfg_cert, 0, sizeof(s_cfg_cert));
+    memset(&s_cfg_client_cert, 0, sizeof(s_cfg_client_cert));
+    memset(&s_cfg_client_key, 0, sizeof(s_cfg_client_key));
 }
 
 bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
@@ -261,25 +289,51 @@ bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
 
 bool mqtt_config_set_bool(bool value, mqtt_config_value_t key)
 {
-    (void)value;
-    (void)key;
-    return true;
+    switch (key) {
+    case MQTT_CONFIG_VALUE_SSL:
+        s_cfg_ssl = value;
+        return true;
+    case MQTT_CONFIG_VALUE_SKIP_VERIFY:
+        s_cfg_skip_verify = value;
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool mqtt_config_set_cert_source(mqtt_cert_source_t source, const char *value,
                                  mqtt_config_value_t key)
 {
-    (void)source;
-    (void)value;
-    (void)key;
+    mock_cert_cfg_t *cfg = get_cert_cfg(key);
+    if (cfg == NULL) {
+        return false;
+    }
+
+    cfg->source = source;
+    cfg->value[0] = '\0';
+    if (value != NULL) {
+        strncpy(cfg->value, value, sizeof(cfg->value) - 1);
+        cfg->value[sizeof(cfg->value) - 1] = '\0';
+    }
     return true;
 }
 
 bool mqtt_config_get_bool(bool *value, mqtt_config_value_t key)
 {
-    (void)value;
-    (void)key;
-    return false;
+    if (value == NULL) {
+        return false;
+    }
+
+    switch (key) {
+    case MQTT_CONFIG_VALUE_SSL:
+        *value = s_cfg_ssl;
+        return true;
+    case MQTT_CONFIG_VALUE_SKIP_VERIFY:
+        *value = s_cfg_skip_verify;
+        return true;
+    default:
+        return false;
+    }
 }
 
 const char *mqtt_config_get_string(mqtt_config_value_t key)
@@ -300,17 +354,28 @@ const char *mqtt_config_get_string(mqtt_config_value_t key)
 
 const char *mqtt_config_get_cert(mqtt_config_value_t key)
 {
-    (void)key;
-    return "";
+    mock_cert_cfg_t *cfg = get_cert_cfg(key);
+    if (cfg == NULL) {
+        return "";
+    }
+    return cfg->value;
 }
 
 bool mqtt_config_get_cert_source(mqtt_cert_source_t *source, const char **value,
                                  mqtt_config_value_t key)
 {
-    (void)source;
-    (void)value;
-    (void)key;
-    return false;
+    mock_cert_cfg_t *cfg = get_cert_cfg(key);
+    if (cfg == NULL) {
+        return false;
+    }
+
+    if (source != NULL) {
+        *source = cfg->source;
+    }
+    if (value != NULL) {
+        *value = cfg->value;
+    }
+    return true;
 }
 
 bool mqtt_config_save(void)

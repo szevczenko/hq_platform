@@ -157,7 +157,7 @@ and device name, and must log its connection lifecycle.
   - Tests: each credentials type, invalid responses, storage failure, and
     reconnect using persisted credentials.
 
-- [ ] **`thingboard_tls_demo`**
+- [x] **`thingboard_tls_demo`**
   - Use `mqtts://` with CA verification and an optional client certificate.
   - Demonstrate expected failure for an unknown CA or hostname mismatch.
   - Mirrors Python: `tls_connect.py`.
