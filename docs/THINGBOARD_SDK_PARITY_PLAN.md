@@ -129,14 +129,14 @@ and device name, and must log its connection lifecycle.
     and `hardware_specs_sender.py`.
   - Tests: JSON topic/payload shape and split batches.
 
-- [ ] **`thingboard_attributes_demo`**
+- [x] **`thingboard_attributes_demo`**
   - Request client and shared attributes, subscribe to all updates, and show
     optional per-key callback behavior.
   - Mirrors Python: `request_attributes.py` and
     `subscription_to_attrs.py`.
   - Tests: response matching, timeout, callback dispatch, and reconnection.
 
-- [ ] **`thingboard_rpc_demo`**
+- [x] **`thingboard_rpc_demo`**
   - Receive a server-side RPC, validate method/parameters, reply, then issue
     a client-side RPC and handle the asynchronous response or timeout.
   - Mirrors Python: `client_rpc_request.py` plus server-RPC handling.

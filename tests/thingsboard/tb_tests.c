@@ -983,6 +983,117 @@ static void test_attributes_request(void)
 	destroy_test_client(client);
 }
 
+static void test_attributes_request_shared(void)
+{
+	TEST_START("Shared Attributes Request & Response");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_attr_response_received = false;
+	s_attr_response_count = 0;
+	s_attr_null_response_count = 0;
+	s_attr_success_count = 0;
+	s_attr_timeout_count = 0;
+	s_attr_cancelled_count = 0;
+	s_attr_error_count = 0;
+	memset(s_attr_response_buf, 0, sizeof(s_attr_response_buf));
+
+	const char *keys[] = { "threshold", "mode" };
+	int ret = tb_attributes_request_shared(client, keys, 2,
+					      attr_response_cb, NULL, 5000);
+	TEST_ASSERT(ret == 0, "shared attribute request succeeds");
+	TEST_ASSERT(mock_publish_count == 1, "shared request message published");
+
+	TEST_ASSERT(strstr(mock_publishes[0].topic,
+			   "v1/devices/me/attributes/request/") != NULL,
+		    "shared request published to correct topic");
+
+	cJSON *root = cJSON_Parse(mock_publishes[0].message);
+	TEST_ASSERT(root != NULL, "shared request JSON valid");
+	if (root) {
+		cJSON *sk = cJSON_GetObjectItemCaseSensitive(root, "sharedKeys");
+		TEST_ASSERT(sk != NULL && cJSON_IsString(sk),
+			    "sharedKeys field present");
+		TEST_ASSERT(sk != NULL && strstr(sk->valuestring, "threshold") != NULL,
+			    "sharedKeys contains threshold");
+		TEST_ASSERT(sk != NULL && strstr(sk->valuestring, "mode") != NULL,
+			    "sharedKeys contains mode");
+		cJSON_Delete(root);
+	}
+
+	const char *response =
+		"{\"shared\":{\"threshold\":42,\"mode\":\"auto\"}}";
+	mqtt_app_mock_deliver_message("v1/devices/me/attributes/response/1",
+				      response, strlen(response));
+	TEST_ASSERT(s_attr_response_received == true,
+		    "shared response callback called");
+	TEST_ASSERT(s_attr_success_count == 1,
+		    "shared response callback status is success");
+	TEST_ASSERT(strstr(s_attr_response_buf, "threshold") != NULL,
+		    "shared response contains threshold");
+
+	destroy_test_client(client);
+}
+
+static void test_attributes_request_shared_timeout_and_reconnect(void)
+{
+	TEST_START("Shared Attributes Request Timeout And Reconnect");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_attr_response_received = false;
+	s_attr_response_count = 0;
+	s_attr_null_response_count = 0;
+	s_attr_success_count = 0;
+	s_attr_timeout_count = 0;
+	s_attr_cancelled_count = 0;
+	s_attr_error_count = 0;
+	memset(s_attr_response_buf, 0, sizeof(s_attr_response_buf));
+
+	const char *keys[] = { "threshold" };
+	TEST_ASSERT(tb_attributes_request_shared(client, keys, 1,
+					 attr_response_cb, NULL,
+					 30) == 0,
+		    "shared attribute request with short timeout succeeds");
+
+	osal_task_delay_ms(120);
+	TEST_ASSERT(s_attr_response_count == 1,
+		    "shared attribute timeout callback fired once");
+	TEST_ASSERT(s_attr_timeout_count == 1,
+		    "shared attribute timeout status reported");
+
+	mqtt_app_mock_simulate_remote_disconnect();
+	TEST_ASSERT(tb_attributes_request_shared(client, keys, 1,
+					 attr_response_cb, NULL,
+					 5000) != 0,
+		    "shared request fails while disconnected");
+
+	mqtt_app_mock_simulate_connect();
+	int responses_before_success = s_attr_response_count;
+	TEST_ASSERT(tb_attributes_request_shared(client, keys, 1,
+					 attr_response_cb, NULL,
+					 5000) == 0,
+		    "shared request succeeds after reconnect");
+
+	uint32_t req_id =
+		parse_topic_suffix_id(mock_publishes[mock_publish_count - 1].topic);
+	char response_topic[128];
+	snprintf(response_topic, sizeof(response_topic),
+		 "v1/devices/me/attributes/response/%u", req_id);
+	mqtt_app_mock_deliver_message(response_topic,
+			      "{\"shared\":{\"threshold\":55}}",
+			      strlen("{\"shared\":{\"threshold\":55}}"));
+
+	TEST_ASSERT(s_attr_response_count == responses_before_success + 1,
+		    "shared callback is dispatched for reconnect request response");
+	TEST_ASSERT(s_attr_success_count == 1,
+		    "shared reconnect request completes with success");
+	TEST_ASSERT(strstr(s_attr_response_buf, "threshold") != NULL,
+		    "shared reconnect response payload delivered");
+
+	destroy_test_client(client);
+}
+
 static uint32_t parse_topic_suffix_id(const char *topic)
 {
 	const char *id_start;
@@ -1347,11 +1458,13 @@ static bool s_server_rpc_received = false;
 static char s_rpc_method[64] = { 0 };
 static char s_rpc_params[256] = { 0 };
 static uint32_t s_rpc_request_id = 0;
+static int s_server_rpc_count = 0;
 
 static void server_rpc_cb(const char *method, const char *params_json,
 			  uint32_t request_id, void *user_data)
 {
 	s_server_rpc_received = true;
+	s_server_rpc_count++;
 	if (method)
 		strncpy(s_rpc_method, method, sizeof(s_rpc_method) - 1);
 	if (params_json)
@@ -1367,6 +1480,7 @@ static void test_server_side_rpc(void)
 	TEST_ASSERT(client != NULL, "client created");
 
 	s_server_rpc_received = false;
+	s_server_rpc_count = 0;
 	memset(s_rpc_method, 0, sizeof(s_rpc_method));
 	memset(s_rpc_params, 0, sizeof(s_rpc_params));
 
@@ -1394,6 +1508,43 @@ static void test_server_side_rpc(void)
 	TEST_ASSERT(strstr(mock_publishes[0].topic,
 			   "v1/devices/me/rpc/response/42") != NULL,
 		    "response published to correct topic");
+
+	ret = tb_rpc_unsubscribe_server(client);
+	TEST_ASSERT(ret == 0, "unsubscribe server RPC succeeds");
+
+	destroy_test_client(client);
+}
+
+static void test_server_side_rpc_malformed_json_and_request_id(void)
+{
+	TEST_START("Server-Side RPC Malformed JSON And Request ID Edge");
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT(client != NULL, "client created");
+
+	s_server_rpc_received = false;
+	s_server_rpc_count = 0;
+	memset(s_rpc_method, 0, sizeof(s_rpc_method));
+	memset(s_rpc_params, 0, sizeof(s_rpc_params));
+	s_rpc_request_id = 0;
+
+	int ret = tb_rpc_subscribe_server(client, server_rpc_cb, NULL);
+	TEST_ASSERT(ret == 0, "subscribe server RPC succeeds");
+
+	mqtt_app_mock_deliver_message("v1/devices/me/rpc/request/101",
+			      "{\"method\":\"setLed\",\"params\":", 
+			      strlen("{\"method\":\"setLed\",\"params\":"));
+	TEST_ASSERT(s_server_rpc_count == 0,
+		    "malformed RPC JSON does not dispatch callback");
+
+	mqtt_app_mock_deliver_message("v1/devices/me/rpc/request/not-a-number",
+			      "{\"method\":\"setLed\",\"params\":{\"pin\":1}}",
+			      strlen("{\"method\":\"setLed\",\"params\":{\"pin\":1}}"));
+	TEST_ASSERT(s_server_rpc_received == true,
+		    "valid RPC payload dispatches callback even with nonnumeric topic suffix");
+	TEST_ASSERT(s_rpc_request_id == 0,
+		    "nonnumeric RPC request id maps to zero");
+	TEST_ASSERT(strcmp(s_rpc_method, "setLed") == 0,
+		    "method parsing remains correct with request id edge case");
 
 	ret = tb_rpc_unsubscribe_server(client);
 	TEST_ASSERT(ret == 0, "unsubscribe server RPC succeeds");
@@ -2246,6 +2397,8 @@ int main(void)
 	test_attributes_send();
 	test_attributes_json_shape();
 	test_attributes_request();
+	test_attributes_request_shared();
+	test_attributes_request_shared_timeout_and_reconnect();
 	test_attributes_request_reconnect_safety();
 	test_attributes_request_timeout_and_slot_reuse();
 	test_attributes_request_max_pending();
@@ -2254,6 +2407,7 @@ int main(void)
 
 	/* RPC */
 	test_server_side_rpc();
+	test_server_side_rpc_malformed_json_and_request_id();
 	test_client_side_rpc();
 	test_client_side_rpc_reconnect_safety();
 	test_client_side_rpc_timeout_and_slot_reuse();
