@@ -14,6 +14,7 @@
 #include "mongoose_process.h"
 #include "mqtt_config.h"
 #include "osal_file.h"
+#include "osal_mount.h"
 #include "osal_task.h"
 #include "tb_attributes.h"
 #include "tb_client.h"
@@ -53,6 +54,9 @@
 #ifndef CONFIG_PROV_DEMO_RECONNECT_DELAY_MS
 #define CONFIG_PROV_DEMO_RECONNECT_DELAY_MS 3000
 #endif
+#ifndef CONFIG_PROV_DEMO_TELEMETRY_INTERVAL_MS
+#define CONFIG_PROV_DEMO_TELEMETRY_INTERVAL_MS 5000
+#endif
 
 #define PROV_BOOTSTRAP_CLIENT_ID CONFIG_PROV_DEMO_BOOTSTRAP_CLIENT_ID
 #define PROV_BOOTSTRAP_USERNAME CONFIG_PROV_DEMO_BOOTSTRAP_USERNAME
@@ -65,10 +69,21 @@
 #define PROV_STORAGE_PATH CONFIG_PROV_DEMO_STORAGE_PATH
 #define PROV_REQ_TIMEOUT_MS CONFIG_PROV_DEMO_REQUEST_TIMEOUT_MS
 #define PROV_RECONNECT_DELAY_MS CONFIG_PROV_DEMO_RECONNECT_DELAY_MS
+#define PROV_TELEMETRY_INTERVAL_MS CONFIG_PROV_DEMO_TELEMETRY_INTERVAL_MS
 
 #define PROV_CRED_TYPE_ACCESS_TOKEN "ACCESS_TOKEN"
 #define PROV_CRED_TYPE_MQTT_BASIC "MQTT_BASIC"
 #define PROV_CRED_TYPE_X509 "X509_CERTIFICATE"
+
+#ifdef ESP_PLATFORM
+#define PROV_STORAGE_FS_IMAGE "flash_provision_demo"
+#define PROV_STORAGE_FS_MOUNT_POINT "/littlefs"
+#else
+#define PROV_STORAGE_FS_IMAGE "/tmp/tb_provision_demo.img"
+#define PROV_STORAGE_FS_MOUNT_POINT "/"
+#endif
+#define PROV_STORAGE_FS_BLOCK_SIZE 4096U
+#define PROV_STORAGE_FS_BLOCK_COUNT 256U
 
 typedef struct {
     char credentials_type[32];
@@ -82,7 +97,38 @@ typedef struct {
 static tb_client_t *g_tb_client;
 static bool g_provision_response_ready = false;
 static bool g_provision_response_valid = false;
+static int g_provision_response_error_code = 0;
 static provisioned_credentials_t g_provisioned = { 0 };
+
+static int ensure_storage_ready(void)
+{
+    if (osal_mount(PROV_STORAGE_FS_IMAGE, PROV_STORAGE_FS_MOUNT_POINT) ==
+        OSAL_SUCCESS) {
+        return 0;
+    }
+
+    if (osal_initfs(NULL, PROV_STORAGE_FS_IMAGE, PROV_STORAGE_FS_MOUNT_POINT,
+            PROV_STORAGE_FS_BLOCK_SIZE,
+            PROV_STORAGE_FS_BLOCK_COUNT) != OSAL_SUCCESS) {
+        return -1;
+    }
+
+    if (osal_mount(PROV_STORAGE_FS_IMAGE, PROV_STORAGE_FS_MOUNT_POINT) ==
+        OSAL_SUCCESS) {
+        return 0;
+    }
+
+    if (osal_mkfs(NULL, PROV_STORAGE_FS_IMAGE, PROV_STORAGE_FS_MOUNT_POINT,
+             PROV_STORAGE_FS_BLOCK_SIZE,
+             PROV_STORAGE_FS_BLOCK_COUNT) != OSAL_SUCCESS) {
+        return -1;
+    }
+
+    return (osal_mount(PROV_STORAGE_FS_IMAGE, PROV_STORAGE_FS_MOUNT_POINT) ==
+        OSAL_SUCCESS)
+               ? 0
+               : -1;
+}
 
 static int connect_and_wait(void)
 {
@@ -115,8 +161,25 @@ static bool parse_provision_response(const char *response_json,
         return false;
     }
 
+    cJSON *status = cJSON_GetObjectItemCaseSensitive(root, "status");
+    if (cJSON_IsString(status) && status->valuestring != NULL &&
+        strcmp(status->valuestring, "SUCCESS") != 0) {
+        cJSON *error_msg = cJSON_GetObjectItemCaseSensitive(root, "errorMsg");
+        if (cJSON_IsString(error_msg) && error_msg->valuestring != NULL &&
+            error_msg->valuestring[0] != '\0') {
+            printf("[PROV_DEMO] Provisioning status=%s reason=%s\n",
+                   status->valuestring, error_msg->valuestring);
+        } else {
+            printf("[PROV_DEMO] Provisioning status=%s\n",
+                   status->valuestring);
+        }
+        cJSON_Delete(root);
+        return false;
+    }
+
     cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "credentialsType");
     if (!cJSON_IsString(type) || type->valuestring == NULL) {
+        printf("[PROV_DEMO] Provisioning response missing credentialsType\n");
         cJSON_Delete(root);
         return false;
     }
@@ -303,7 +366,15 @@ static void on_provision_response(const char *response_json, void *user_data)
     (void)user_data;
 
     g_provision_response_ready = true;
-    g_provision_response_valid = parse_provision_response(response_json, &g_provisioned);
+    if (response_json == NULL) {
+        g_provision_response_error_code = -2;
+        g_provision_response_valid = false;
+        return;
+    }
+
+    g_provision_response_valid =
+        parse_provision_response(response_json, &g_provisioned);
+    g_provision_response_error_code = g_provision_response_valid ? 0 : -3;
 }
 
 static int provision_once(void)
@@ -317,6 +388,7 @@ static int provision_once(void)
 
     g_provision_response_ready = false;
     g_provision_response_valid = false;
+    g_provision_response_error_code = 0;
     memset(&g_provisioned, 0, sizeof(g_provisioned));
 
     int rc = tb_provision_request(g_tb_client, &req,
@@ -329,16 +401,22 @@ static int provision_once(void)
     uint32_t start = osal_task_get_time_ms();
     while (!g_provision_response_ready) {
         if ((uint32_t)(osal_task_get_time_ms() - start) >= PROV_REQ_TIMEOUT_MS) {
+            g_provision_response_error_code = -4;
             return -1;
         }
         osal_task_delay_ms(100);
     }
 
     if (!g_provision_response_valid) {
+        if (g_provision_response_error_code == -2) {
+            printf("[PROV_DEMO] Provision callback received empty payload\n");
+        }
         return -1;
     }
 
     if (save_credentials(PROV_STORAGE_PATH, &g_provisioned) != 0) {
+        printf("[PROV_DEMO] Failed to persist credentials to %s\n",
+               PROV_STORAGE_PATH);
         return -1;
     }
 
@@ -383,6 +461,25 @@ static int reconnect_with_persisted_credentials(void)
     return connect_and_wait();
 }
 
+static void publish_post_provision_telemetry(uint32_t sequence,
+                                             uint32_t uptime_ms)
+{
+    int rc_seq = tb_telemetry_send_int(g_tb_client, "provision_seq",
+                                       (int64_t)sequence);
+    int rc_uptime = tb_telemetry_send_int(g_tb_client, "provision_uptime_ms",
+                                          (int64_t)uptime_ms);
+    int rc_state = tb_telemetry_send_string(g_tb_client, "provision_state",
+                                            "reconnected");
+
+    if (rc_seq != 0 || rc_uptime != 0 || rc_state != 0) {
+        printf("[PROV_DEMO] Telemetry push failed (seq=%u)\n", sequence);
+        return;
+    }
+
+    printf("[PROV_DEMO] Telemetry pushed (seq=%u uptime_ms=%u)\n",
+           sequence, uptime_ms);
+}
+
 int main_function(void)
 {
     int rc;
@@ -392,7 +489,15 @@ int main_function(void)
     printf("=============================================\n");
     printf("  Client ID : %s\n", PROV_BOOTSTRAP_CLIENT_ID);
     printf("  Broker    : %s\n", PROV_MQTT_URL);
+    printf("  Storage   : %s\n", PROV_STORAGE_PATH);
+    printf("  Telemetry : every %u ms\n", PROV_TELEMETRY_INTERVAL_MS);
     printf("=============================================\n\n");
+
+    rc = ensure_storage_ready();
+    if (rc != 0) {
+        printf("[PROV_DEMO] FATAL: failed to initialize storage backend\n");
+        return 1;
+    }
 
     MongooseProcess_Init();
 
@@ -440,11 +545,22 @@ int main_function(void)
 
     printf("[PROV_DEMO] Reconnected using persisted credentials\n");
 
-    (void)tb_telemetry_send_string(g_tb_client, "provision_state", "reconnected");
     (void)tb_attributes_send_string(g_tb_client, "provision_status", "ok");
 
+    uint32_t telemetry_seq = 1;
+    uint32_t start_ms = osal_task_get_time_ms();
     while (1) {
-        osal_task_delay_ms(1000);
+        if (!tb_client_is_connected(g_tb_client)) {
+            printf("[PROV_DEMO] Waiting for connection before telemetry push\n");
+            osal_task_delay_ms(PROV_RECONNECT_DELAY_MS);
+            continue;
+        }
+
+        uint32_t now_ms = osal_task_get_time_ms();
+        uint32_t uptime_ms = (uint32_t)(now_ms - start_ms);
+        publish_post_provision_telemetry(telemetry_seq, uptime_ms);
+        telemetry_seq++;
+        osal_task_delay_ms(PROV_TELEMETRY_INTERVAL_MS);
     }
 }
 

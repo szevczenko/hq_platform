@@ -8,6 +8,7 @@ It demonstrates:
 - Validating provisioning response format
 - Persisting credentials with OSAL file API
 - Reconnecting using persisted credentials (ACCESS_TOKEN and MQTT_BASIC)
+- Pushing periodic telemetry after successful reprovision/reconnect
 
 Source:
 
@@ -31,7 +32,7 @@ Shared setup guide:
 ## 2. Configure And Build (WSL)
 
 ```bash
-wsl.exe bash -lc "cd /mnt/c/projekty/hq_platform; cmake -S . -B build_wsl -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_EXAMPLES=ON -DPROV_DEMO_BOOTSTRAP_CLIENT_ID='tb_provision_demo_bootstrap' -DPROV_DEMO_BOOTSTRAP_USERNAME='provision' -DPROV_DEMO_BOOTSTRAP_PASSWORD='' -DPROV_DEMO_BOOTSTRAP_DEVICE_NAME='Provision Bootstrap' -DPROV_DEMO_MQTT_URL='mqtt://127.0.0.1:1883' -DPROV_DEMO_PROVISION_KEY='<PROVISION_KEY>' -DPROV_DEMO_PROVISION_SECRET='<PROVISION_SECRET>' -DPROV_DEMO_DEVICE_NAME='Provisioned Device Demo' -DPROV_DEMO_STORAGE_PATH='tb_provisioned_credentials.json' -DPROV_DEMO_REQUEST_TIMEOUT_MS=10000 -DPROV_DEMO_RECONNECT_DELAY_MS=3000"
+wsl.exe bash -lc "cd /mnt/c/projekty/hq_platform; cmake -S . -B build_wsl -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_EXAMPLES=ON -DPROV_DEMO_BOOTSTRAP_CLIENT_ID='tb_provision_demo_bootstrap' -DPROV_DEMO_BOOTSTRAP_USERNAME='provision' -DPROV_DEMO_BOOTSTRAP_PASSWORD='' -DPROV_DEMO_BOOTSTRAP_DEVICE_NAME='Provision Bootstrap' -DPROV_DEMO_MQTT_URL='mqtt://127.0.0.1:1883' -DPROV_DEMO_PROVISION_KEY='<PROVISION_KEY>' -DPROV_DEMO_PROVISION_SECRET='<PROVISION_SECRET>' -DPROV_DEMO_DEVICE_NAME='Provisioned Device Demo' -DPROV_DEMO_STORAGE_PATH='tb_provisioned_credentials.json' -DPROV_DEMO_REQUEST_TIMEOUT_MS=10000 -DPROV_DEMO_RECONNECT_DELAY_MS=3000 -DPROV_DEMO_TELEMETRY_INTERVAL_MS=5000"
 ```
 
 ```bash
@@ -49,6 +50,7 @@ wsl.exe bash -lc "cd /mnt/c/projekty/hq_platform; ./build_wsl/examples/thingboar
 - Connecting bootstrap client...
 - Provisioning response accepted and stored
 - Reconnected using persisted credentials
+- Telemetry pushed (seq=N uptime_ms=M)
 
 No secret material is printed.
 
@@ -65,3 +67,4 @@ No secret material is printed.
 - PROV_DEMO_STORAGE_PATH
 - PROV_DEMO_REQUEST_TIMEOUT_MS
 - PROV_DEMO_RECONNECT_DELAY_MS
+- PROV_DEMO_TELEMETRY_INTERVAL_MS

@@ -113,6 +113,18 @@ static void teardown_fs(void)
 	(void)osal_rmfs(TEST_IMAGE_PATH);
 }
 
+static bool make_osal_path(char *dst, size_t dst_size, const char *filename)
+{
+	int n;
+
+	if (dst == NULL || filename == NULL || filename[0] == '\0') {
+		return false;
+	}
+
+	n = snprintf(dst, dst_size, "%s/%s", TEST_MOUNT_POINT, filename);
+	return n > 0 && (size_t)n < dst_size;
+}
+
 static bool osal_write_file(const char *path, const char *data, size_t len)
 {
 	osal_file_id_t fd;
@@ -244,10 +256,10 @@ int main(void)
 	const char *ca_bad_host = getenv("TB_TLS_IT_CA_BAD_HOST_PATH");
 	const char *client_cert_host = getenv("TB_TLS_IT_CLIENT_CERT_HOST_PATH");
 	const char *client_key_host = getenv("TB_TLS_IT_CLIENT_KEY_HOST_PATH");
-	const char *ca_good_osal = "ca_good.crt";
-	const char *ca_bad_osal = "ca_bad.crt";
-	const char *client_cert_osal = "client.crt";
-	const char *client_key_osal = "client.key";
+	char ca_good_osal[128];
+	char ca_bad_osal[128];
+	char client_cert_osal[128];
+	char client_key_osal[128];
 
 	if (url_ok == NULL || url_ok[0] == '\0') {
 		url_ok = "mqtts://localhost:8885";
@@ -269,6 +281,17 @@ int main(void)
 
 	if (!setup_fs()) {
 		printf("[FAIL] filesystem setup failed\n");
+		return 1;
+	}
+
+	if (!make_osal_path(ca_good_osal, sizeof(ca_good_osal), "ca_good.crt") ||
+	    !make_osal_path(ca_bad_osal, sizeof(ca_bad_osal), "ca_bad.crt") ||
+	    !make_osal_path(client_cert_osal, sizeof(client_cert_osal),
+			    "client.crt") ||
+	    !make_osal_path(client_key_osal, sizeof(client_key_osal),
+			    "client.key")) {
+		printf("[FAIL] failed to build OSAL certificate paths\n");
+		teardown_fs();
 		return 1;
 	}
 

@@ -19,6 +19,7 @@
 #include "osal_task.h"
 #include "tb_attributes.h"
 #include "tb_provision.h"
+#include "tb_provision_internal.h"
 #include "tb_rpc.h"
 
 typedef struct {

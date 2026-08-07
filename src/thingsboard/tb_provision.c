@@ -6,6 +6,7 @@
  */
 
 #include "tb_provision.h"
+#include "tb_provision_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>

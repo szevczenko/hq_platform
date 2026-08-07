@@ -83,6 +83,7 @@ static void schedule_event(mock_event_type_t type, const char *topic,
 
         if (topic != NULL) {
             strncpy(s_events[i].topic, topic, sizeof(s_events[i].topic) - 1);
+            s_events[i].topic[sizeof(s_events[i].topic) - 1] = '\0';
         }
         if (payload != NULL && payload_len > 0) {
             size_t copy_len = payload_len < sizeof(s_events[i].payload) - 1 ?
@@ -108,6 +109,8 @@ static void replay_subscriptions_if_enabled(void)
         if (mock_subscribe_count < MOCK_MAX_PUBLISHES) {
             strncpy(mock_subscribes[mock_subscribe_count].topic,
                     s_subscriptions[i].topic, MOCK_MAX_TOPIC_LEN - 1);
+            mock_subscribes[mock_subscribe_count]
+            .topic[MOCK_MAX_TOPIC_LEN - 1] = '\0';
             mock_subscribes[mock_subscribe_count].qos = 0;
             mock_subscribe_count++;
             mock_subscription_replay_count++;
@@ -213,7 +216,9 @@ bool mqtt_app_post_data(const char *topic, const char *message, int qos)
 
     mock_publish_record_t *rec = &mock_publishes[mock_publish_count++];
     strncpy(rec->topic, topic, MOCK_MAX_TOPIC_LEN - 1);
+    rec->topic[MOCK_MAX_TOPIC_LEN - 1] = '\0';
     strncpy(rec->message, message, MOCK_MAX_MSG_LEN - 1);
+    rec->message[MOCK_MAX_MSG_LEN - 1] = '\0';
     rec->qos = qos;
 
     if (s_auto_puback_enabled) {
@@ -236,12 +241,15 @@ bool mqtt_app_subscribe(const char *topic, int qos,
     for (int i = 0; i < MOCK_MAX_SUBS; i++) {
         if (!s_subscriptions[i].active) {
             strncpy(s_subscriptions[i].topic, topic, MOCK_MAX_TOPIC_LEN - 1);
+            s_subscriptions[i].topic[MOCK_MAX_TOPIC_LEN - 1] = '\0';
             s_subscriptions[i].callback = callback;
             s_subscriptions[i].active = true;
 
             if (mock_subscribe_count < MOCK_MAX_PUBLISHES) {
                 strncpy(mock_subscribes[mock_subscribe_count].topic, topic,
                         MOCK_MAX_TOPIC_LEN - 1);
+                mock_subscribes[mock_subscribe_count]
+                    .topic[MOCK_MAX_TOPIC_LEN - 1] = '\0';
                 mock_subscribes[mock_subscribe_count].qos = qos;
                 mock_subscribe_count++;
             }
@@ -441,15 +449,19 @@ bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
     switch (key) {
     case MQTT_CONFIG_VALUE_ADDRESS:
         strncpy(s_cfg_address, string, sizeof(s_cfg_address) - 1);
+        s_cfg_address[sizeof(s_cfg_address) - 1] = '\0';
         return true;
     case MQTT_CONFIG_VALUE_USERNAME:
         strncpy(s_cfg_username, string, sizeof(s_cfg_username) - 1);
+        s_cfg_username[sizeof(s_cfg_username) - 1] = '\0';
         return true;
     case MQTT_CONFIG_VALUE_PASSWORD:
         strncpy(s_cfg_password, string, sizeof(s_cfg_password) - 1);
+        s_cfg_password[sizeof(s_cfg_password) - 1] = '\0';
         return true;
     case MQTT_CONFIG_VALUE_CLIENT_ID:
         strncpy(s_cfg_client_id, string, sizeof(s_cfg_client_id) - 1);
+        s_cfg_client_id[sizeof(s_cfg_client_id) - 1] = '\0';
         return true;
     default:
         return false;

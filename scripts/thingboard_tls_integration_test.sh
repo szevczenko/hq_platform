@@ -26,7 +26,51 @@ need_cmd() {
     }
 }
 
+resolve_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m "$1"
+    return
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -m "$1"
+    return
+  fi
+  return 1
+}
+
+validate_cert_dir() {
+  local cert_root_abs cert_dir_abs
+
+  if [[ -z "$CERT_DIR" ]]; then
+    echo "CERT_DIR must not be empty" >&2
+    exit 1
+  fi
+
+  cert_root_abs="$(resolve_path "$PROJECT_DIR/cert")" || {
+    echo "Failed to resolve project cert root path" >&2
+    exit 1
+  }
+  cert_dir_abs="$(resolve_path "$CERT_DIR")" || {
+    echo "Failed to resolve cert directory path: $CERT_DIR" >&2
+    exit 1
+  }
+
+  if [[ "$cert_dir_abs" == "/" || "$cert_dir_abs" == "$PROJECT_DIR" ||
+      "$cert_dir_abs" == "$cert_root_abs" ]]; then
+    echo "Refusing to clean risky cert directory path: $cert_dir_abs" >&2
+    exit 1
+  fi
+
+  if [[ "$cert_dir_abs" != "$cert_root_abs"/* ]]; then
+    echo "CERT_DIR must be under $cert_root_abs, got: $cert_dir_abs" >&2
+    exit 1
+  fi
+
+  CERT_DIR="$cert_dir_abs"
+}
+
 gen_certs() {
+  validate_cert_dir
     mkdir -p "$CERT_DIR"
     rm -f "$CERT_DIR"/*
 

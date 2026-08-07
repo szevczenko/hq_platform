@@ -275,6 +275,78 @@ static void test_provisioning_reconnect_and_reissue(void)
 	destroy_test_client(client);
 }
 
+static tb_client_t *create_test_client_no_mock_reset(void)
+{
+	tb_client_config_t cfg = {
+		.server_url = "mqtt://localhost:1883",
+		.access_token = "test_token",
+		.device_name = "test_device",
+	};
+	tb_client_t *client = NULL;
+
+	if (tb_client_init(&client, &cfg) != 0 || client == NULL) {
+		return NULL;
+	}
+	if (tb_client_connect(client) != 0) {
+		tb_client_deinit(client);
+		return NULL;
+	}
+
+	return client;
+}
+
+static void test_provisioning_state_cleared_on_client_deinit(void)
+{
+	tb_provision_request_t req = {
+		.device_name = "new_device",
+		.provision_device_key = "my_provision_key",
+		.provision_device_secret = "my_provision_secret",
+	};
+	const char *resp1 =
+		"{\"credentialsType\":\"ACCESS_TOKEN\",\"credentialsValue\":\"token1\"}";
+	const char *resp2 =
+		"{\"credentialsType\":\"ACCESS_TOKEN\",\"credentialsValue\":\"token2\"}";
+
+	TEST_START("Provisioning State Cleared On Client Deinit");
+	tb_client_t *client1 = create_test_client();
+	TEST_ASSERT(client1 != NULL, "first client created");
+	if (client1 == NULL) {
+		return;
+	}
+
+	reset_provision_cb_state();
+	mock_subscribe_count = 0;
+	TEST_ASSERT(tb_provision_request(client1, &req, provision_cb, NULL,
+				 10000) == 0,
+		    "first client provisioning request succeeds");
+	TEST_ASSERT(mock_subscribe_count == 1,
+		    "first client subscribes to provisioning response topic");
+	mqtt_app_mock_deliver_message("/provision/response", resp1, strlen(resp1));
+	TEST_ASSERT(s_provision_response_count == 1,
+		    "first client provisioning callback called once");
+	destroy_test_client(client1);
+
+	tb_client_t *client2 = create_test_client_no_mock_reset();
+	TEST_ASSERT(client2 != NULL, "second client created without mock reset");
+	if (client2 == NULL) {
+		return;
+	}
+
+	reset_provision_cb_state();
+	mock_subscribe_count = 0;
+	TEST_ASSERT(tb_provision_request(client2, &req, provision_cb, NULL,
+				 10000) == 0,
+		    "second client provisioning request succeeds");
+	TEST_ASSERT(mock_subscribe_count == 1,
+		    "second client subscribes again after deinit cleanup");
+	mqtt_app_mock_deliver_message("/provision/response", resp2, strlen(resp2));
+	TEST_ASSERT(s_provision_response_count == 1,
+		    "second client callback called once without stale state");
+	TEST_ASSERT(strstr(s_provision_response, "token2") != NULL,
+		    "second client callback receives fresh response payload");
+	destroy_test_client(client2);
+}
+
 static void test_claim_device(void)
 {
 	TEST_START("Device Claiming");
@@ -656,6 +728,7 @@ void run_provision_claim_tests(void)
 	test_provisioning_request_credentials_type_shapes();
 	test_provisioning_invalid_response_and_publish_failure();
 	test_provisioning_reconnect_and_reissue();
+	test_provisioning_state_cleared_on_client_deinit();
 	test_claim_device();
 	test_claim_device_no_secret();
 	test_claim_device_publish_failure();
