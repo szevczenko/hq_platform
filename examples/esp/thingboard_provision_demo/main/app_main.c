@@ -3,16 +3,14 @@
 #include <osal_task.h>
 #include <string.h>
 
-#include "osal_ota.h"
-
 #include "wifi_managment.h"
 
 #ifndef CONFIG_WIFI_SSID
-#define CONFIG_WIFI_SSID "wifi_ssid"
+#define CONFIG_WIFI_SSID "YourSSID"
 #endif
 
 #ifndef CONFIG_WIFI_PASSWORD
-#define CONFIG_WIFI_PASSWORD "password"
+#define CONFIG_WIFI_PASSWORD "YourPassword"
 #endif
 
 extern int main_function(void);
@@ -37,7 +35,6 @@ static int _init_wifi(void)
 {
 	wifi_mgmt_set_wifi_type(T_WIFI_TYPE_CLIENT);
 	wifi_mgmt_init();
-	wifi_mgmt_start();
 	wifi_mgmt_register_connect_cb(_connected);
 	wifi_mgmt_register_disconnect_cb(_disconnected);
 
@@ -57,7 +54,7 @@ static int _init_wifi(void)
 
 	printf("Connecting to Wi-Fi SSID: %s\n", CONFIG_WIFI_SSID);
 
-	uint32_t timeout_ms = 10000; // 10 seconds
+	uint32_t timeout_ms = 10000;
 
 	while (!connected && timeout_ms > 0) {
 		if (failed) {
@@ -77,15 +74,10 @@ static int _init_wifi(void)
 
 void app_main(void)
 {
-	osal_status_t ota_rc = osal_ota_init();
-	if (ota_rc != OSAL_SUCCESS) {
-		printf("OTA init/confirm failed: %d\n", ota_rc);
-	}
-
 	if (_init_wifi() != 0) {
 		printf("Wi-Fi initialization failed.\n");
 		return;
 	}
 	int ret = main_function();
-	printf("[LAMP] app_main() exiting with code %d\n", ret);
+	printf("[PROV_DEMO] app_main() exiting with code %d\n", ret);
 }

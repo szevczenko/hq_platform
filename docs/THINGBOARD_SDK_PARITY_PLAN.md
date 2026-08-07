@@ -129,26 +129,26 @@ and device name, and must log its connection lifecycle.
     and `hardware_specs_sender.py`.
   - Tests: JSON topic/payload shape and split batches.
 
-- [ ] **`thingboard_attributes_demo`**
+- [x] **`thingboard_attributes_demo`**
   - Request client and shared attributes, subscribe to all updates, and show
     optional per-key callback behavior.
   - Mirrors Python: `request_attributes.py` and
     `subscription_to_attrs.py`.
   - Tests: response matching, timeout, callback dispatch, and reconnection.
 
-- [ ] **`thingboard_rpc_demo`**
+- [x] **`thingboard_rpc_demo`**
   - Receive a server-side RPC, validate method/parameters, reply, then issue
     a client-side RPC and handle the asynchronous response or timeout.
   - Mirrors Python: `client_rpc_request.py` plus server-RPC handling.
   - Tests: malformed JSON, request ID handling, timeout, and reconnect.
 
-- [ ] **`thingboard_claim_demo`**
+- [x] **`thingboard_claim_demo`**
   - Claim a device with and without a secret key and report the resulting
     telemetry/attributes.
   - Mirrors Python: `claiming_device_pe_only.py`.
   - Tests: request JSON shape and publish failure.
 
-- [ ] **`thingboard_provision_demo`**
+- [x] **`thingboard_provision_demo`**
   - Request credentials with the provisioning token, validate the response,
     store credentials through an OSAL secure/persistent-storage interface, and
     reconnect as the provisioned device.
@@ -157,7 +157,7 @@ and device name, and must log its connection lifecycle.
   - Tests: each credentials type, invalid responses, storage failure, and
     reconnect using persisted credentials.
 
-- [ ] **`thingboard_tls_demo`**
+- [x] **`thingboard_tls_demo`**
   - Use `mqtts://` with CA verification and an optional client certificate.
   - Demonstrate expected failure for an unknown CA or hostname mismatch.
   - Mirrors Python: `tls_connect.py`.
@@ -173,17 +173,17 @@ and device name, and must log its connection lifecycle.
 
 ## Shared Test And Delivery Work
 
-- [ ] Keep `tests/thingsboard/tb_tests.c` as the unit-test entry point, but
+- [x] Keep `tests/thingsboard/tb_tests.c` as the unit-test entry point, but
   split it into focused source files when module coverage becomes difficult to
   navigate.
-- [ ] Add deterministic MQTT adapter mocks for connect/disconnect, SUBACK,
+- [x] Add deterministic MQTT adapter mocks for connect/disconnect, SUBACK,
   PUBACK, delayed responses, dropped connections, and subscription replay.
 - [ ] Add a POSIX integration test job against a disposable ThingsBoard and
   MQTT broker deployment. Cover telemetry, attributes, RPC, claim,
   provisioning, TLS, and OTA checksum/signature rejection.
-- [ ] Add an ESP hardware-in-the-loop checklist for Wi-Fi loss, broker loss,
+- [x] Add an ESP hardware-in-the-loop checklist for Wi-Fi loss, broker loss,
   OTA resume/abort, signed OTA, rollback, Secure Boot, and Flash Encryption.
-- [ ] Document the supported ThingsBoard server version, required device
+- [x] Document the supported ThingsBoard server version, required device
   profile permissions, and custom OTA signature attributes.
 
 ## Definition Of Done

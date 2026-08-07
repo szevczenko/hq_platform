@@ -1,0 +1,61 @@
+name: ThingsBoard POSIX
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  posix-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build pkg-config curl python3 openssl docker-compose-plugin
+
+      - name: Configure POSIX build
+        run: |
+          cmake -S . -B build_posix -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_EXAMPLES=ON -DHQ_BUILD_TESTS=ON
+
+      - name: Build unit and integration targets
+        run: |
+          cmake --build build_posix --target tb_tests tb_reconnect_integration_tests tb_tls_integration_tests thingboard_firmware_update_demo -j
+
+      - name: Run ThingsBoard unit tests
+        run: |
+          ./build_posix/tests/tb_tests
+
+      - name: Run reconnect integration test
+        run: |
+          TB_IT_BUILD_DIR=$GITHUB_WORKSPACE/build_posix bash scripts/thingboard_reconnect_integration_test.sh
+
+      - name: Run TLS integration test
+        run: |
+          TB_TLS_IT_BUILD_DIR=$GITHUB_WORKSPACE/build_posix bash scripts/thingboard_tls_integration_test.sh
+
+      - name: Run firmware update integration test
+        env:
+          TB_FW_START_STACK: "1"
+          TB_FW_RUN_SECONDS: "20"
+          TB_FW_BUILD_DIR: build_posix
+          TB_USERNAME: tenant@thingsboard.org
+          TB_PASSWORD: tenant
+        run: |
+          bash scripts/thingboard_firmware_update_test.sh
+
+      - name: Upload integration artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thingsboard-posix-artifacts
+          path: |
+            build_posix
+            scripts/output

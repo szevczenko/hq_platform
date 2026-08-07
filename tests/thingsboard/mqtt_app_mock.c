@@ -25,17 +25,98 @@ mqtt_connection_policy_t mock_connection_policy = {
     .reconnect_max_delay_ms = 300000,
     .reconnect_exponential_backoff = false,
 };
+int mock_suback_count = 0;
+int mock_puback_count = 0;
+int mock_subscription_replay_count = 0;
 
 static mqtt_connect_callback_t s_connect_cb = NULL;
 static mqtt_disconnect_callback_t s_disconnect_cb = NULL;
 static mqtt_connect_failure_callback_t s_connect_failure_cb = NULL;
 
 #define MOCK_MAX_SUBS 16
+#define MOCK_MAX_EVENTS 32
 static struct {
     char topic[MOCK_MAX_TOPIC_LEN];
     mqtt_message_callback_t callback;
     bool active;
 } s_subscriptions[MOCK_MAX_SUBS];
+
+typedef enum {
+    MOCK_EVENT_NONE = 0,
+    MOCK_EVENT_MESSAGE,
+    MOCK_EVENT_SUBACK,
+    MOCK_EVENT_PUBACK,
+} mock_event_type_t;
+
+static struct {
+    mock_event_type_t type;
+    bool active;
+    uint32_t due_ms;
+    char topic[MOCK_MAX_TOPIC_LEN];
+    char payload[MOCK_MAX_MSG_LEN];
+    size_t payload_len;
+} s_events[MOCK_MAX_EVENTS];
+
+static bool s_auto_suback_enabled = false;
+static bool s_auto_puback_enabled = false;
+static uint32_t s_auto_suback_delay_ms = 0;
+static uint32_t s_auto_puback_delay_ms = 0;
+static bool s_replay_subscriptions_on_connect = false;
+static uint32_t s_mock_time_ms = 0;
+static bool s_has_connected_once = false;
+
+static void schedule_event(mock_event_type_t type, const char *topic,
+                           const char *payload, size_t payload_len,
+                           uint32_t delay_ms)
+{
+    for (int i = 0; i < MOCK_MAX_EVENTS; i++) {
+        if (s_events[i].active) {
+            continue;
+        }
+
+        s_events[i].type = type;
+        s_events[i].active = true;
+        s_events[i].due_ms = s_mock_time_ms + delay_ms;
+        s_events[i].payload_len = payload_len;
+        s_events[i].topic[0] = '\0';
+        s_events[i].payload[0] = '\0';
+
+        if (topic != NULL) {
+            strncpy(s_events[i].topic, topic, sizeof(s_events[i].topic) - 1);
+            s_events[i].topic[sizeof(s_events[i].topic) - 1] = '\0';
+        }
+        if (payload != NULL && payload_len > 0) {
+            size_t copy_len = payload_len < sizeof(s_events[i].payload) - 1 ?
+                payload_len : sizeof(s_events[i].payload) - 1;
+            memcpy(s_events[i].payload, payload, copy_len);
+            s_events[i].payload[copy_len] = '\0';
+            s_events[i].payload_len = copy_len;
+        }
+        return;
+    }
+}
+
+static void replay_subscriptions_if_enabled(void)
+{
+    if (!s_replay_subscriptions_on_connect) {
+        return;
+    }
+
+    for (int i = 0; i < MOCK_MAX_SUBS; i++) {
+        if (!s_subscriptions[i].active) {
+            continue;
+        }
+        if (mock_subscribe_count < MOCK_MAX_PUBLISHES) {
+            strncpy(mock_subscribes[mock_subscribe_count].topic,
+                    s_subscriptions[i].topic, MOCK_MAX_TOPIC_LEN - 1);
+            mock_subscribes[mock_subscribe_count]
+            .topic[MOCK_MAX_TOPIC_LEN - 1] = '\0';
+            mock_subscribes[mock_subscribe_count].qos = 0;
+            mock_subscribe_count++;
+            mock_subscription_replay_count++;
+        }
+    }
+}
 
 void mqtt_app_mock_reset(void)
 {
@@ -43,12 +124,23 @@ void mqtt_app_mock_reset(void)
     mock_subscribe_count = 0;
     mock_connected = false;
     mock_deinit_count = 0;
+    mock_suback_count = 0;
+    mock_puback_count = 0;
+    mock_subscription_replay_count = 0;
     s_connect_cb = NULL;
     s_disconnect_cb = NULL;
     s_connect_failure_cb = NULL;
+    s_auto_suback_enabled = false;
+    s_auto_puback_enabled = false;
+    s_auto_suback_delay_ms = 0;
+    s_auto_puback_delay_ms = 0;
+    s_replay_subscriptions_on_connect = false;
+    s_mock_time_ms = 0;
+    s_has_connected_once = false;
     memset(mock_publishes, 0, sizeof(mock_publishes));
     memset(mock_subscribes, 0, sizeof(mock_subscribes));
     memset(s_subscriptions, 0, sizeof(s_subscriptions));
+    memset(s_events, 0, sizeof(s_events));
 }
 
 void mqtt_app_mock_deliver_message(const char *topic, const char *payload,
@@ -97,6 +189,7 @@ void mqtt_app_mock_deliver_message(const char *topic, const char *payload,
 void mqtt_app_init(void)
 {
     mock_connected = true;
+    s_has_connected_once = true;
     if (s_connect_cb) {
         s_connect_cb();
     }
@@ -123,8 +216,15 @@ bool mqtt_app_post_data(const char *topic, const char *message, int qos)
 
     mock_publish_record_t *rec = &mock_publishes[mock_publish_count++];
     strncpy(rec->topic, topic, MOCK_MAX_TOPIC_LEN - 1);
+    rec->topic[MOCK_MAX_TOPIC_LEN - 1] = '\0';
     strncpy(rec->message, message, MOCK_MAX_MSG_LEN - 1);
+    rec->message[MOCK_MAX_MSG_LEN - 1] = '\0';
     rec->qos = qos;
+
+    if (s_auto_puback_enabled) {
+        schedule_event(MOCK_EVENT_PUBACK, NULL, NULL, 0,
+                       s_auto_puback_delay_ms);
+    }
     return true;
 }
 
@@ -141,14 +241,22 @@ bool mqtt_app_subscribe(const char *topic, int qos,
     for (int i = 0; i < MOCK_MAX_SUBS; i++) {
         if (!s_subscriptions[i].active) {
             strncpy(s_subscriptions[i].topic, topic, MOCK_MAX_TOPIC_LEN - 1);
+            s_subscriptions[i].topic[MOCK_MAX_TOPIC_LEN - 1] = '\0';
             s_subscriptions[i].callback = callback;
             s_subscriptions[i].active = true;
 
             if (mock_subscribe_count < MOCK_MAX_PUBLISHES) {
                 strncpy(mock_subscribes[mock_subscribe_count].topic, topic,
                         MOCK_MAX_TOPIC_LEN - 1);
+                mock_subscribes[mock_subscribe_count]
+                    .topic[MOCK_MAX_TOPIC_LEN - 1] = '\0';
                 mock_subscribes[mock_subscribe_count].qos = qos;
                 mock_subscribe_count++;
+            }
+
+            if (s_auto_suback_enabled) {
+                schedule_event(MOCK_EVENT_SUBACK, NULL, NULL, 0,
+                               s_auto_suback_delay_ms);
             }
             return true;
         }
@@ -193,9 +301,14 @@ void mqtt_app_set_connection_policy(const mqtt_connection_policy_t *policy)
 
 void mqtt_app_mock_simulate_connect(void)
 {
+    bool replay = s_has_connected_once && !mock_connected;
     mock_connected = true;
+    s_has_connected_once = true;
     if (s_connect_cb) {
         s_connect_cb();
+    }
+    if (replay) {
+        replay_subscriptions_if_enabled();
     }
 }
 
@@ -224,12 +337,99 @@ void mqtt_app_mock_simulate_connect_failure(mqtt_connect_failure_reason_t reason
     }
 }
 
+void mqtt_app_mock_schedule_message(const char *topic, const char *payload,
+                                    size_t payload_len, uint32_t delay_ms)
+{
+    schedule_event(MOCK_EVENT_MESSAGE, topic, payload, payload_len, delay_ms);
+}
+
+void mqtt_app_mock_advance_time_ms(uint32_t elapsed_ms)
+{
+    s_mock_time_ms += elapsed_ms;
+
+    bool progressed;
+    do {
+        progressed = false;
+        for (int i = 0; i < MOCK_MAX_EVENTS; i++) {
+            if (!s_events[i].active || s_events[i].due_ms > s_mock_time_ms) {
+                continue;
+            }
+
+            mock_event_type_t type = s_events[i].type;
+            char topic[MOCK_MAX_TOPIC_LEN];
+            char payload[MOCK_MAX_MSG_LEN];
+            size_t payload_len = s_events[i].payload_len;
+            strncpy(topic, s_events[i].topic, sizeof(topic) - 1);
+            topic[sizeof(topic) - 1] = '\0';
+            strncpy(payload, s_events[i].payload, sizeof(payload) - 1);
+            payload[sizeof(payload) - 1] = '\0';
+
+            memset(&s_events[i], 0, sizeof(s_events[i]));
+            progressed = true;
+
+            switch (type) {
+            case MOCK_EVENT_MESSAGE:
+                mqtt_app_mock_deliver_message(topic, payload, payload_len);
+                break;
+            case MOCK_EVENT_SUBACK:
+                mock_suback_count++;
+                break;
+            case MOCK_EVENT_PUBACK:
+                mock_puback_count++;
+                break;
+            default:
+                break;
+            }
+        }
+    } while (progressed);
+}
+
+void mqtt_app_mock_set_auto_suback(bool enabled, uint32_t delay_ms)
+{
+    s_auto_suback_enabled = enabled;
+    s_auto_suback_delay_ms = delay_ms;
+}
+
+void mqtt_app_mock_set_auto_puback(bool enabled, uint32_t delay_ms)
+{
+    s_auto_puback_enabled = enabled;
+    s_auto_puback_delay_ms = delay_ms;
+}
+
+void mqtt_app_mock_set_replay_subscriptions_on_connect(bool enabled)
+{
+    s_replay_subscriptions_on_connect = enabled;
+}
+
 /* --- mqtt_config.h mock implementation --- */
 
 static char s_cfg_address[256] = {0};
 static char s_cfg_username[128] = {0};
 static char s_cfg_password[128] = {0};
 static char s_cfg_client_id[128] = {0};
+static bool s_cfg_ssl = false;
+static bool s_cfg_skip_verify = false;
+typedef struct {
+    mqtt_cert_source_t source;
+    char value[512];
+} mock_cert_cfg_t;
+static mock_cert_cfg_t s_cfg_cert = {0};
+static mock_cert_cfg_t s_cfg_client_cert = {0};
+static mock_cert_cfg_t s_cfg_client_key = {0};
+
+static mock_cert_cfg_t *get_cert_cfg(mqtt_config_value_t key)
+{
+    switch (key) {
+    case MQTT_CONFIG_VALUE_CERT:
+        return &s_cfg_cert;
+    case MQTT_CONFIG_VALUE_CLIENT_CERT:
+        return &s_cfg_client_cert;
+    case MQTT_CONFIG_VALUE_CLIENT_KEY:
+        return &s_cfg_client_key;
+    default:
+        return NULL;
+    }
+}
 
 void mqtt_config_init(void)
 {
@@ -237,6 +437,11 @@ void mqtt_config_init(void)
     memset(s_cfg_username, 0, sizeof(s_cfg_username));
     memset(s_cfg_password, 0, sizeof(s_cfg_password));
     memset(s_cfg_client_id, 0, sizeof(s_cfg_client_id));
+    s_cfg_ssl = false;
+    s_cfg_skip_verify = false;
+    memset(&s_cfg_cert, 0, sizeof(s_cfg_cert));
+    memset(&s_cfg_client_cert, 0, sizeof(s_cfg_client_cert));
+    memset(&s_cfg_client_key, 0, sizeof(s_cfg_client_key));
 }
 
 bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
@@ -244,15 +449,19 @@ bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
     switch (key) {
     case MQTT_CONFIG_VALUE_ADDRESS:
         strncpy(s_cfg_address, string, sizeof(s_cfg_address) - 1);
+        s_cfg_address[sizeof(s_cfg_address) - 1] = '\0';
         return true;
     case MQTT_CONFIG_VALUE_USERNAME:
         strncpy(s_cfg_username, string, sizeof(s_cfg_username) - 1);
+        s_cfg_username[sizeof(s_cfg_username) - 1] = '\0';
         return true;
     case MQTT_CONFIG_VALUE_PASSWORD:
         strncpy(s_cfg_password, string, sizeof(s_cfg_password) - 1);
+        s_cfg_password[sizeof(s_cfg_password) - 1] = '\0';
         return true;
     case MQTT_CONFIG_VALUE_CLIENT_ID:
         strncpy(s_cfg_client_id, string, sizeof(s_cfg_client_id) - 1);
+        s_cfg_client_id[sizeof(s_cfg_client_id) - 1] = '\0';
         return true;
     default:
         return false;
@@ -261,25 +470,51 @@ bool mqtt_config_set_string(const char *string, mqtt_config_value_t key)
 
 bool mqtt_config_set_bool(bool value, mqtt_config_value_t key)
 {
-    (void)value;
-    (void)key;
-    return true;
+    switch (key) {
+    case MQTT_CONFIG_VALUE_SSL:
+        s_cfg_ssl = value;
+        return true;
+    case MQTT_CONFIG_VALUE_SKIP_VERIFY:
+        s_cfg_skip_verify = value;
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool mqtt_config_set_cert_source(mqtt_cert_source_t source, const char *value,
                                  mqtt_config_value_t key)
 {
-    (void)source;
-    (void)value;
-    (void)key;
+    mock_cert_cfg_t *cfg = get_cert_cfg(key);
+    if (cfg == NULL) {
+        return false;
+    }
+
+    cfg->source = source;
+    cfg->value[0] = '\0';
+    if (value != NULL) {
+        strncpy(cfg->value, value, sizeof(cfg->value) - 1);
+        cfg->value[sizeof(cfg->value) - 1] = '\0';
+    }
     return true;
 }
 
 bool mqtt_config_get_bool(bool *value, mqtt_config_value_t key)
 {
-    (void)value;
-    (void)key;
-    return false;
+    if (value == NULL) {
+        return false;
+    }
+
+    switch (key) {
+    case MQTT_CONFIG_VALUE_SSL:
+        *value = s_cfg_ssl;
+        return true;
+    case MQTT_CONFIG_VALUE_SKIP_VERIFY:
+        *value = s_cfg_skip_verify;
+        return true;
+    default:
+        return false;
+    }
 }
 
 const char *mqtt_config_get_string(mqtt_config_value_t key)
@@ -300,17 +535,28 @@ const char *mqtt_config_get_string(mqtt_config_value_t key)
 
 const char *mqtt_config_get_cert(mqtt_config_value_t key)
 {
-    (void)key;
-    return "";
+    mock_cert_cfg_t *cfg = get_cert_cfg(key);
+    if (cfg == NULL) {
+        return "";
+    }
+    return cfg->value;
 }
 
 bool mqtt_config_get_cert_source(mqtt_cert_source_t *source, const char **value,
                                  mqtt_config_value_t key)
 {
-    (void)source;
-    (void)value;
-    (void)key;
-    return false;
+    mock_cert_cfg_t *cfg = get_cert_cfg(key);
+    if (cfg == NULL) {
+        return false;
+    }
+
+    if (source != NULL) {
+        *source = cfg->source;
+    }
+    if (value != NULL) {
+        *value = cfg->value;
+    }
+    return true;
 }
 
 bool mqtt_config_save(void)

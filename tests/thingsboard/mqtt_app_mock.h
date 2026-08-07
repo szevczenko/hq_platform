@@ -38,6 +38,9 @@ extern int mock_subscribe_count;
 extern bool mock_connected;
 extern int mock_deinit_count;
 extern mqtt_connection_policy_t mock_connection_policy;
+extern int mock_suback_count;
+extern int mock_puback_count;
+extern int mock_subscription_replay_count;
 
 /* Reset all mock state */
 void mqtt_app_mock_reset(void);
@@ -51,5 +54,12 @@ void mqtt_app_mock_simulate_connect(void);
 void mqtt_app_mock_simulate_remote_disconnect(void);
 void mqtt_app_mock_simulate_error_disconnect(void);
 void mqtt_app_mock_simulate_connect_failure(mqtt_connect_failure_reason_t reason);
+
+void mqtt_app_mock_schedule_message(const char *topic, const char *payload,
+                    size_t payload_len, uint32_t delay_ms);
+void mqtt_app_mock_advance_time_ms(uint32_t elapsed_ms);
+void mqtt_app_mock_set_auto_suback(bool enabled, uint32_t delay_ms);
+void mqtt_app_mock_set_auto_puback(bool enabled, uint32_t delay_ms);
+void mqtt_app_mock_set_replay_subscriptions_on_connect(bool enabled);
 
 #endif /* MQTT_APP_MOCK_H */
