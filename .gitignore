@@ -18,3 +18,5 @@ cert/tls_it/
 cert/*.csr
 cert/*.srl
 cert/*.ext
+
+logs/

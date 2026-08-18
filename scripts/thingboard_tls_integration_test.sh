@@ -122,7 +122,10 @@ EOF
       -CAkey "$CERT_DIR/ca_good.key" -CAcreateserial -out "$CERT_DIR/client.crt" \
       -days 825 -sha256 -extfile "$CERT_DIR/client.ext" >/dev/null 2>&1
 
-    chmod 600 "$CERT_DIR"/*.key
+    # chmod must leave the docker-mounted key files readable by the mosquitto
+    # container user. 0600 (owner-only) files on the host cannot be read by the
+    # container's `mosquitto` uid, so the broker fails to start.
+    chmod 644 "$CERT_DIR"/*.key
 }
 
 write_mosquitto_configs() {

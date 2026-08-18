@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "cJSON.h"
+#include "unity.h"
 #include "mqtt_app_mock.h"
 #include "mqtt_config.h"
 #include "osal_ota.h"
@@ -22,27 +23,6 @@
 #include "tb_telemetry.h"
 
 #define FW_SHA256_ABCDEFGH "9ac2197d9258257b1ae8463e4214e4cd0a578bc1517f2415928b91be4283fc48"
-
-extern int tests_run;
-extern int tests_passed;
-extern int tests_failed;
-
-#define TEST_ASSERT(condition, message)                                       \
-	do {                                                                  \
-		tests_run++;                                                  \
-		if (condition) {                                              \
-			tests_passed++;                                       \
-			printf("  [PASS] %s\n", message);                     \
-		} else {                                                      \
-			tests_failed++;                                       \
-			printf("  [FAIL] %s (line %d)\n", message, __LINE__); \
-		}                                                             \
-	} while (0)
-
-#define TEST_START(name)                                                  \
-	printf("\n--------------------------------------------------\n"); \
-	printf("TEST: %s\n", name);                                       \
-	printf("--------------------------------------------------\n")
 
 tb_client_t *create_test_client(void);
 void destroy_test_client(tb_client_t *client);

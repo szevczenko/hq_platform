@@ -6,27 +6,27 @@
 
 #include <stdio.h>
 
-int wifi_config_tests_run( void );
-int wifi_utils_tests_run( void );
-int wifi_mgmt_tests_run( void );
+#include "unity.h"
+
+void wifi_config_tests_run( void );
+void wifi_utils_tests_run( void );
+void wifi_mgmt_tests_run( void );
+
+void setUp( void )
+{
+}
+
+void tearDown( void )
+{
+}
 
 int main( void )
 {
-  int failed_total = 0;
+  UNITY_BEGIN();
 
-  printf( "\n==================================================\n" );
-  printf( "          Wi-Fi Aggregated Test Run               \n" );
-  printf( "==================================================\n\n" );
+  wifi_config_tests_run();
+  wifi_utils_tests_run();
+  wifi_mgmt_tests_run();
 
-  failed_total += wifi_config_tests_run();
-  failed_total += wifi_utils_tests_run();
-  failed_total += wifi_mgmt_tests_run();
-
-  printf( "\n==================================================\n" );
-  printf( "              AGGREGATED SUMMARY                  \n" );
-  printf( "==================================================\n" );
-  printf( "  Total failed tests: %d\n", failed_total );
-  printf( "==================================================\n" );
-
-  return ( failed_total == 0 ) ? 0 : 1;
+  return UNITY_END();
 }

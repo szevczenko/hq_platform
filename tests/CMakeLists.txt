@@ -26,6 +26,7 @@ if(NOT ESP_PLATFORM)
 
   target_link_libraries(osal_tests
     hq_osal
+    unity
     pthread
   )
 
@@ -66,6 +67,7 @@ if(NOT ESP_PLATFORM)
   target_link_libraries(wifi_tests
     hq_osal
     hq_cjson
+    unity
     pthread
   )
 
@@ -83,6 +85,7 @@ if(NOT ESP_PLATFORM)
 
   target_link_libraries(mqtt_tests
     hq_mongoose
+    unity
     pthread
   )
 
@@ -100,6 +103,7 @@ if(NOT ESP_PLATFORM)
 
   target_link_libraries(mqtt_functional_tests
     hq_mongoose
+    unity
     pthread
   )
 
@@ -145,6 +149,7 @@ if(NOT ESP_PLATFORM)
   target_link_libraries(tb_tests
     hq_osal
     hq_cjson
+    unity
     pthread
   )
 
@@ -181,6 +186,7 @@ if(NOT ESP_PLATFORM)
     hq_osal
     hq_mongoose
     hq_cjson
+    unity
     pthread
   )
 
@@ -217,6 +223,7 @@ if(NOT ESP_PLATFORM)
     hq_osal
     hq_mongoose
     hq_cjson
+    unity
     pthread
   )
 

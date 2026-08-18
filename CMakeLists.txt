@@ -41,6 +41,15 @@ endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/modules.cmake)
 
+if(HQ_BUILD_TESTS AND NOT ESP_PLATFORM)
+  include(FetchContent)
+  FetchContent_Declare(unity
+    GIT_REPOSITORY https://github.com/ThrowTheSwitch/Unity.git
+    GIT_TAG v2.6.0
+  )
+  FetchContent_MakeAvailable(unity)
+endif()
+
 if(NOT ESP_PLATFORM)
   if(CONFIG_HQ_PLATFORM_POSIX)
     include(cmake/posix.cmake)

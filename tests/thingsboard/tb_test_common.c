@@ -1,9 +1,5 @@
 #include "tb_test_common.h"
 
-int tests_run = 0;
-int tests_passed = 0;
-int tests_failed = 0;
-
 tb_client_t *create_test_client(void)
 {
 	mqtt_app_mock_reset();
