@@ -51,7 +51,7 @@ set(CMD_ALL_SOURCES
 )
 
 if(ESP_PLATFORM)
-  set(CMD_REQUIRES osal wifi mongoose)
+  set(CMD_REQUIRES osal wifi mongoose thingsboard)
   if(CONFIG_CMD_ESP_OUTPUT_UART)
     list(APPEND CMD_REQUIRES driver)
   endif()

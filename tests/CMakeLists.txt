@@ -26,8 +26,12 @@ if(NOT ESP_PLATFORM)
 
   target_link_libraries(osal_tests
     hq_osal
+    unity
     pthread
   )
+
+  add_test(NAME osal_tests COMMAND osal_tests)
+  set_tests_properties(osal_tests PROPERTIES LABELS "unit;osal")
 
   message(STATUS "Tests: Building unified test application (osal_tests)")
 
@@ -66,8 +70,12 @@ if(NOT ESP_PLATFORM)
   target_link_libraries(wifi_tests
     hq_osal
     hq_cjson
+    unity
     pthread
   )
+
+  add_test(NAME wifi_tests COMMAND wifi_tests)
+  set_tests_properties(wifi_tests PROPERTIES LABELS "unit;wifi")
 
   message(STATUS "Tests: Building Wi-Fi test application (wifi_tests)")
 
@@ -83,8 +91,12 @@ if(NOT ESP_PLATFORM)
 
   target_link_libraries(mqtt_tests
     hq_mongoose
+    unity
     pthread
   )
+  
+  add_test(NAME mqtt_tests COMMAND mqtt_tests)
+  set_tests_properties(mqtt_tests PROPERTIES LABELS "unit;mqtt")
 
   message(STATUS "Tests: Building MQTT test application (mqtt_tests)")
 
@@ -100,6 +112,7 @@ if(NOT ESP_PLATFORM)
 
   target_link_libraries(mqtt_functional_tests
     hq_mongoose
+    unity
     pthread
   )
 
@@ -145,8 +158,12 @@ if(NOT ESP_PLATFORM)
   target_link_libraries(tb_tests
     hq_osal
     hq_cjson
+    unity
     pthread
   )
+
+  add_test(NAME tb_tests COMMAND tb_tests)
+  set_tests_properties(tb_tests PROPERTIES LABELS "unit;thingsboard")
 
   message(STATUS "Tests: Building ThingsBoard test application (tb_tests)")
 
@@ -181,6 +198,7 @@ if(NOT ESP_PLATFORM)
     hq_osal
     hq_mongoose
     hq_cjson
+    unity
     pthread
   )
 
@@ -217,6 +235,7 @@ if(NOT ESP_PLATFORM)
     hq_osal
     hq_mongoose
     hq_cjson
+    unity
     pthread
   )
 

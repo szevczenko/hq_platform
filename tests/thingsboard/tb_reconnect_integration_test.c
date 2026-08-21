@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "unity.h"
+
 #include "mongoose_process.h"
 #include "mqtt_config.h"
 #include "osal_task.h"
@@ -22,27 +24,6 @@
 #define TEST_WAIT_SHORT_MS 3000U
 #define TEST_WAIT_CONNECT_MS 45000U
 #define TEST_WAIT_CALLBACK_MS 8000U
-
-#define TEST_ASSERT(condition, message)                                            \
-	do {                                                                         \
-		tests_run++;                                                           \
-		if (condition) {                                                       \
-			tests_passed++;                                                  \
-			printf("  [PASS] %s\n", message);                               \
-		} else {                                                               \
-			tests_failed++;                                                  \
-			printf("  [FAIL] %s (line %d)\n", message, __LINE__);          \
-		}                                                                      \
-	} while (0)
-
-#define TEST_START(name)                                                           \
-	printf("\n--------------------------------------------------\n");        \
-	printf("TEST: %s\n", name);                                               \
-	printf("--------------------------------------------------\n")
-
-static int tests_run = 0;
-static int tests_passed = 0;
-static int tests_failed = 0;
 
 static tb_client_t *g_client = NULL;
 static volatile int g_connect_count = 0;
@@ -67,6 +48,8 @@ static char g_client_rpc_last_payload[512] = { 0 };
 static const char *g_broker_stop_cmd = NULL;
 static const char *g_broker_start_cmd = NULL;
 
+static volatile bool g_setup_ready = false;
+
 static void on_connect(tb_client_t *client, void *user_data)
 {
 	(void)client;
@@ -75,8 +58,8 @@ static void on_connect(tb_client_t *client, void *user_data)
 }
 
 static void on_disconnect(tb_client_t *client,
-				 tb_client_disconnect_reason_t reason,
-				 void *user_data)
+			  tb_client_disconnect_reason_t reason,
+			  void *user_data)
 {
 	(void)client;
 	(void)reason;
@@ -207,57 +190,55 @@ static void test_attribute_request_reconnect(void)
 	static const char *keys[] = { "firmware_version" };
 	char response_topic[128];
 
-	TEST_START("Attribute Request Reconnect");
-
 	g_attr_null_count = 0;
 	g_attr_cancelled_count = 0;
 	g_attr_data_count = 0;
 	g_attr_last_req_id = 0;
 	memset(g_attr_last_payload, 0, sizeof(g_attr_last_payload));
 
-	TEST_ASSERT(tb_client_subscribe(g_client,
-				"v1/devices/me/attributes/request/+",
-				observe_attr_request_topic,
-				TEST_WAIT_SHORT_MS) == 0,
-		    "observer subscribed to attribute request topic");
+	TEST_ASSERT_TRUE_MESSAGE(tb_client_subscribe(g_client,
+					"v1/devices/me/attributes/request/+",
+					observe_attr_request_topic,
+					TEST_WAIT_SHORT_MS) == 0,
+			    "observer subscribed to attribute request topic");
 
-	TEST_ASSERT(tb_attributes_request_client(g_client, keys, 1,
-					 on_attr_response, NULL,
-					 TEST_WAIT_SHORT_MS) == 0,
-		    "attribute request succeeds before broker drop");
-	TEST_ASSERT(wait_until(predicate_attr_request_seen, TEST_WAIT_CALLBACK_MS),
-		    "attribute request id captured from broker traffic");
+	TEST_ASSERT_TRUE_MESSAGE(tb_attributes_request_client(g_client, keys, 1,
+						 on_attr_response, NULL,
+						 TEST_WAIT_SHORT_MS) == 0,
+			    "attribute request succeeds before broker drop");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_attr_request_seen, TEST_WAIT_CALLBACK_MS),
+			    "attribute request id captured from broker traffic");
 
-	TEST_ASSERT(bounce_broker(), "broker bounced successfully");
-	TEST_ASSERT(wait_until(predicate_disconnected, TEST_WAIT_CONNECT_MS),
-		    "client observed disconnect after broker stop");
-	TEST_ASSERT(wait_until(predicate_connected, TEST_WAIT_CONNECT_MS),
-		    "client reconnected after broker restart");
-	TEST_ASSERT(g_attr_null_count >= 1,
-		    "pending attribute callback failed on disconnect");
-	TEST_ASSERT(g_attr_cancelled_count >= 1,
-		    "pending attribute callback reported cancelled status");
+	TEST_ASSERT_TRUE_MESSAGE(bounce_broker(), "broker bounced successfully");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_disconnected, TEST_WAIT_CONNECT_MS),
+			    "client observed disconnect after broker stop");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_connected, TEST_WAIT_CONNECT_MS),
+			    "client reconnected after broker restart");
+	TEST_ASSERT_TRUE_MESSAGE(g_attr_null_count >= 1,
+			    "pending attribute callback failed on disconnect");
+	TEST_ASSERT_TRUE_MESSAGE(g_attr_cancelled_count >= 1,
+			    "pending attribute callback reported cancelled status");
 
 	g_attr_last_req_id = 0;
-	TEST_ASSERT(tb_attributes_request_client(g_client, keys, 1,
-					 on_attr_response, NULL,
-					 TEST_WAIT_SHORT_MS) == 0,
-		    "attribute request succeeds after reconnect");
-	TEST_ASSERT(wait_until(predicate_attr_request_seen, TEST_WAIT_CALLBACK_MS),
-		    "attribute request id captured after reconnect");
-	TEST_ASSERT(g_attr_last_req_id > 0,
-		    "attribute request id captured after reconnect");
+	TEST_ASSERT_TRUE_MESSAGE(tb_attributes_request_client(g_client, keys, 1,
+							 on_attr_response, NULL,
+							 TEST_WAIT_SHORT_MS) == 0,
+			    "attribute request succeeds after reconnect");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_attr_request_seen, TEST_WAIT_CALLBACK_MS),
+			    "attribute request id captured after reconnect");
+	TEST_ASSERT_TRUE_MESSAGE(g_attr_last_req_id > 0,
+			    "attribute request id captured after reconnect");
 
 	snprintf(response_topic, sizeof(response_topic),
 		 "v1/devices/me/attributes/response/%u", g_attr_last_req_id);
-	TEST_ASSERT(tb_client_publish(g_client, response_topic,
-			      "{\"client\":{\"firmware_version\":\"9.9.9\"}}") == 0,
-		    "attribute response published via broker");
+	TEST_ASSERT_TRUE_MESSAGE(tb_client_publish(g_client, response_topic,
+				      "{\"client\":{\"firmware_version\":\"9.9.9\"}}") == 0,
+			    "attribute response published via broker");
 
-	TEST_ASSERT(wait_until(predicate_attr_data_seen, TEST_WAIT_CALLBACK_MS),
-		    "attribute callback received data after reconnect");
-	TEST_ASSERT(strstr(g_attr_last_payload, "firmware_version") != NULL,
-		    "attribute callback payload contains expected key");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_attr_data_seen, TEST_WAIT_CALLBACK_MS),
+			    "attribute callback received data after reconnect");
+	TEST_ASSERT_TRUE_MESSAGE(strstr(g_attr_last_payload, "firmware_version") != NULL,
+			    "attribute callback payload contains expected key");
 }
 
 static bool predicate_attr_data_seen(void)
@@ -291,8 +272,6 @@ static void test_shared_attr_rpc_and_fw_reconnect(void)
 	uint32_t rpc_probe_req_id;
 	uint32_t expected_rpc_req_id;
 
-	TEST_START("Shared Attributes, RPC, and Firmware Reconnect");
-
 	g_shared_count = 0;
 	g_server_rpc_count = 0;
 	g_last_server_rpc_id = 0;
@@ -301,51 +280,65 @@ static void test_shared_attr_rpc_and_fw_reconnect(void)
 	g_client_rpc_data_count = 0;
 	memset(g_client_rpc_last_payload, 0, sizeof(g_client_rpc_last_payload));
 
-	TEST_ASSERT(tb_attributes_subscribe(g_client, on_shared_attr, NULL) == 0,
-		    "shared attribute subscription succeeds");
-	TEST_ASSERT(tb_rpc_subscribe_server(g_client, on_server_rpc, NULL) == 0,
-		    "server RPC subscription succeeds");
+	TEST_ASSERT_TRUE_MESSAGE(tb_attributes_subscribe(g_client, on_shared_attr, NULL) == 0,
+			    "shared attribute subscription succeeds");
+	TEST_ASSERT_TRUE_MESSAGE(tb_rpc_subscribe_server(g_client, on_server_rpc, NULL) == 0,
+			    "server RPC subscription succeeds");
 
-	TEST_ASSERT(bounce_broker(), "broker bounced during active subscriptions");
-	TEST_ASSERT(wait_until(predicate_disconnected, TEST_WAIT_CONNECT_MS),
-		    "disconnect observed after second broker stop");
-	TEST_ASSERT(wait_until(predicate_connected, TEST_WAIT_CONNECT_MS),
-		    "reconnect observed after second broker restart");
+	TEST_ASSERT_TRUE_MESSAGE(bounce_broker(), "broker bounced during active subscriptions");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_disconnected, TEST_WAIT_CONNECT_MS),
+			    "disconnect observed after second broker stop");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_connected, TEST_WAIT_CONNECT_MS),
+			    "reconnect observed after second broker restart");
 
-	TEST_ASSERT(tb_client_publish(g_client, "v1/devices/me/attributes",
-			      "{\"threshold\":42}") == 0,
-		    "shared attribute update published");
-	TEST_ASSERT(wait_until(predicate_shared_seen, TEST_WAIT_CALLBACK_MS),
-		    "shared attribute callback restored after reconnect");
-	TEST_ASSERT(g_shared_count == 1,
-		    "shared attribute callback invoked exactly once");
+	TEST_ASSERT_TRUE_MESSAGE(tb_client_publish(g_client, "v1/devices/me/attributes",
+				      "{\"threshold\":42}") == 0,
+			    "shared attribute update published");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_shared_seen, TEST_WAIT_CALLBACK_MS),
+			    "shared attribute callback restored after reconnect");
+	TEST_ASSERT_TRUE_MESSAGE(g_shared_count == 1,
+			    "shared attribute callback invoked exactly once");
 
-	TEST_ASSERT(tb_client_publish(g_client, "v1/devices/me/rpc/request/77",
-			      "{\"method\":\"setLed\",\"params\":{\"value\":1}}") == 0,
-		    "server RPC request published");
-	TEST_ASSERT(wait_until(predicate_server_rpc_seen, TEST_WAIT_CALLBACK_MS),
-		    "server RPC callback restored after reconnect");
-	TEST_ASSERT(g_last_server_rpc_id == 77,
-		    "server RPC request id propagated");
+	TEST_ASSERT_TRUE_MESSAGE(tb_client_publish(g_client, "v1/devices/me/rpc/request/77",
+				      "{\"method\":\"setLed\",\"params\":{\"value\":1}}") == 0,
+			    "server RPC request published");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_server_rpc_seen, TEST_WAIT_CALLBACK_MS),
+			    "server RPC callback restored after reconnect");
+	TEST_ASSERT_TRUE_MESSAGE(g_last_server_rpc_id == 77,
+			    "server RPC request id propagated");
 
-	TEST_ASSERT(tb_rpc_request(g_client, "getTime", NULL, on_client_rpc,
-			   NULL, TEST_WAIT_SHORT_MS) == 0,
-		    "client RPC request succeeds after reconnect");
-	TEST_ASSERT(g_client_rpc_null_count == 0,
-		    "no spurious client RPC timeout on healthy reconnect path");
+	TEST_ASSERT_TRUE_MESSAGE(tb_rpc_request(g_client, "getTime", NULL, on_client_rpc,
+				   NULL, TEST_WAIT_SHORT_MS) == 0,
+			    "client RPC request succeeds after reconnect");
+	TEST_ASSERT_TRUE_MESSAGE(g_client_rpc_null_count == 0,
+			    "no spurious client RPC timeout on healthy reconnect path");
 
 	rpc_probe_req_id = tb_client_get_next_request_id(g_client);
 	expected_rpc_req_id = rpc_probe_req_id - 1;
 
 	snprintf(client_rpc_resp_topic, sizeof(client_rpc_resp_topic),
 		 "v1/devices/me/rpc/response/%u", expected_rpc_req_id);
-	TEST_ASSERT(tb_client_publish(g_client, client_rpc_resp_topic,
-			      "{\"time\":1700000099}") == 0,
-		    "client RPC response published");
-	TEST_ASSERT(wait_until(predicate_client_rpc_data_seen, TEST_WAIT_CALLBACK_MS),
-		    "client RPC response callback restored after reconnect");
-	TEST_ASSERT(strstr(g_client_rpc_last_payload, "1700000099") != NULL,
-		    "client RPC payload propagated");
+	TEST_ASSERT_TRUE_MESSAGE(tb_client_publish(g_client, client_rpc_resp_topic,
+				      "{\"time\":1700000099}") == 0,
+			    "client RPC response published");
+	TEST_ASSERT_TRUE_MESSAGE(wait_until(predicate_client_rpc_data_seen, TEST_WAIT_CALLBACK_MS),
+			    "client RPC response callback restored after reconnect");
+	TEST_ASSERT_TRUE_MESSAGE(strstr(g_client_rpc_last_payload, "1700000099") != NULL,
+			    "client RPC payload propagated");
+}
+
+void setUp(void)
+{
+	/* The broker/harness and client are established once from main() before the
+	 * tests are registered. If that prerequisite setup failed, report it here
+	 * through the Unity failure API so each test is flagged as aborted. */
+	if (!g_setup_ready) {
+		TEST_FAIL_MESSAGE("prerequisite setup failed; integration tests aborted");
+	}
+}
+
+void tearDown(void)
+{
 }
 
 int main(void)
@@ -365,6 +358,8 @@ int main(void)
 	printf("==================================================\n");
 	printf("Broker URL: %s\n", mqtt_url);
 
+	UNITY_BEGIN();
+
 	MongooseProcess_Init();
 
 	memset(&cfg, 0, sizeof(cfg));
@@ -377,41 +372,35 @@ int main(void)
 
 	rc = tb_client_init(&g_client, &cfg);
 	if (rc != 0 || g_client == NULL) {
-		printf("[FAIL] tb_client_init failed: %d\n", rc);
-		MongooseProcess_Deinit();
-		return 1;
+		g_client = NULL;
+		g_setup_ready = false;
+	} else {
+		mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD);
+
+		rc = tb_client_connect(g_client);
+		if (rc != 0) {
+			g_setup_ready = false;
+		} else if (!wait_until(predicate_connected, TEST_WAIT_CONNECT_MS)) {
+			g_setup_ready = false;
+		} else {
+			g_setup_ready = true;
+		}
 	}
 
-	mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD);
-
-	rc = tb_client_connect(g_client);
-	if (rc != 0) {
-		printf("[FAIL] tb_client_connect failed: %d\n", rc);
+	/* Drop a partially initialised client so the post-test cleanup stays safe. */
+	if (!g_setup_ready && g_client != NULL) {
 		tb_client_deinit(g_client);
-		MongooseProcess_Deinit();
-		return 1;
+		g_client = NULL;
 	}
 
-	if (!wait_until(predicate_connected, TEST_WAIT_CONNECT_MS)) {
-		printf("[FAIL] connect timeout\n");
+	RUN_TEST(test_attribute_request_reconnect);
+	RUN_TEST(test_shared_attr_rpc_and_fw_reconnect);
+
+	if (g_client != NULL) {
 		tb_client_deinit(g_client);
-		MongooseProcess_Deinit();
-		return 1;
+		g_client = NULL;
 	}
-
-	test_attribute_request_reconnect();
-	test_shared_attr_rpc_and_fw_reconnect();
-
-	printf("\n==================================================\n");
-	printf("                  TEST SUMMARY                    \n");
-	printf("==================================================\n");
-	printf("  Run:    %d\n", tests_run);
-	printf("  Passed: %d\n", tests_passed);
-	printf("  Failed: %d\n", tests_failed);
-	printf("==================================================\n");
-
-	tb_client_deinit(g_client);
 	MongooseProcess_Deinit();
 
-	return (tests_failed == 0) ? 0 : 1;
+	return UNITY_END();
 }

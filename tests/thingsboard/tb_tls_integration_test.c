@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "unity.h"
+
 #include "mongoose_process.h"
 #include "mqtt_config.h"
 #include "osal_file.h"
@@ -29,30 +31,20 @@
 #define TEST_WAIT_STEP_MS 100U
 #define TEST_WAIT_TOTAL_MS 12000U
 
-#define TEST_ASSERT(condition, message)                                            \
-	do {                                                                         \
-		tests_run++;                                                           \
-		if (condition) {                                                       \
-			tests_passed++;                                                  \
-			printf("  [PASS] %s\n", message);                               \
-		} else {                                                               \
-			tests_failed++;                                                  \
-			printf("  [FAIL] %s (line %d)\n", message, __LINE__);          \
-		}                                                                      \
-	} while (0)
-
-#define TEST_START(name)                                                           \
-	printf("\n--------------------------------------------------\n");        \
-	printf("TEST: %s\n", name);                                               \
-	printf("--------------------------------------------------\n")
-
-static int tests_run = 0;
-static int tests_passed = 0;
-static int tests_failed = 0;
-
 static volatile int g_connect_count = 0;
 static volatile int g_disconnect_count = 0;
 static volatile int g_connect_failure_count = 0;
+
+static volatile bool g_setup_ready = false;
+
+static const char *g_url_ok = "mqtts://localhost:8885";
+static const char *g_url_badhost = "mqtts://localhost:8886";
+static char g_ca_good_osal[128] = { 0 };
+static char g_ca_bad_osal[128] = { 0 };
+static char g_client_cert_osal[128] = { 0 };
+static char g_client_key_osal[128] = { 0 };
+static const char *g_client_cert_for_case = "";
+static const char *g_client_key_for_case = "";
 
 static void on_connect(tb_client_t *client, void *user_data)
 {
@@ -62,8 +54,8 @@ static void on_connect(tb_client_t *client, void *user_data)
 }
 
 static void on_disconnect(tb_client_t *client,
-			 tb_client_disconnect_reason_t reason,
-			 void *user_data)
+			  tb_client_disconnect_reason_t reason,
+			  void *user_data)
 {
 	(void)client;
 	(void)reason;
@@ -72,8 +64,8 @@ static void on_disconnect(tb_client_t *client,
 }
 
 static void on_connect_failure(tb_client_t *client,
-			      tb_client_connect_failure_reason_t reason,
-			      void *user_data)
+			       tb_client_connect_failure_reason_t reason,
+			       void *user_data)
 {
 	(void)client;
 	(void)reason;
@@ -173,7 +165,9 @@ static int run_tls_case(const char *name, const char *url, const char *ca_osal_p
 	uint32_t waited = 0;
 	int rc;
 
-	TEST_START(name);
+	printf("\n--------------------------------------------------\n");
+	printf("TEST: %s\n", name);
+	printf("--------------------------------------------------\n");
 	reset_connection_counters();
 
 	memset(&cfg, 0, sizeof(cfg));
@@ -186,36 +180,37 @@ static int run_tls_case(const char *name, const char *url, const char *ca_osal_p
 	cfg.on_connect_failure = on_connect_failure;
 
 	rc = tb_client_init(&client, &cfg);
-	TEST_ASSERT(rc == 0 && client != NULL, "tb_client_init succeeds");
+	TEST_ASSERT_TRUE_MESSAGE(rc == 0 && client != NULL,
+				 "tb_client_init succeeds");
 	if (rc != 0 || client == NULL) {
 		return -1;
 	}
 
-	TEST_ASSERT(mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD),
-		    "password configured");
-	TEST_ASSERT(mqtt_config_set_bool(true, MQTT_CONFIG_VALUE_SSL),
-		    "ssl enabled");
-	TEST_ASSERT(mqtt_config_set_bool(false, MQTT_CONFIG_VALUE_SKIP_VERIFY),
-		    "skip verify disabled");
-	TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
-					ca_osal_path,
-					MQTT_CONFIG_VALUE_CERT),
-		    "CA cert configured");
+	TEST_ASSERT_TRUE_MESSAGE(mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD),
+				 "password configured");
+	TEST_ASSERT_TRUE_MESSAGE(mqtt_config_set_bool(true, MQTT_CONFIG_VALUE_SSL),
+				 "ssl enabled");
+	TEST_ASSERT_TRUE_MESSAGE(mqtt_config_set_bool(false, MQTT_CONFIG_VALUE_SKIP_VERIFY),
+				 "skip verify disabled");
+	TEST_ASSERT_TRUE_MESSAGE(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+						     ca_osal_path,
+						     MQTT_CONFIG_VALUE_CERT),
+				 "CA cert configured");
 
 	if (client_cert_osal_path != NULL && client_key_osal_path != NULL &&
 	    client_cert_osal_path[0] != '\0' && client_key_osal_path[0] != '\0') {
-		TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
-						client_cert_osal_path,
-						MQTT_CONFIG_VALUE_CLIENT_CERT),
-			    "client cert configured");
-		TEST_ASSERT(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
-						client_key_osal_path,
-						MQTT_CONFIG_VALUE_CLIENT_KEY),
-			    "client key configured");
+		TEST_ASSERT_TRUE_MESSAGE(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+							client_cert_osal_path,
+							MQTT_CONFIG_VALUE_CLIENT_CERT),
+					 "client cert configured");
+		TEST_ASSERT_TRUE_MESSAGE(mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+							client_key_osal_path,
+							MQTT_CONFIG_VALUE_CLIENT_KEY),
+					 "client key configured");
 	}
 
 	rc = tb_client_connect(client);
-	TEST_ASSERT(rc == 0, "tb_client_connect requested");
+	TEST_ASSERT_TRUE_MESSAGE(rc == 0, "tb_client_connect requested");
 	if (rc != 0) {
 		tb_client_deinit(client);
 		return -1;
@@ -233,19 +228,102 @@ static int run_tls_case(const char *name, const char *url, const char *ca_osal_p
 	}
 
 	if (expect_success) {
-		TEST_ASSERT(tb_client_is_connected(client),
-			    "TLS connection succeeds with trusted CA");
-		TEST_ASSERT(g_connect_count > 0,
-			    "connect callback called on success");
+		TEST_ASSERT_TRUE_MESSAGE(tb_client_is_connected(client),
+					 "TLS connection succeeds with trusted CA");
+		TEST_ASSERT_TRUE_MESSAGE(g_connect_count > 0,
+					 "connect callback called on success");
 	} else {
-		TEST_ASSERT(!tb_client_is_connected(client),
-			    "TLS connection is not established");
-		TEST_ASSERT(g_connect_failure_count > 0,
-			    "connect failure callback called");
+		TEST_ASSERT_TRUE_MESSAGE(!tb_client_is_connected(client),
+					 "TLS connection is not established");
+		TEST_ASSERT_TRUE_MESSAGE(g_connect_failure_count > 0,
+					 "connect failure callback called");
 	}
 
 	tb_client_deinit(client);
 	return 0;
+}
+
+static void test_tls_trusted_ca_success(void)
+{
+	TEST_ASSERT_EQUAL_INT(0, run_tls_case("TLS Trusted CA Success", g_url_ok,
+					      g_ca_good_osal, g_client_cert_for_case,
+					      g_client_key_for_case, true));
+}
+
+static void test_tls_unknown_ca_failure(void)
+{
+	TEST_ASSERT_EQUAL_INT(0, run_tls_case("TLS Unknown CA Failure", g_url_ok,
+					      g_ca_bad_osal, g_client_cert_for_case,
+					      g_client_key_for_case, false));
+}
+
+static void test_tls_hostname_mismatch_failure(void)
+{
+	TEST_ASSERT_EQUAL_INT(0, run_tls_case("TLS Hostname Mismatch Failure",
+					      g_url_badhost, g_ca_good_osal,
+					      g_client_cert_for_case, g_client_key_for_case,
+					      false));
+}
+
+static bool prepare_prerequisites(const char *ca_good_host, const char *ca_bad_host,
+				  const char *client_cert_host,
+				  const char *client_key_host)
+{
+	if (!setup_fs()) {
+		printf("  [PREREQ] filesystem setup failed\n");
+		return false;
+	}
+
+	if (!make_osal_path(g_ca_good_osal, sizeof(g_ca_good_osal), "ca_good.crt") ||
+	    !make_osal_path(g_ca_bad_osal, sizeof(g_ca_bad_osal), "ca_bad.crt") ||
+	    !make_osal_path(g_client_cert_osal, sizeof(g_client_cert_osal),
+			    "client.crt") ||
+	    !make_osal_path(g_client_key_osal, sizeof(g_client_key_osal),
+			    "client.key")) {
+		printf("setup [PREREQ] failed to build OSAL certificate paths\n");
+		teardown_fs();
+		return false;
+	}
+
+	if (!provision_cert_from_host(ca_good_host, g_ca_good_osal)) {
+		printf("setup [PREREQ] failed to provision trusted CA cert\n");
+		teardown_fs();
+		return false;
+	}
+	if (!provision_cert_from_host(ca_bad_host, g_ca_bad_osal)) {
+		printf("setup [PREREQ] failed to provision unknown CA cert\n");
+		teardown_fs();
+		return false;
+	}
+
+	if (client_cert_host != NULL && client_key_host != NULL &&
+	    client_cert_host[0] != '\0' && client_key_host[0] != '\0') {
+		if (!provision_cert_from_host(client_cert_host, g_client_cert_osal) ||
+		    !provision_cert_from_host(client_key_host, g_client_key_osal)) {
+			printf("setup [PREREQ] failed to provision client cert/key\n");
+			teardown_fs();
+			return false;
+		}
+		g_client_cert_for_case = g_client_cert_osal;
+		g_client_key_for_case = g_client_key_osal;
+	}
+
+	return true;
+}
+
+void setUp(void)
+{
+	/* Filesystem, certificate provisioning and Mongoose lifecycle are
+	 * established once from main() before the tests are registered. If that
+	 * prerequisite setup failed, report it here through the Unity failure API
+	 * so each test is flagged as aborted. */
+	if (!g_setup_ready) {
+		TEST_FAIL_MESSAGE("prerequisite setup failed; TLS integration tests aborted");
+	}
+}
+
+void tearDown(void)
+{
 }
 
 int main(void)
@@ -256,10 +334,6 @@ int main(void)
 	const char *ca_bad_host = getenv("TB_TLS_IT_CA_BAD_HOST_PATH");
 	const char *client_cert_host = getenv("TB_TLS_IT_CLIENT_CERT_HOST_PATH");
 	const char *client_key_host = getenv("TB_TLS_IT_CLIENT_KEY_HOST_PATH");
-	char ca_good_osal[128];
-	char ca_bad_osal[128];
-	char client_cert_osal[128];
-	char client_key_osal[128];
 
 	if (url_ok == NULL || url_ok[0] == '\0') {
 		url_ok = "mqtts://localhost:8885";
@@ -267,79 +341,35 @@ int main(void)
 	if (url_badhost == NULL || url_badhost[0] == '\0') {
 		url_badhost = "mqtts://localhost:8886";
 	}
-	if (ca_good_host == NULL || ca_good_host[0] == '\0' ||
-	    ca_bad_host == NULL || ca_bad_host[0] == '\0') {
-		printf("[FAIL] Missing CA host path environment variables\n");
-		return 1;
-	}
+	g_url_ok = url_ok;
+	g_url_badhost = url_badhost;
 
 	printf("\n==================================================\n");
 	printf("   ThingsBoard TLS Integration Test\n");
 	printf("==================================================\n");
-	printf("Trusted URL: %s\n", url_ok);
-	printf("Mismatch URL: %s\n", url_badhost);
+	printf("Trusted URL: %s\n", g_url_ok);
+	printf("Mismatch URL: %s\n", g_url_badhost);
 
-	if (!setup_fs()) {
-		printf("[FAIL] filesystem setup failed\n");
-		return 1;
-	}
+	UNITY_BEGIN();
 
-	if (!make_osal_path(ca_good_osal, sizeof(ca_good_osal), "ca_good.crt") ||
-	    !make_osal_path(ca_bad_osal, sizeof(ca_bad_osal), "ca_bad.crt") ||
-	    !make_osal_path(client_cert_osal, sizeof(client_cert_osal),
-			    "client.crt") ||
-	    !make_osal_path(client_key_osal, sizeof(client_key_osal),
-			    "client.key")) {
-		printf("[FAIL] failed to build OSAL certificate paths\n");
-		teardown_fs();
-		return 1;
-	}
-
-	if (!provision_cert_from_host(ca_good_host, ca_good_osal)) {
-		printf("[FAIL] failed to provision trusted CA cert\n");
-		teardown_fs();
-		return 1;
-	}
-	if (!provision_cert_from_host(ca_bad_host, ca_bad_osal)) {
-		printf("[FAIL] failed to provision unknown CA cert\n");
-		teardown_fs();
-		return 1;
-	}
-
-	const char *client_cert_for_case = "";
-	const char *client_key_for_case = "";
-	if (client_cert_host != NULL && client_key_host != NULL &&
-	    client_cert_host[0] != '\0' && client_key_host[0] != '\0') {
-		if (!provision_cert_from_host(client_cert_host, client_cert_osal) ||
-		    !provision_cert_from_host(client_key_host, client_key_osal)) {
-			printf("[FAIL] failed to provision client cert/key\n");
-			teardown_fs();
-			return 1;
-		}
-		client_cert_for_case = client_cert_osal;
-		client_key_for_case = client_key_osal;
+	if (ca_good_host == NULL || ca_good_host[0] == '\0' ||
+	    ca_bad_host == NULL || ca_bad_host[0] == '\0') {
+		printf("[PREREQ] Missing CA host path environment variables\n");
+		g_setup_ready = false;
+	} else {
+		g_setup_ready = prepare_prerequisites(ca_good_host, ca_bad_host,
+						      client_cert_host,
+						      client_key_host);
 	}
 
 	MongooseProcess_Init();
 
-	(void)run_tls_case("TLS Trusted CA Success", url_ok, ca_good_osal,
-			  client_cert_for_case, client_key_for_case, true);
-	(void)run_tls_case("TLS Unknown CA Failure", url_ok, ca_bad_osal,
-			  client_cert_for_case, client_key_for_case, false);
-	(void)run_tls_case("TLS Hostname Mismatch Failure", url_badhost,
-			  ca_good_osal, client_cert_for_case,
-			  client_key_for_case, false);
+	RUN_TEST(test_tls_trusted_ca_success);
+	RUN_TEST(test_tls_unknown_ca_failure);
+	RUN_TEST(test_tls_hostname_mismatch_failure);
 
 	MongooseProcess_Deinit();
 	teardown_fs();
 
-	printf("\n==================================================\n");
-	printf("                  TEST SUMMARY                    \n");
-	printf("==================================================\n");
-	printf("  Run:    %d\n", tests_run);
-	printf("  Passed: %d\n", tests_passed);
-	printf("  Failed: %d\n", tests_failed);
-	printf("==================================================\n");
-
-	return (tests_failed == 0) ? 0 : 1;
+	return UNITY_END();
 }

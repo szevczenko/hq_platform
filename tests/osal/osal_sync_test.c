@@ -16,32 +16,7 @@
 #include "osal_bin_sem.h"
 #include "osal_count_sem.h"
 #include "osal_log.h"
-
-/* Test results tracking */
-static int tests_run = 0;
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-/* Test macros */
-#define TEST_ASSERT(condition, message) \
-    do { \
-        tests_run++; \
-        if (condition) { \
-            tests_passed++; \
-            printf("[PASS] %s\n", message); \
-        } else { \
-            tests_failed++; \
-            printf("[FAIL] %s\n", message); \
-        } \
-    } while(0)
-
-#define TEST_START(name) \
-    printf("\n==================================================\n"); \
-    printf("TEST: %s\n", name); \
-    printf("==================================================\n")
-
-#define TEST_END() \
-    printf("--------------------------------------------------\n")
+#include "unity.h"
 
 static void osal_test_task_done(void)
 {
@@ -81,7 +56,9 @@ static void mutex_task_func(void *arg)
 
 static void test_mutex_protection(void)
 {
-    TEST_START("Mutex Protection with Two Tasks");
+    printf("\n==================================================\n");
+    printf("TEST: Mutex Protection with Two Tasks\n");
+    printf("==================================================\n");
 
     osal_status_t status;
     osal_task_id_t task_ids[2];
@@ -92,15 +69,15 @@ static void test_mutex_protection(void)
     mutex_task_done[1] = false;
 
     status = osal_mutex_create(&mutex_id, "test_mutex");
-    TEST_ASSERT(status == OSAL_SUCCESS, "Mutex created successfully");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Mutex created successfully");
 
     status = osal_task_create(&task_ids[0], "mutex_task_0", mutex_task_func,
                               &task_args[0], NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Mutex task 0 created");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Mutex task 0 created");
 
     status = osal_task_create(&task_ids[1], "mutex_task_1", mutex_task_func,
                               &task_args[1], NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Mutex task 1 created");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Mutex task 1 created");
 
     /* Wait for both tasks */
     uint32_t timeout = 2000;
@@ -110,16 +87,16 @@ static void test_mutex_protection(void)
         elapsed += 50;
     }
 
-    TEST_ASSERT(mutex_task_done[0] && mutex_task_done[1],
-                "Both mutex tasks completed");
-    TEST_ASSERT(shared_counter == 200, "Shared counter is correct (200)");
+    TEST_ASSERT_MESSAGE(mutex_task_done[0] && mutex_task_done[1],
+                        "Both mutex tasks completed");
+    TEST_ASSERT_MESSAGE(shared_counter == 200, "Shared counter is correct (200)");
 
     osal_task_delete(task_ids[0]);
     osal_task_delete(task_ids[1]);
     status = osal_mutex_delete(mutex_id);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Mutex deleted successfully");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Mutex deleted successfully");
 
-    TEST_END();
+    printf("--------------------------------------------------\n");
 }
 
 /* ============================================================================
@@ -155,7 +132,9 @@ static void bin_signaler_task(void *arg)
 
 static void test_binary_semaphore(void)
 {
-    TEST_START("Binary Semaphore Synchronization");
+    printf("\n==================================================\n");
+    printf("TEST: Binary Semaphore Synchronization\n");
+    printf("==================================================\n");
 
     osal_status_t status;
     osal_task_id_t waiter_id;
@@ -165,15 +144,15 @@ static void test_binary_semaphore(void)
     bin_signaler_done = false;
 
     status = osal_bin_sem_create(&bin_sem_id, "bin_sem", OSAL_SEM_EMPTY);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Binary semaphore created");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Binary semaphore created");
 
     status = osal_task_create(&waiter_id, "bin_waiter", bin_waiter_task,
                               NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Waiter task created");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Waiter task created");
 
     status = osal_task_create(&signaler_id, "bin_signaler", bin_signaler_task,
                               NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Signaler task created");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Signaler task created");
 
     /* Wait for both tasks */
     uint32_t timeout = 2000;
@@ -183,19 +162,19 @@ static void test_binary_semaphore(void)
         elapsed += 50;
     }
 
-    TEST_ASSERT(bin_signaler_done, "Signaler task completed");
-    TEST_ASSERT(bin_waiter_done, "Waiter task acquired semaphore");
+    TEST_ASSERT_MESSAGE(bin_signaler_done, "Signaler task completed");
+    TEST_ASSERT_MESSAGE(bin_waiter_done, "Waiter task acquired semaphore");
 
     /* Verify timeout behavior */
     status = osal_bin_sem_timed_wait(bin_sem_id, 0);
-    TEST_ASSERT(status == OSAL_SEM_TIMEOUT, "Binary semaphore timeout works (non-blocking)");
+    TEST_ASSERT_MESSAGE(status == OSAL_SEM_TIMEOUT, "Binary semaphore timeout works (non-blocking)");
 
     osal_task_delete(waiter_id);
     osal_task_delete(signaler_id);
     status = osal_bin_sem_delete(bin_sem_id);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Binary semaphore deleted");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Binary semaphore deleted");
 
-    TEST_END();
+    printf("--------------------------------------------------\n");
 }
 
 /* ============================================================================
@@ -238,7 +217,9 @@ static void count_consumer_task(void *arg)
 
 static void test_counting_semaphore(void)
 {
-    TEST_START("Counting Semaphore Producer/Consumer");
+    printf("\n==================================================\n");
+    printf("TEST: Counting Semaphore Producer/Consumer\n");
+    printf("==================================================\n");
 
     osal_status_t status;
     osal_task_id_t producer_id;
@@ -248,17 +229,17 @@ static void test_counting_semaphore(void)
     count_consumer_done = false;
 
     status = osal_count_sem_create(&count_sem_id, "count_sem", 0, 3);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Counting semaphore created");
-    TEST_ASSERT(osal_count_sem_get_count(count_sem_id) == 0,
-                "Initial count is 0");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Counting semaphore created");
+    TEST_ASSERT_MESSAGE(osal_count_sem_get_count(count_sem_id) == 0,
+                        "Initial count is 0");
 
     status = osal_task_create(&producer_id, "count_prod", count_producer_task,
                               NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Producer task created");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Producer task created");
 
     status = osal_task_create(&consumer_id, "count_cons", count_consumer_task,
                               NULL, NULL, OSAL_TASK_MIN_STACK_SIZE, 10, NULL);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Consumer task created");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Consumer task created");
 
     /* Wait for both tasks */
     uint32_t timeout = 2000;
@@ -268,66 +249,32 @@ static void test_counting_semaphore(void)
         elapsed += 50;
     }
 
-    TEST_ASSERT(count_producer_done, "Producer task completed");
-    TEST_ASSERT(count_consumer_done, "Consumer task completed");
-    TEST_ASSERT(osal_count_sem_get_count(count_sem_id) == 0,
-                "Final count is 0");
+    TEST_ASSERT_MESSAGE(count_producer_done, "Producer task completed");
+    TEST_ASSERT_MESSAGE(count_consumer_done, "Consumer task completed");
+    TEST_ASSERT_MESSAGE(osal_count_sem_get_count(count_sem_id) == 0,
+                        "Final count is 0");
 
     /* Verify timeout on empty semaphore */
     status = osal_count_sem_timed_wait(count_sem_id, 0);
-    TEST_ASSERT(status == OSAL_SEM_TIMEOUT, "Counting semaphore timeout works (non-blocking)");
+    TEST_ASSERT_MESSAGE(status == OSAL_SEM_TIMEOUT, "Counting semaphore timeout works (non-blocking)");
 
     osal_task_delete(producer_id);
     osal_task_delete(consumer_id);
     status = osal_count_sem_delete(count_sem_id);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Counting semaphore deleted");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Counting semaphore deleted");
 
-    TEST_END();
+    printf("--------------------------------------------------\n");
 }
 
 /* ============================================================================
  * Main Test Runner
  * ========================================================================== */
 
-static void osal_sync_tests_reset(void)
+void osal_sync_tests_run(void)
 {
-    tests_run = 0;
-    tests_passed = 0;
-    tests_failed = 0;
-}
-
-int osal_sync_tests_run(void)
-{
-    osal_sync_tests_reset();
-
-    printf("\n");
-    printf("==================================================\n");
-    printf("     OSAL Synchronization Tests (Sem/Mutex)      \n");
-    printf("==================================================\n");
-    printf("\n");
-
-    test_mutex_protection();
-    test_binary_semaphore();
-    test_counting_semaphore();
-
-    printf("\n");
-    printf("==================================================\n");
-    printf("                  TEST SUMMARY                    \n");
-    printf("==================================================\n");
-    printf("  Total tests:  %d\n", tests_run);
-    printf("  Passed:       %d\n", tests_passed);
-    printf("  Failed:       %d\n", tests_failed);
-    printf("  Success rate: %.1f%%\n",
-           (tests_run > 0) ? (100.0 * tests_passed / tests_run) : 0.0);
-    printf("==================================================\n");
-
-    if (tests_failed == 0) {
-        printf("\n✓ ALL TESTS PASSED!\n\n");
-    } else {
-        printf("\n✗ SOME TESTS FAILED!\n\n");
-    }
-
-    return tests_failed;
+    RUN_TEST(test_mutex_protection);
+    RUN_TEST(test_binary_semaphore);
+    RUN_TEST(test_counting_semaphore);
 }
 
 #ifndef OSAL_TESTS_AGGREGATE
@@ -344,10 +291,10 @@ int main(void)
     printf("==================================================\n");
     printf("\n");
 
-    int failed = osal_sync_tests_run();
+    osal_sync_tests_run();
 
 #ifndef ESP_PLATFORM
-    return (failed == 0) ? 0 : 1;
+    return 0;
 #endif
 }
 

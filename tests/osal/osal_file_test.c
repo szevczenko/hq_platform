@@ -28,32 +28,7 @@
 
 #include "osal_file.h"
 #include "osal_mount.h"
-
-/* Test results tracking */
-static int tests_run = 0;
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-/* Test macros */
-#define TEST_ASSERT(condition, message)                         \
-    do {                                                        \
-        tests_run++;                                            \
-        if (condition) {                                        \
-            tests_passed++;                                     \
-            printf("[PASS] %s\n", message);                   \
-        } else {                                                \
-            tests_failed++;                                     \
-            printf("[FAIL] %s\n", message);                   \
-        }                                                       \
-    } while (0)
-
-#define TEST_START(name)                                        \
-    printf("\n==================================================\n"); \
-    printf("TEST: %s\n", name);                               \
-    printf("==================================================\n")
-
-#define TEST_END() \
-    printf("--------------------------------------------------\n")
+#include "unity.h"
 
 /* Test filesystem image/mount */
 #ifdef ESP_PLATFORM
@@ -76,13 +51,10 @@ static bool is_not_found_status(int32_t rc)
 
 static void setup_test_fs(void)
 {
-    /* Start from a clean file-backed image every run. */
     (void)osal_unmount(TEST_MOUNT_POINT);
     (void)osal_rmfs(TEST_IMAGE_PATH);
-
     (void)osal_mkfs(NULL, TEST_IMAGE_PATH, TEST_MOUNT_POINT, 4096U, 256U);
     (void)osal_mount(TEST_IMAGE_PATH, TEST_MOUNT_POINT);
-
     (void)osal_remove(TEST_FILE);
     (void)osal_remove(TEST_FILE2);
     (void)osal_remove(TEST_FILE3);
@@ -102,8 +74,6 @@ static void cleanup_test_fs(void)
  * ========================================================================== */
 static void test_open_write_read_close(void)
 {
-    TEST_START("Open, Write, Read, Close");
-
     const char write_data[] = "Hello, OSAL filesystem!";
     char read_buf[64];
     memset(read_buf, 0, sizeof(read_buf));
@@ -111,25 +81,20 @@ static void test_open_write_read_close(void)
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "osal_open_create returns valid fd");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     int32_t written = osal_write(fd, write_data, sizeof(write_data));
-    TEST_ASSERT(written == (int32_t)sizeof(write_data),
-                "osal_write returns correct byte count");
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(write_data), written);
 
     int32_t pos = osal_lseek(fd, 0, OSAL_SEEK_SET);
-    TEST_ASSERT(pos == 0, "osal_lseek SET to 0 returns 0");
+    TEST_ASSERT_EQUAL_INT32(0, pos);
 
     int32_t bytes_read = osal_read(fd, read_buf, sizeof(read_buf));
-    TEST_ASSERT(bytes_read == (int32_t)sizeof(write_data),
-                "osal_read returns correct byte count");
-    TEST_ASSERT(memcmp(read_buf, write_data, sizeof(write_data)) == 0,
-                "read data matches written data");
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(write_data), bytes_read);
+    TEST_ASSERT_EQUAL_MEMORY(write_data, read_buf, sizeof(write_data));
 
     int32_t rc = osal_close(fd);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_close succeeds");
-
-    TEST_END();
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
 }
 
 /* ============================================================================
@@ -137,21 +102,18 @@ static void test_open_write_read_close(void)
  * ========================================================================== */
 static void test_null_buffer(void)
 {
-    TEST_START("Read/Write with NULL buffer");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for null buffer test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     int32_t rc = osal_write(fd, NULL, 10);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_write(NULL) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     rc = osal_read(fd, NULL, 10);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_read(NULL) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     (void)osal_close(fd);
-    TEST_END();
 }
 
 /* ============================================================================
@@ -159,22 +121,19 @@ static void test_null_buffer(void)
  * ========================================================================== */
 static void test_zero_size(void)
 {
-    TEST_START("Read/Write with zero size");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for zero size test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     char buf[16] = {0};
     int32_t rc = osal_write(fd, buf, 0);
-    TEST_ASSERT(rc == OSAL_ERR_INVALID_SIZE, "osal_write(size=0) returns OSAL_ERR_INVALID_SIZE");
+    TEST_ASSERT_EQUAL_INT32(OSAL_ERR_INVALID_SIZE, rc);
 
     rc = osal_read(fd, buf, 0);
-    TEST_ASSERT(rc == OSAL_ERR_INVALID_SIZE, "osal_read(size=0) returns OSAL_ERR_INVALID_SIZE");
+    TEST_ASSERT_EQUAL_INT32(OSAL_ERR_INVALID_SIZE, rc);
 
     (void)osal_close(fd);
-    TEST_END();
 }
 
 /* ============================================================================
@@ -182,15 +141,11 @@ static void test_zero_size(void)
  * ========================================================================== */
 static void test_close_invalid_fd(void)
 {
-    TEST_START("Close invalid file descriptor");
-
     int32_t rc = osal_close(-1);
-    TEST_ASSERT(rc == OSAL_ERR_INVALID_ID, "osal_close(-1) returns OSAL_ERR_INVALID_ID");
+    TEST_ASSERT_EQUAL_INT32(OSAL_ERR_INVALID_ID, rc);
 
     rc = osal_close(9999);
-    TEST_ASSERT(rc == OSAL_ERR_INVALID_ID, "osal_close(9999) returns OSAL_ERR_INVALID_ID");
-
-    TEST_END();
+    TEST_ASSERT_EQUAL_INT32(OSAL_ERR_INVALID_ID, rc);
 }
 
 /* ============================================================================
@@ -198,31 +153,28 @@ static void test_close_invalid_fd(void)
  * ========================================================================== */
 static void test_seek_operations(void)
 {
-    TEST_START("Seek operations");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for seek test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     char data[100];
     memset(data, 'A', sizeof(data));
     (void)osal_write(fd, data, sizeof(data));
 
     int32_t pos = osal_lseek(fd, 10, OSAL_SEEK_SET);
-    TEST_ASSERT(pos == 10, "SEEK_SET to offset 10");
+    TEST_ASSERT_EQUAL_INT32(10, pos);
 
     pos = osal_lseek(fd, 5, OSAL_SEEK_CUR);
-    TEST_ASSERT(pos == 15, "SEEK_CUR +5 from 10 = 15");
+    TEST_ASSERT_EQUAL_INT32(15, pos);
 
     pos = osal_lseek(fd, 0, OSAL_SEEK_END);
-    TEST_ASSERT(pos == 100, "SEEK_END offset 0 = file size (100)");
+    TEST_ASSERT_EQUAL_INT32(100, pos);
 
     pos = osal_lseek(-1, 0, OSAL_SEEK_SET);
-    TEST_ASSERT(pos == OSAL_ERR_INVALID_ID, "osal_lseek(-1) returns OSAL_ERR_INVALID_ID");
+    TEST_ASSERT_EQUAL_INT32(OSAL_ERR_INVALID_ID, pos);
 
     (void)osal_close(fd);
-    TEST_END();
 }
 
 /* ============================================================================
@@ -230,12 +182,10 @@ static void test_seek_operations(void)
  * ========================================================================== */
 static void test_stat(void)
 {
-    TEST_START("File stat");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for stat test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     const char content[] = "stat test data";
     (void)osal_write(fd, content, sizeof(content));
@@ -243,22 +193,18 @@ static void test_stat(void)
 
     osal_fstat_t fstat_buf;
     int32_t rc = osal_stat(TEST_FILE, &fstat_buf);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_stat succeeds");
-    TEST_ASSERT(OSAL_FILESTAT_SIZE(fstat_buf) == sizeof(content),
-                "file size matches written data");
-    TEST_ASSERT(!OSAL_FILESTAT_ISDIR(fstat_buf),
-                "file is not a directory");
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(content), (int32_t)OSAL_FILESTAT_SIZE(fstat_buf));
+    TEST_ASSERT_FALSE(OSAL_FILESTAT_ISDIR(fstat_buf));
 
     rc = osal_stat(NULL, &fstat_buf);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_stat(NULL path) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     rc = osal_stat(TEST_FILE, NULL);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_stat(NULL buf) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     rc = osal_stat("/nonexistent", &fstat_buf);
-    TEST_ASSERT(is_not_found_status(rc), "osal_stat on nonexistent file returns not-found status");
-
-    TEST_END();
+    TEST_ASSERT_TRUE(is_not_found_status(rc));
 }
 
 /* ============================================================================
@@ -266,32 +212,28 @@ static void test_stat(void)
  * ========================================================================== */
 static void test_truncate(void)
 {
-    TEST_START("File truncate");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for truncate test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     char data[200];
     memset(data, 'B', sizeof(data));
     (void)osal_write(fd, data, sizeof(data));
 
     int32_t rc = osal_file_truncate(fd, 50);
-    TEST_ASSERT(rc == OSAL_SUCCESS || rc == OSAL_ERR_OPERATION_NOT_SUPPORTED,
-                "osal_file_truncate returns SUCCESS or NOT_SUPPORTED");
+    TEST_ASSERT_TRUE(rc == OSAL_SUCCESS || rc == OSAL_ERR_OPERATION_NOT_SUPPORTED);
 
     if (rc == OSAL_SUCCESS)
     {
         int32_t pos = osal_lseek(fd, 0, OSAL_SEEK_END);
-        TEST_ASSERT(pos == 50, "file size after truncate is 50");
+        TEST_ASSERT_EQUAL_INT32(50, pos);
     }
 
     rc = osal_file_truncate(-1, 10);
-    TEST_ASSERT(rc == OSAL_ERR_INVALID_ID, "osal_file_truncate(-1) returns OSAL_ERR_INVALID_ID");
+    TEST_ASSERT_EQUAL_INT32(OSAL_ERR_INVALID_ID, rc);
 
     (void)osal_close(fd);
-    TEST_END();
 }
 
 /* ============================================================================
@@ -299,23 +241,18 @@ static void test_truncate(void)
  * ========================================================================== */
 static void test_allocate(void)
 {
-    TEST_START("File allocate");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for allocate test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     int32_t rc = osal_file_allocate(fd, 0, 4096);
-    TEST_ASSERT(rc == OSAL_SUCCESS || rc == OSAL_ERR_OPERATION_NOT_SUPPORTED,
-                "osal_file_allocate returns SUCCESS or NOT_SUPPORTED");
+    TEST_ASSERT_TRUE(rc == OSAL_SUCCESS || rc == OSAL_ERR_OPERATION_NOT_SUPPORTED);
 
     rc = osal_file_allocate(-1, 0, 4096);
-    TEST_ASSERT(rc == OSAL_ERR_INVALID_ID || rc == OSAL_ERR_OPERATION_NOT_SUPPORTED,
-                "osal_file_allocate(-1) returns INVALID_ID or NOT_SUPPORTED");
+    TEST_ASSERT_TRUE(rc == OSAL_ERR_INVALID_ID || rc == OSAL_ERR_OPERATION_NOT_SUPPORTED);
 
     (void)osal_close(fd);
-    TEST_END();
 }
 
 /* ============================================================================
@@ -323,22 +260,17 @@ static void test_allocate(void)
  * ========================================================================== */
 static void test_chmod(void)
 {
-    TEST_START("Chmod");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for chmod test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
     (void)osal_close(fd);
 
     int32_t rc = osal_chmod(TEST_FILE, OSAL_READ_ONLY);
-    TEST_ASSERT(rc == OSAL_SUCCESS || rc == OSAL_ERR_NOT_IMPLEMENTED,
-                "osal_chmod returns SUCCESS or NOT_IMPLEMENTED");
+    TEST_ASSERT_TRUE(rc == OSAL_SUCCESS || rc == OSAL_ERR_NOT_IMPLEMENTED);
 
     rc = osal_chmod(NULL, OSAL_READ_ONLY);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_chmod(NULL) returns OSAL_INVALID_POINTER");
-
-    TEST_END();
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 }
 
 /* ============================================================================
@@ -346,28 +278,24 @@ static void test_chmod(void)
  * ========================================================================== */
 static void test_remove(void)
 {
-    TEST_START("Remove");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE2,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_WRITE_ONLY);
-    TEST_ASSERT(fd >= 0, "create file for remove test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
     (void)osal_close(fd);
 
     int32_t rc = osal_remove(TEST_FILE2);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_remove succeeds");
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
 
     osal_fstat_t fstat_buf;
     rc = osal_stat(TEST_FILE2, &fstat_buf);
-    TEST_ASSERT(is_not_found_status(rc), "stat after remove returns not-found status");
+    TEST_ASSERT_TRUE(is_not_found_status(rc));
 
     rc = osal_remove("/nonexistent");
-    TEST_ASSERT(is_not_found_status(rc), "osal_remove on nonexistent returns not-found status");
+    TEST_ASSERT_TRUE(is_not_found_status(rc));
 
     rc = osal_remove(NULL);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_remove(NULL) returns OSAL_INVALID_POINTER");
-
-    TEST_END();
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 }
 
 /* ============================================================================
@@ -375,37 +303,32 @@ static void test_remove(void)
  * ========================================================================== */
 static void test_rename(void)
 {
-    TEST_START("Rename");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE2,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_WRITE_ONLY);
-    TEST_ASSERT(fd >= 0, "create file for rename test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
     const char content[] = "rename data";
     (void)osal_write(fd, content, sizeof(content));
     (void)osal_close(fd);
 
     int32_t rc = osal_rename(TEST_FILE2, TEST_FILE3);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_rename succeeds");
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
 
     osal_fstat_t fstat_buf;
     rc = osal_stat(TEST_FILE2, &fstat_buf);
-    TEST_ASSERT(is_not_found_status(rc), "old file no longer exists after rename");
+    TEST_ASSERT_TRUE(is_not_found_status(rc));
 
     rc = osal_stat(TEST_FILE3, &fstat_buf);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "new file exists after rename");
-    TEST_ASSERT(OSAL_FILESTAT_SIZE(fstat_buf) == sizeof(content),
-                "renamed file has correct size");
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(content), (int32_t)OSAL_FILESTAT_SIZE(fstat_buf));
 
     rc = osal_rename(NULL, TEST_FILE3);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_rename(NULL, ...) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     rc = osal_rename(TEST_FILE3, NULL);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_rename(..., NULL) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     (void)osal_remove(TEST_FILE3);
-
-    TEST_END();
 }
 
 /* ============================================================================
@@ -413,41 +336,35 @@ static void test_rename(void)
  * ========================================================================== */
 static void test_copy(void)
 {
-    TEST_START("Copy (osal_cp)");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "create source file for copy test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     const char content[] = "copy test payload with some data";
     (void)osal_write(fd, content, sizeof(content));
     (void)osal_close(fd);
 
     int32_t rc = osal_cp(TEST_FILE, TEST_FILE2);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_cp succeeds");
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
 
     fd = osal_open_create(TEST_FILE2, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
-    TEST_ASSERT(fd >= 0, "open copied file for verification");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     char read_buf[64];
     memset(read_buf, 0, sizeof(read_buf));
     int32_t bytes_read = osal_read(fd, read_buf, sizeof(read_buf));
-    TEST_ASSERT(bytes_read == (int32_t)sizeof(content),
-                "copied file has correct byte count");
-    TEST_ASSERT(memcmp(read_buf, content, sizeof(content)) == 0,
-                "copied file content matches source");
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(content), bytes_read);
+    TEST_ASSERT_EQUAL_MEMORY(content, read_buf, sizeof(content));
     (void)osal_close(fd);
 
     rc = osal_cp(NULL, TEST_FILE2);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_cp(NULL, ...) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     rc = osal_cp(TEST_FILE, NULL);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_cp(..., NULL) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     (void)osal_remove(TEST_FILE2);
-
-    TEST_END();
 }
 
 /* ============================================================================
@@ -455,42 +372,36 @@ static void test_copy(void)
  * ========================================================================== */
 static void test_move(void)
 {
-    TEST_START("Move (osal_mv)");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "create source file for move test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     const char content[] = "move test payload";
     (void)osal_write(fd, content, sizeof(content));
     (void)osal_close(fd);
 
     int32_t rc = osal_mv(TEST_FILE, TEST_FILE2);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_mv succeeds");
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
 
     osal_fstat_t fstat_buf;
     rc = osal_stat(TEST_FILE, &fstat_buf);
-    TEST_ASSERT(is_not_found_status(rc), "source file removed after move");
+    TEST_ASSERT_TRUE(is_not_found_status(rc));
 
     fd = osal_open_create(TEST_FILE2, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
-    TEST_ASSERT(fd >= 0, "open moved file for verification");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     char read_buf[64];
     memset(read_buf, 0, sizeof(read_buf));
     int32_t bytes_read = osal_read(fd, read_buf, sizeof(read_buf));
-    TEST_ASSERT(bytes_read == (int32_t)sizeof(content),
-                "moved file has correct byte count");
-    TEST_ASSERT(memcmp(read_buf, content, sizeof(content)) == 0,
-                "moved file content matches source");
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(content), bytes_read);
+    TEST_ASSERT_EQUAL_MEMORY(content, read_buf, sizeof(content));
     (void)osal_close(fd);
 
     rc = osal_mv(NULL, TEST_FILE2);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_mv(NULL, ...) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     (void)osal_remove(TEST_FILE2);
-
-    TEST_END();
 }
 
 /* ============================================================================
@@ -498,29 +409,26 @@ static void test_move(void)
  * ========================================================================== */
 static void test_fd_get_info(void)
 {
-    TEST_START("fd_get_info");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for fd_get_info test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     osal_file_prop_t prop;
     memset(&prop, 0, sizeof(prop));
 
     int32_t rc = osal_fd_get_info(fd, &prop);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_fd_get_info succeeds");
-    TEST_ASSERT(strlen(prop.path) > 0, "fd_get_info returns a non-empty path");
-    TEST_ASSERT(prop.user == fd, "fd_get_info user field matches fd");
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
+    TEST_ASSERT_GREATER_THAN(0, (int32_t)strlen(prop.path));
+    TEST_ASSERT_EQUAL_INT32((int32_t)prop.user, (int32_t)fd);
 
     rc = osal_fd_get_info(fd, NULL);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_fd_get_info(NULL) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 
     rc = osal_fd_get_info(-1, &prop);
-    TEST_ASSERT(rc == OSAL_ERR_INVALID_ID, "osal_fd_get_info(-1) returns OSAL_ERR_INVALID_ID");
+    TEST_ASSERT_EQUAL_INT32(OSAL_ERR_INVALID_ID, rc);
 
     (void)osal_close(fd);
-    TEST_END();
 }
 
 /* ============================================================================
@@ -528,31 +436,27 @@ static void test_fd_get_info(void)
  * ========================================================================== */
 static void test_file_open_check(void)
 {
-    TEST_START("file_open_check");
-
     (void)osal_remove(TEST_FILE);
 
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for open_check test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     osal_file_prop_t prop;
     memset(&prop, 0, sizeof(prop));
     (void)osal_fd_get_info(fd, &prop);
 
     int32_t rc = osal_file_open_check(prop.path);
-    TEST_ASSERT(rc == OSAL_SUCCESS, "osal_file_open_check returns SUCCESS for open file");
+    TEST_ASSERT_EQUAL_INT32(OSAL_SUCCESS, rc);
 
     (void)osal_close(fd);
 
     rc = osal_file_open_check(prop.path);
-    TEST_ASSERT(rc == OSAL_ERROR, "osal_file_open_check returns ERROR after close");
+    TEST_ASSERT_EQUAL_INT32(OSAL_ERROR, rc);
 
     rc = osal_file_open_check(NULL);
-    TEST_ASSERT(rc == OSAL_INVALID_POINTER, "osal_file_open_check(NULL) returns OSAL_INVALID_POINTER");
-
-    TEST_END();
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, rc);
 }
 
 /* ============================================================================
@@ -560,25 +464,18 @@ static void test_file_open_check(void)
  * ========================================================================== */
 static void test_path_validation(void)
 {
-    TEST_START("Path validation");
-
     osal_file_id_t fd = osal_open_create(NULL, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
-    TEST_ASSERT(fd == (osal_file_id_t)OSAL_INVALID_POINTER,
-                "osal_open_create(NULL) returns OSAL_INVALID_POINTER");
+    TEST_ASSERT_EQUAL_INT32(OSAL_INVALID_POINTER, (int32_t)fd);
 
     fd = osal_open_create("", OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
-    TEST_ASSERT(fd == (osal_file_id_t)OSAL_FS_ERR_PATH_INVALID,
-                "osal_open_create('') returns OSAL_FS_ERR_PATH_INVALID");
+    TEST_ASSERT_EQUAL_INT32(OSAL_FS_ERR_PATH_INVALID, (int32_t)fd);
 
     char long_path[OSAL_MAX_PATH_LEN + 16];
     memset(long_path, 'a', sizeof(long_path) - 1);
     long_path[sizeof(long_path) - 1] = '\0';
 
     fd = osal_open_create(long_path, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
-    TEST_ASSERT(fd == (osal_file_id_t)OSAL_FS_ERR_PATH_TOO_LONG,
-                "osal_open_create(too_long) returns OSAL_FS_ERR_PATH_TOO_LONG");
-
-    TEST_END();
+    TEST_ASSERT_EQUAL_INT32(OSAL_FS_ERR_PATH_TOO_LONG, (int32_t)fd);
 }
 
 /* ============================================================================
@@ -586,12 +483,10 @@ static void test_path_validation(void)
  * ========================================================================== */
 static void test_read_eof(void)
 {
-    TEST_START("Read at EOF");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_READ_WRITE);
-    TEST_ASSERT(fd >= 0, "open file for EOF test");
+    TEST_ASSERT_GREATER_THAN(-1, (int32_t)fd);
 
     const char data[] = "short";
     (void)osal_write(fd, data, sizeof(data));
@@ -600,10 +495,9 @@ static void test_read_eof(void)
 
     char buf[32];
     int32_t bytes_read = osal_read(fd, buf, sizeof(buf));
-    TEST_ASSERT(bytes_read == 0, "read at EOF returns 0");
+    TEST_ASSERT_EQUAL_INT32(0, bytes_read);
 
     (void)osal_close(fd);
-    TEST_END();
 }
 
 /* ============================================================================
@@ -611,81 +505,54 @@ static void test_read_eof(void)
  * ========================================================================== */
 static void test_access_modes(void)
 {
-    TEST_START("Open with different access modes");
-
     osal_file_id_t fd = osal_open_create(TEST_FILE,
         OSAL_FILE_FLAG_CREATE | OSAL_FILE_FLAG_TRUNCATE,
         OSAL_WRITE_ONLY);
-    TEST_ASSERT(fd >= 0, "open file WRITE_ONLY");
+    TEST_ASSERT_GREATER_THAN_MESSAGE(-1, (int32_t)fd, "open file WRITE_ONLY");
 
-    const char data[] = "access mode test";
-    int32_t written = osal_write(fd, data, sizeof(data));
-    TEST_ASSERT(written == (int32_t)sizeof(data), "write succeeds in WRITE_ONLY mode");
+    const char d[] = "mode test data";
+    int32_t written = osal_write(fd, d, sizeof(d));
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(d), written);
+
     (void)osal_close(fd);
 
     fd = osal_open_create(TEST_FILE, OSAL_FILE_FLAG_NONE, OSAL_READ_ONLY);
-    TEST_ASSERT(fd >= 0, "open file READ_ONLY");
+    TEST_ASSERT_GREATER_THAN_MESSAGE(-1, (int32_t)fd, "open file READ_ONLY");
 
     char buf[64];
     int32_t bytes_read = osal_read(fd, buf, sizeof(buf));
-    TEST_ASSERT(bytes_read == (int32_t)sizeof(data), "read succeeds in READ_ONLY mode");
+    TEST_ASSERT_EQUAL_INT32((int32_t)sizeof(d), bytes_read);
     (void)osal_close(fd);
-
-    TEST_END();
 }
 
-int osal_file_tests_run(void)
+/* ============================================================================
+ * Main Test Runner
+ * ========================================================================== */
+
+void osal_file_tests_run(void)
 {
-    tests_run = 0;
-    tests_passed = 0;
-    tests_failed = 0;
-
-    printf("\n");
-    printf("==================================================\n");
-    printf("          OSAL Filesystem Tests                   \n");
-    printf("==================================================\n");
-
     setup_test_fs();
 
-    test_open_write_read_close();
-    test_null_buffer();
-    test_zero_size();
-    test_close_invalid_fd();
-    test_seek_operations();
-    test_stat();
-    test_truncate();
-    test_allocate();
-    test_chmod();
-    test_remove();
-    test_rename();
-    test_copy();
-    test_move();
-    test_fd_get_info();
-    test_file_open_check();
-    test_path_validation();
-    test_read_eof();
-    test_access_modes();
+    RUN_TEST(test_open_write_read_close);
+    RUN_TEST(test_null_buffer);
+    RUN_TEST(test_zero_size);
+    RUN_TEST(test_close_invalid_fd);
+    RUN_TEST(test_seek_operations);
+    RUN_TEST(test_stat);
+    RUN_TEST(test_truncate);
+    RUN_TEST(test_allocate);
+    RUN_TEST(test_chmod);
+    RUN_TEST(test_remove);
+    RUN_TEST(test_rename);
+    RUN_TEST(test_copy);
+    RUN_TEST(test_move);
+    RUN_TEST(test_fd_get_info);
+    RUN_TEST(test_file_open_check);
+    RUN_TEST(test_path_validation);
+    RUN_TEST(test_read_eof);
+    RUN_TEST(test_access_modes);
 
     cleanup_test_fs();
-
-    printf("\n");
-    printf("==================================================\n");
-    printf("                  TEST SUMMARY                    \n");
-    printf("==================================================\n");
-    printf("  Total tests:  %d\n", tests_run);
-    printf("  Passed:       %d\n", tests_passed);
-    printf("  Failed:       %d\n", tests_failed);
-    printf("  Success rate: %.1f%%\n",
-           (tests_run > 0) ? (100.0 * tests_passed / tests_run) : 0.0);
-    printf("==================================================\n");
-
-    if (tests_failed == 0) {
-        printf("\nALL TESTS PASSED\n\n");
-    } else {
-        printf("\nSOME TESTS FAILED\n\n");
-    }
-
-    return tests_failed;
 }
 
 #ifndef OSAL_TESTS_AGGREGATE
@@ -696,10 +563,20 @@ void app_main(void)
 int main(void)
 #endif
 {
-    int failed = osal_file_tests_run();
+    printf("\n");
+    printf("==================================================\n");
+    printf("          OSAL Filesystem Tests                   \n");
+    printf("==================================================\n");
+    printf("\n");
+
+    setup_test_fs();
+
+    osal_file_tests_run();
+
+    cleanup_test_fs();
 
 #ifndef ESP_PLATFORM
-    return (failed == 0) ? 0 : 1;
+    return 0;
 #endif
 }
 

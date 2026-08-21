@@ -20,32 +20,7 @@
 #include "wifi_config.h"
 #include "osal_mount.h"
 #include "osal_file.h"
-
-/* Test results tracking */
-static int tests_run    = 0;
-static int tests_passed = 0;
-static int tests_failed = 0;
-
-/* Test macros */
-#define TEST_ASSERT( condition, message )                       \
-  do {                                                          \
-    tests_run++;                                                \
-    if ( condition ) {                                          \
-      tests_passed++;                                           \
-      printf( "[PASS] %s\n", message );                         \
-    } else {                                                    \
-      tests_failed++;                                           \
-      printf( "[FAIL] %s\n", message );                         \
-    }                                                           \
-  } while ( 0 )
-
-#define TEST_START( name )                                      \
-  printf( "\n==================================================\n" ); \
-  printf( "TEST: %s\n", name );                                 \
-  printf( "==================================================\n" )
-
-#define TEST_END() \
-  printf( "--------------------------------------------------\n" )
+#include "unity.h"
 
 /* Filesystem setup for save/load tests */
 #define TEST_IMAGE_PATH  "/tmp/wifi_config_test.img"
@@ -72,20 +47,16 @@ static void cleanup_fs( void )
  * ========================================================================== */
 static void test_add_single_credential( void )
 {
-  TEST_START( "Add single credential to empty list" );
-
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
   osal_status_t st = wifi_config_add_credential( &list, "MySSID", "MyPass" );
-  TEST_ASSERT( st == OSAL_SUCCESS, "add_credential returns SUCCESS" );
-  TEST_ASSERT( list.count == 1, "count is 1" );
-  TEST_ASSERT( strcmp( list.entries[0].ssid, "MySSID" ) == 0, "ssid matches" );
-  TEST_ASSERT( strcmp( list.entries[0].password, "MyPass" ) == 0, "password matches" );
-  TEST_ASSERT( list.entries[0].nb == 0, "nb is 0 for first entry" );
-  TEST_ASSERT( list.last_use == 0, "last_use points to new entry" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( st == OSAL_SUCCESS, "add_credential returns SUCCESS" );
+  TEST_ASSERT_MESSAGE( list.count == 1, "count is 1" );
+  TEST_ASSERT_MESSAGE( strcmp( list.entries[0].ssid, "MySSID" ) == 0, "ssid matches" );
+  TEST_ASSERT_MESSAGE( strcmp( list.entries[0].password, "MyPass" ) == 0, "password matches" );
+  TEST_ASSERT_MESSAGE( list.entries[0].nb == 0, "nb is 0 for first entry" );
+  TEST_ASSERT_MESSAGE( list.last_use == 0, "last_use points to new entry" );
 }
 
 /* ============================================================================
@@ -93,8 +64,6 @@ static void test_add_single_credential( void )
  * ========================================================================== */
 static void test_duplicate_ssid_update( void )
 {
-  TEST_START( "Duplicate SSID updates password and nb" );
-
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
@@ -103,13 +72,11 @@ static void test_duplicate_ssid_update( void )
 
   /* Update Net1 with new password */
   osal_status_t st = wifi_config_add_credential( &list, "Net1", "NewPass1" );
-  TEST_ASSERT( st == OSAL_SUCCESS, "update returns SUCCESS" );
-  TEST_ASSERT( list.count == 2, "count unchanged at 2" );
-  TEST_ASSERT( strcmp( list.entries[0].password, "NewPass1" ) == 0, "password updated" );
-  TEST_ASSERT( list.entries[0].nb > list.entries[1].nb, "nb of updated entry > other" );
-  TEST_ASSERT( list.last_use == list.entries[0].nb, "last_use tracks updated entry" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( st == OSAL_SUCCESS, "update returns SUCCESS" );
+  TEST_ASSERT_MESSAGE( list.count == 2, "count unchanged at 2" );
+  TEST_ASSERT_MESSAGE( strcmp( list.entries[0].password, "NewPass1" ) == 0, "password updated" );
+  TEST_ASSERT_MESSAGE( list.entries[0].nb > list.entries[1].nb, "nb of updated entry > other" );
+  TEST_ASSERT_MESSAGE( list.last_use == list.entries[0].nb, "last_use tracks updated entry" );
 }
 
 /* ============================================================================
@@ -117,8 +84,6 @@ static void test_duplicate_ssid_update( void )
  * ========================================================================== */
 static void test_fill_to_max( void )
 {
-  TEST_START( "Fill list to max capacity" );
-
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
@@ -127,10 +92,10 @@ static void test_fill_to_max( void )
   {
     snprintf( ssid, sizeof( ssid ), "Net_%d", i );
     osal_status_t st = wifi_config_add_credential( &list, ssid, "pass" );
-    TEST_ASSERT( st == OSAL_SUCCESS, "add succeeds" );
+    TEST_ASSERT_MESSAGE( st == OSAL_SUCCESS, "add succeeds" );
   }
 
-  TEST_ASSERT( list.count == WIFI_CONFIG_MAX_CREDENTIALS, "count == max" );
+  TEST_ASSERT_MESSAGE( list.count == WIFI_CONFIG_MAX_CREDENTIALS, "count == max" );
 
   /* Verify all entries are unique */
   bool all_unique = true;
@@ -144,9 +109,7 @@ static void test_fill_to_max( void )
       }
     }
   }
-  TEST_ASSERT( all_unique, "all nb values are unique" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( all_unique, "all nb values are unique" );
 }
 
 /* ============================================================================
@@ -154,8 +117,6 @@ static void test_fill_to_max( void )
  * ========================================================================== */
 static void test_evict_oldest( void )
 {
-  TEST_START( "Evict oldest entry when list is full" );
-
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
@@ -168,8 +129,8 @@ static void test_evict_oldest( void )
 
   /* The oldest entry is Net_0 with nb=0.  Adding new entry should evict it. */
   osal_status_t st = wifi_config_add_credential( &list, "NewNet", "newpass" );
-  TEST_ASSERT( st == OSAL_SUCCESS, "add to full list returns SUCCESS" );
-  TEST_ASSERT( list.count == WIFI_CONFIG_MAX_CREDENTIALS, "count still at max" );
+  TEST_ASSERT_MESSAGE( st == OSAL_SUCCESS, "add to full list returns SUCCESS" );
+  TEST_ASSERT_MESSAGE( list.count == WIFI_CONFIG_MAX_CREDENTIALS, "count still at max" );
 
   /* Verify Net_0 was evicted */
   bool net0_found = false;
@@ -179,10 +140,8 @@ static void test_evict_oldest( void )
     if ( strcmp( list.entries[i].ssid, "Net_0" ) == 0 ) { net0_found = true; }
     if ( strcmp( list.entries[i].ssid, "NewNet" ) == 0 ) { new_found = true; }
   }
-  TEST_ASSERT( !net0_found, "oldest entry (Net_0) was evicted" );
-  TEST_ASSERT( new_found, "new entry is present" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( !net0_found, "oldest entry (Net_0) was evicted" );
+  TEST_ASSERT_MESSAGE( new_found, "new entry is present" );
 }
 
 /* ============================================================================
@@ -190,8 +149,6 @@ static void test_evict_oldest( void )
  * ========================================================================== */
 static void test_renumber_at_max( void )
 {
-  TEST_START( "Renumber when nb reaches 255" );
-
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
@@ -210,8 +167,8 @@ static void test_renumber_at_max( void )
 
   /* Adding a new credential should trigger renumbering */
   osal_status_t st = wifi_config_add_credential( &list, "D", "pD" );
-  TEST_ASSERT( st == OSAL_SUCCESS, "add after renumber returns SUCCESS" );
-  TEST_ASSERT( list.count == 4, "count is now 4" );
+  TEST_ASSERT_MESSAGE( st == OSAL_SUCCESS, "add after renumber returns SUCCESS" );
+  TEST_ASSERT_MESSAGE( list.count == 4, "count is now 4" );
 
   /* After renumbering + add, all nb values should be small sequential numbers */
   bool all_small = true;
@@ -222,7 +179,7 @@ static void test_renumber_at_max( void )
       all_small = false;
     }
   }
-  TEST_ASSERT( all_small, "all nb values are small after renumber" );
+  TEST_ASSERT_MESSAGE( all_small, "all nb values are small after renumber" );
 
   /* Verify D was added */
   bool d_found = false;
@@ -230,9 +187,7 @@ static void test_renumber_at_max( void )
   {
     if ( strcmp( list.entries[i].ssid, "D" ) == 0 ) { d_found = true; }
   }
-  TEST_ASSERT( d_found, "new entry D is present" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( d_found, "new entry D is present" );
 }
 
 /* ============================================================================
@@ -240,8 +195,6 @@ static void test_renumber_at_max( void )
  * ========================================================================== */
 static void test_get_by_nb( void )
 {
-  TEST_START( "get_by_nb lookup" );
-
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
@@ -252,20 +205,18 @@ static void test_get_by_nb( void )
   wifi_config_entry_t entry = { 0 };
 
   bool found = wifi_config_get_by_nb( &list, 1, &entry );
-  TEST_ASSERT( found, "found entry with nb=1" );
-  TEST_ASSERT( strcmp( entry.ssid, "Net2" ) == 0, "nb=1 is Net2" );
+  TEST_ASSERT_MESSAGE( found, "found entry with nb=1" );
+  TEST_ASSERT_MESSAGE( strcmp( entry.ssid, "Net2" ) == 0, "nb=1 is Net2" );
 
   found = wifi_config_get_by_nb( &list, 99, &entry );
-  TEST_ASSERT( !found, "nb=99 not found returns false" );
+  TEST_ASSERT_MESSAGE( !found, "nb=99 not found returns false" );
 
   /* NULL pointer checks */
   found = wifi_config_get_by_nb( NULL, 0, &entry );
-  TEST_ASSERT( !found, "NULL list returns false" );
+  TEST_ASSERT_MESSAGE( !found, "NULL list returns false" );
 
   found = wifi_config_get_by_nb( &list, 0, NULL );
-  TEST_ASSERT( !found, "NULL entry returns false" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( !found, "NULL entry returns false" );
 }
 
 /* ============================================================================
@@ -273,8 +224,6 @@ static void test_get_by_nb( void )
  * ========================================================================== */
 static void test_get_next_circular( void )
 {
-  TEST_START( "get_next circular iteration" );
-
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
@@ -286,25 +235,23 @@ static void test_get_next_circular( void )
 
   /* From nb=0, next should be nb=1 (B) */
   bool found = wifi_config_get_next( &list, 0, &entry );
-  TEST_ASSERT( found, "get_next from nb=0 found" );
-  TEST_ASSERT( strcmp( entry.ssid, "B" ) == 0, "next after 0 is B" );
+  TEST_ASSERT_MESSAGE( found, "get_next from nb=0 found" );
+  TEST_ASSERT_MESSAGE( strcmp( entry.ssid, "B" ) == 0, "next after 0 is B" );
 
   /* From nb=1, next should be nb=2 (C) */
   found = wifi_config_get_next( &list, 1, &entry );
-  TEST_ASSERT( found, "get_next from nb=1 found" );
-  TEST_ASSERT( strcmp( entry.ssid, "C" ) == 0, "next after 1 is C" );
+  TEST_ASSERT_MESSAGE( found, "get_next from nb=1 found" );
+  TEST_ASSERT_MESSAGE( strcmp( entry.ssid, "C" ) == 0, "next after 1 is C" );
 
   /* From nb=2 (last), should wrap to nb=0 (A) */
   found = wifi_config_get_next( &list, 2, &entry );
-  TEST_ASSERT( found, "get_next from nb=2 wraps" );
-  TEST_ASSERT( strcmp( entry.ssid, "A" ) == 0, "wrap from 2 goes to A" );
+  TEST_ASSERT_MESSAGE( found, "get_next from nb=2 wraps" );
+  TEST_ASSERT_MESSAGE( strcmp( entry.ssid, "A" ) == 0, "wrap from 2 goes to A" );
 
   /* Empty list */
   wifi_config_list_t empty = { 0 };
   found = wifi_config_get_next( &empty, 0, &entry );
-  TEST_ASSERT( !found, "get_next on empty list returns false" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( !found, "get_next on empty list returns false" );
 }
 
 /* ============================================================================
@@ -312,8 +259,6 @@ static void test_get_next_circular( void )
  * ========================================================================== */
 static void test_save_load_roundtrip( void )
 {
-  TEST_START( "Save and load round-trip via JSON" );
-
   wifi_config_list_t orig;
   memset( &orig, 0, sizeof( orig ) );
 
@@ -323,24 +268,22 @@ static void test_save_load_roundtrip( void )
   orig.last_use = 1;
 
   osal_status_t st = wifi_config_save( &orig );
-  TEST_ASSERT( st == OSAL_SUCCESS, "save returns SUCCESS" );
+  TEST_ASSERT_MESSAGE( st == OSAL_SUCCESS, "save returns SUCCESS" );
 
   wifi_config_list_t loaded;
   memset( &loaded, 0, sizeof( loaded ) );
 
   st = wifi_config_load( &loaded );
-  TEST_ASSERT( st == OSAL_SUCCESS, "load returns SUCCESS" );
-  TEST_ASSERT( loaded.count == orig.count, "count matches" );
-  TEST_ASSERT( loaded.last_use == orig.last_use, "last_use matches" );
+  TEST_ASSERT_MESSAGE( st == OSAL_SUCCESS, "load returns SUCCESS" );
+  TEST_ASSERT_MESSAGE( loaded.count == orig.count, "count matches" );
+  TEST_ASSERT_MESSAGE( loaded.last_use == orig.last_use, "last_use matches" );
 
   for ( int i = 0; i < loaded.count; ++i )
   {
-    TEST_ASSERT( loaded.entries[i].nb == orig.entries[i].nb, "nb[i] matches" );
-    TEST_ASSERT( strcmp( loaded.entries[i].ssid, orig.entries[i].ssid ) == 0, "ssid[i] matches" );
-    TEST_ASSERT( strcmp( loaded.entries[i].password, orig.entries[i].password ) == 0, "password[i] matches" );
+    TEST_ASSERT_MESSAGE( loaded.entries[i].nb == orig.entries[i].nb, "nb[i] matches" );
+    TEST_ASSERT_MESSAGE( strcmp( loaded.entries[i].ssid, orig.entries[i].ssid ) == 0, "ssid[i] matches" );
+    TEST_ASSERT_MESSAGE( strcmp( loaded.entries[i].password, orig.entries[i].password ) == 0, "password[i] matches" );
   }
-
-  TEST_END();
 }
 
 /* ============================================================================
@@ -348,18 +291,14 @@ static void test_save_load_roundtrip( void )
  * ========================================================================== */
 static void test_load_missing_file( void )
 {
-  TEST_START( "Load from missing file" );
-
   (void) osal_remove( WIFI_CONFIG_FILE_PATH );
 
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
   osal_status_t st = wifi_config_load( &list );
-  TEST_ASSERT( st != OSAL_SUCCESS, "load from missing file fails" );
-  TEST_ASSERT( list.count == 0, "count stays 0" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( st != OSAL_SUCCESS, "load from missing file fails" );
+  TEST_ASSERT_MESSAGE( list.count == 0, "count stays 0" );
 }
 
 /* ============================================================================
@@ -367,75 +306,40 @@ static void test_load_missing_file( void )
  * ========================================================================== */
 static void test_null_pointers( void )
 {
-  TEST_START( "Null pointer handling" );
-
   wifi_config_list_t list;
   memset( &list, 0, sizeof( list ) );
 
-  TEST_ASSERT( wifi_config_load( NULL ) == OSAL_INVALID_POINTER, "load(NULL) returns INVALID_POINTER" );
-  TEST_ASSERT( wifi_config_save( NULL ) == OSAL_INVALID_POINTER, "save(NULL) returns INVALID_POINTER" );
+  TEST_ASSERT_MESSAGE( wifi_config_load( NULL ) == OSAL_INVALID_POINTER, "load(NULL) returns INVALID_POINTER" );
+  TEST_ASSERT_MESSAGE( wifi_config_save( NULL ) == OSAL_INVALID_POINTER, "save(NULL) returns INVALID_POINTER" );
 
-  TEST_ASSERT( wifi_config_add_credential( NULL, "s", "p" ) == OSAL_INVALID_POINTER,
-               "add_credential(NULL list)" );
-  TEST_ASSERT( wifi_config_add_credential( &list, NULL, "p" ) == OSAL_INVALID_POINTER,
-               "add_credential(NULL ssid)" );
-  TEST_ASSERT( wifi_config_add_credential( &list, "s", NULL ) == OSAL_INVALID_POINTER,
-               "add_credential(NULL password)" );
-
-  TEST_END();
+  TEST_ASSERT_MESSAGE( wifi_config_add_credential( NULL, "s", "p" ) == OSAL_INVALID_POINTER,
+                       "add_credential(NULL list)" );
+  TEST_ASSERT_MESSAGE( wifi_config_add_credential( &list, NULL, "p" ) == OSAL_INVALID_POINTER,
+                       "add_credential(NULL ssid)" );
+  TEST_ASSERT_MESSAGE( wifi_config_add_credential( &list, "s", NULL ) == OSAL_INVALID_POINTER,
+                       "add_credential(NULL password)" );
 }
 
 /* ============================================================================
  * Runner
  * ========================================================================== */
 
-int wifi_config_tests_run( void )
+void wifi_config_tests_run( void )
 {
-  tests_run    = 0;
-  tests_passed = 0;
-  tests_failed = 0;
-
-  printf( "\n" );
-  printf( "==================================================\n" );
-  printf( "           Wi-Fi Config Tests                     \n" );
-  printf( "==================================================\n" );
-
   setup_fs();
 
-  test_add_single_credential();
-  test_duplicate_ssid_update();
-  test_fill_to_max();
-  test_evict_oldest();
-  test_renumber_at_max();
-  test_get_by_nb();
-  test_get_next_circular();
-  test_save_load_roundtrip();
-  test_load_missing_file();
-  test_null_pointers();
+  RUN_TEST( test_add_single_credential );
+  RUN_TEST( test_duplicate_ssid_update );
+  RUN_TEST( test_fill_to_max );
+  RUN_TEST( test_evict_oldest );
+  RUN_TEST( test_renumber_at_max );
+  RUN_TEST( test_get_by_nb );
+  RUN_TEST( test_get_next_circular );
+  RUN_TEST( test_save_load_roundtrip );
+  RUN_TEST( test_load_missing_file );
+  RUN_TEST( test_null_pointers );
 
   cleanup_fs();
-
-  printf( "\n" );
-  printf( "==================================================\n" );
-  printf( "                  TEST SUMMARY                    \n" );
-  printf( "==================================================\n" );
-  printf( "  Total tests:  %d\n", tests_run );
-  printf( "  Passed:       %d\n", tests_passed );
-  printf( "  Failed:       %d\n", tests_failed );
-  printf( "  Success rate: %.1f%%\n",
-          ( tests_run > 0 ) ? ( 100.0 * tests_passed / tests_run ) : 0.0 );
-  printf( "==================================================\n" );
-
-  if ( tests_failed == 0 )
-  {
-    printf( "\nALL TESTS PASSED\n\n" );
-  }
-  else
-  {
-    printf( "\nSOME TESTS FAILED\n\n" );
-  }
-
-  return tests_failed;
 }
 
 #ifndef OSAL_TESTS_AGGREGATE
@@ -446,10 +350,10 @@ void app_main( void )
 int main( void )
 #endif
 {
-  int failed = wifi_config_tests_run();
+  wifi_config_tests_run();
 
 #ifndef ESP_PLATFORM
-  return ( failed == 0 ) ? 0 : 1;
+  return 0;
 #endif
 }
 

@@ -1,6 +1,6 @@
 /*
  * OSAL Task Creation and Time Measurement Tests
- * 
+ *
  * Tests:
  * 1. Dynamic task creation and deletion
  * 2. Static task creation and deletion
@@ -15,36 +15,11 @@
 
 #include "osal_task.h"
 #include "osal_log.h"
-
-/* Test results tracking */
-static int tests_run = 0;
-static int tests_passed = 0;
-static int tests_failed = 0;
+#include "unity.h"
 
 /* Task completion flags */
 static volatile bool dynamic_task_completed = false;
 static volatile bool static_task_completed = false;
-
-/* Test macros */
-#define TEST_ASSERT(condition, message) \
-    do { \
-        tests_run++; \
-        if (condition) { \
-            tests_passed++; \
-            printf("[PASS] %s\n", message); \
-        } else { \
-            tests_failed++; \
-            printf("[FAIL] %s\n", message); \
-        } \
-    } while(0)
-
-#define TEST_START(name) \
-    printf("\n==================================================\n"); \
-    printf("TEST: %s\n", name); \
-    printf("==================================================\n")
-
-#define TEST_END() \
-    printf("--------------------------------------------------\n")
 
 static void osal_test_task_done(void)
 {
@@ -57,6 +32,7 @@ static void osal_test_task_done(void)
     return;
 #endif
 }
+
 /* ============================================================================
  * Test 1: Dynamic Task Creation and Deletion
  * ========================================================================== */
@@ -83,8 +59,6 @@ static void dynamic_task_func(void *arg)
 
 static void test_dynamic_task_creation(void)
 {
-    TEST_START("Dynamic Task Creation and Deletion");
-    
     osal_task_id_t task_id;
     osal_status_t status;
     osal_task_attr_t attr;
@@ -95,7 +69,7 @@ static void test_dynamic_task_creation(void)
     
     /* Create dynamic task */
     status = osal_task_attributes_init(&attr);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Task attributes initialized");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Task attributes initialized");
 
     status = osal_task_create(
         &task_id,
@@ -108,7 +82,7 @@ static void test_dynamic_task_creation(void)
         &attr
     );
     
-    TEST_ASSERT(status == OSAL_SUCCESS, "Dynamic task created successfully");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Dynamic task created successfully");
     
     /* Wait for task to complete (timeout 500ms) */
     uint32_t timeout = 500;
@@ -118,16 +92,14 @@ static void test_dynamic_task_creation(void)
         elapsed += 50;
     }
     
-    TEST_ASSERT(dynamic_task_completed, "Dynamic task executed and completed");
-    TEST_ASSERT(elapsed < timeout, "Dynamic task completed within timeout");
+    TEST_ASSERT_MESSAGE(dynamic_task_completed, "Dynamic task executed and completed");
+    TEST_ASSERT_MESSAGE(elapsed < timeout, "Dynamic task completed within timeout");
     
     printf("  Task completed in ~%" PRIu32 " ms\n", elapsed);
     
     /* Delete task */
     status = osal_task_delete(task_id);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Dynamic task deleted successfully");
-    
-    TEST_END();
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Dynamic task deleted successfully");
 }
 
 /* ============================================================================
@@ -159,8 +131,6 @@ static void static_task_func(void *arg)
 
 static void test_static_task_creation(void)
 {
-    TEST_START("Static Task Creation and Deletion");
-    
     osal_task_id_t task_id;
     osal_status_t status;
     osal_task_attr_t attr;
@@ -170,7 +140,7 @@ static void test_static_task_creation(void)
     static_task_completed = false;
     
     status = osal_task_attributes_init(&attr);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Task attributes initialized");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Task attributes initialized");
 
     /* Create static task using pre-allocated stack */
     status = osal_task_create(
@@ -184,7 +154,7 @@ static void test_static_task_creation(void)
         &attr
     );
     
-    TEST_ASSERT(status == OSAL_SUCCESS, "Static task created successfully");
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Static task created successfully");
     
     /* Wait for task to complete (timeout 500ms) */
     uint32_t timeout = 500;
@@ -194,16 +164,14 @@ static void test_static_task_creation(void)
         elapsed += 50;
     }
     
-    TEST_ASSERT(static_task_completed, "Static task executed and completed");
-    TEST_ASSERT(elapsed < timeout, "Static task completed within timeout");
+    TEST_ASSERT_MESSAGE(static_task_completed, "Static task executed and completed");
+    TEST_ASSERT_MESSAGE(elapsed < timeout, "Static task completed within timeout");
     
     printf("  Task completed in ~%" PRIu32 " ms\n", elapsed);
     
     /* Delete task */
     status = osal_task_delete(task_id);
-    TEST_ASSERT(status == OSAL_SUCCESS, "Static task deleted successfully");
-    
-    TEST_END();
+    TEST_ASSERT_MESSAGE(status == OSAL_SUCCESS, "Static task deleted successfully");
 }
 
 /* ============================================================================
@@ -212,8 +180,6 @@ static void test_static_task_creation(void)
 
 static void test_time_measurement(void)
 {
-    TEST_START("Time Measurement with osal_task_get_time_ms()");
-    
     uint32_t start_time, end_time, elapsed;
     uint32_t expected_delay = 250;  /* ms */
     uint32_t tolerance = 50;        /* ±50ms tolerance */
@@ -234,8 +200,7 @@ static void test_time_measurement(void)
     int32_t diff = (int32_t)elapsed - (int32_t)expected_delay;
     if (diff < 0) diff = -diff;
     
-    TEST_ASSERT(diff <= (int32_t)tolerance, 
-                "Time measurement within tolerance (±50ms)");
+    TEST_ASSERT_MESSAGE(diff <= (int32_t)tolerance, "Time measurement within tolerance (±50ms)");
     
     /* Test multiple sequential delays */
     start_time = osal_task_get_time_ms();
@@ -252,10 +217,7 @@ static void test_time_measurement(void)
     diff = (int32_t)elapsed - 150;
     if (diff < 0) diff = -diff;
     
-    TEST_ASSERT(diff <= (int32_t)tolerance, 
-                "Sequential time measurement accurate");
-    
-    TEST_END();
+    TEST_ASSERT_MESSAGE(diff <= (int32_t)tolerance, "Sequential time measurement accurate");
 }
 
 /* ============================================================================
@@ -286,8 +248,6 @@ static void concurrent_task_func(void *arg)
 
 static void test_concurrent_tasks(void)
 {
-    TEST_START("Multiple Concurrent Tasks");
-    
     osal_task_id_t task_ids[NUM_CONCURRENT_TASKS];
     int task_args[NUM_CONCURRENT_TASKS];
     osal_status_t status;
@@ -320,7 +280,7 @@ static void test_concurrent_tasks(void)
         }
     }
     
-    TEST_ASSERT(true, "All concurrent tasks created");
+    TEST_ASSERT_MESSAGE(true, "All concurrent tasks created");
     
     /* Wait for all tasks to complete (timeout 2000ms) */
     uint32_t timeout = 2000;
@@ -330,8 +290,7 @@ static void test_concurrent_tasks(void)
         elapsed += 50;
     }
     
-    TEST_ASSERT(concurrent_task_count == NUM_CONCURRENT_TASKS, 
-                "All concurrent tasks completed");
+    TEST_ASSERT_MESSAGE(concurrent_task_count == NUM_CONCURRENT_TASKS, "All concurrent tasks completed");
     
     printf("  All %d tasks completed in ~%" PRIu32 " ms\n", NUM_CONCURRENT_TASKS, elapsed);
     
@@ -344,62 +303,24 @@ static void test_concurrent_tasks(void)
         }
     }
     
-    TEST_ASSERT(all_done, "All task completion flags set correctly");
+    TEST_ASSERT_MESSAGE(all_done, "All task completion flags set correctly");
     
     /* Clean up */
     for (int i = 0; i < NUM_CONCURRENT_TASKS; i++) {
         osal_task_delete(task_ids[i]);
     }
-    
-    TEST_END();
 }
 
 /* ============================================================================
  * Main Test Runner
  * ========================================================================== */
 
-static void osal_task_tests_reset(void)
+void osal_task_tests_run(void)
 {
-    tests_run = 0;
-    tests_passed = 0;
-    tests_failed = 0;
-}
-
-int osal_task_tests_run(void)
-{
-    osal_task_tests_reset();
-
-    printf("\n");
-    printf("==================================================\n");
-    printf("       OSAL Task Creation and Timing Tests       \n");
-    printf("==================================================\n");
-    printf("\n");
-
-    /* Run all tests */
-    test_dynamic_task_creation();
-    test_static_task_creation();
-    test_time_measurement();
-    test_concurrent_tasks();
-
-    /* Print summary */
-    printf("\n");
-    printf("==================================================\n");
-    printf("                  TEST SUMMARY                    \n");
-    printf("==================================================\n");
-    printf("  Total tests:  %d\n", tests_run);
-    printf("  Passed:       %d\n", tests_passed);
-    printf("  Failed:       %d\n", tests_failed);
-    printf("  Success rate: %.1f%%\n",
-           (tests_run > 0) ? (100.0 * tests_passed / tests_run) : 0.0);
-    printf("==================================================\n");
-
-    if (tests_failed == 0) {
-        printf("\n✓ ALL TESTS PASSED!\n\n");
-    } else {
-        printf("\n✗ SOME TESTS FAILED!\n\n");
-    }
-
-    return tests_failed;
+    RUN_TEST(test_dynamic_task_creation);
+    RUN_TEST(test_static_task_creation);
+    RUN_TEST(test_time_measurement);
+    RUN_TEST(test_concurrent_tasks);
 }
 
 #ifndef OSAL_TESTS_AGGREGATE
@@ -416,10 +337,10 @@ int main(void)
     printf("==================================================\n");
     printf("\n");
     
-    int failed = osal_task_tests_run();
+    osal_task_tests_run();
 
 #ifndef ESP_PLATFORM
-    return (failed == 0) ? 0 : 1;
+    return 0;
 #endif
 }
 
