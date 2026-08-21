@@ -1,0 +1,60 @@
+name: ThingsBoard Firmware Update E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_seconds:
+        description: Demo runtime in seconds
+        required: false
+        default: "20"
+      firmware_size_bytes:
+        description: Dummy firmware payload size in bytes
+        required: false
+        default: "4096"
+
+jobs:
+  firmware-update-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-hq
+
+      - name: Install test dependencies
+        run: sudo apt-get install -y curl openssl
+
+      - name: Verify Docker Compose availability
+        run: docker compose version
+
+      - name: Configure POSIX build
+        run: |
+          cmake -B build_posix \
+            -DHQ_DEFCONFIG=defconfig/posix.defconfig \
+            -DHQ_BUILD_EXAMPLES=ON \
+            -DHQ_BUILD_TESTS=ON
+
+      - name: Run firmware update end-to-end test
+        env:
+          TB_FW_BUILD_DIR: build_posix
+          TB_FW_START_STACK: "1"
+          TB_FW_RUN_SECONDS: ${{ github.event.inputs.run_seconds }}
+          TB_FW_SIZE_BYTES: ${{ github.event.inputs.firmware_size_bytes }}
+          TB_USERNAME: ${{ secrets.TB_USERNAME }}
+          TB_PASSWORD: ${{ secrets.TB_PASSWORD }}
+        run: |
+          bash scripts/thingboard_firmware_update_test.sh
+
+      - name: Upload firmware test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: thingsboard-firmware-e2e-artifacts
+          path: |
+            build_posix
+            scripts/output/firmware_update

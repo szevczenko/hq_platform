@@ -34,7 +34,7 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run unit tests (CTest)
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build -L unit --output-on-failure
 
   esp-idf-builds:
     name: ${{ matrix.project }} / ${{ matrix.idf_target }}

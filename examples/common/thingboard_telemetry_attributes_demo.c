@@ -134,8 +134,8 @@ static void send_small_telemetry_batch(uint32_t sample_no)
 
     snprintf(payload, sizeof(payload),
              "{\"cpu\":%u,\"ram_kb\":%u,\"uptime_s\":%u,\"batch_no\":%u}",
-             20U + (sample_no % 10),
-             16000U + (sample_no % 100),
+             (unsigned)(20U + (sample_no % 10)),
+             (unsigned)(16000U + (sample_no % 100)),
              (unsigned)(osal_task_get_time_ms() / 1000U),
              (unsigned)sample_no);
 

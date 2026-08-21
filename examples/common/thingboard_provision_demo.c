@@ -6,6 +6,7 @@
  * credentials when supported by current client config surface.
  */
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -472,11 +473,11 @@ static void publish_post_provision_telemetry(uint32_t sequence,
                                             "reconnected");
 
     if (rc_seq != 0 || rc_uptime != 0 || rc_state != 0) {
-        printf("[PROV_DEMO] Telemetry push failed (seq=%u)\n", sequence);
+        printf("[PROV_DEMO] Telemetry push failed (seq=%" PRIu32 ")\n", sequence);
         return;
     }
 
-    printf("[PROV_DEMO] Telemetry pushed (seq=%u uptime_ms=%u)\n",
+    printf("[PROV_DEMO] Telemetry pushed (seq=%" PRIu32 " uptime_ms=%" PRIu32 ")\n",
            sequence, uptime_ms);
 }
 
