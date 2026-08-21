@@ -30,6 +30,8 @@ if(NOT ESP_PLATFORM)
     pthread
   )
 
+  add_test(NAME osal_tests COMMAND osal_tests)
+
   message(STATUS "Tests: Building unified test application (osal_tests)")
 
   # ---- Wi-Fi tests (uses mock HAL instead of platform HAL) ----

@@ -44,12 +44,14 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/modules.cmake)
 if(HQ_BUILD_TESTS AND NOT ESP_PLATFORM)
   enable_testing()
 
-  include(FetchContent)
-  FetchContent_Declare(unity
-    GIT_REPOSITORY https://github.com/ThrowTheSwitch/Unity.git
-    GIT_TAG v2.6.0
-  )
-  FetchContent_MakeAvailable(unity)
+  set(HQ_UNITY_SUBMODULE_DIR "${CMAKE_CURRENT_LIST_DIR}/tests/unity")
+  if(NOT EXISTS "${HQ_UNITY_SUBMODULE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "Unity submodule not found at tests/unity. Run: git submodule update --init --recursive"
+    )
+  endif()
+
+  add_subdirectory(${HQ_UNITY_SUBMODULE_DIR} ${CMAKE_BINARY_DIR}/unity)
 endif()
 
 if(NOT ESP_PLATFORM)

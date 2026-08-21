@@ -1,0 +1,73 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  posix-build-and-unit-tests:
+    name: POSIX build + ctest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-hq
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DHQ_DEFCONFIG=defconfig/posix.defconfig \
+            -DHQ_BUILD_TESTS=ON \
+            -DHQ_BUILD_EXAMPLES=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run unit tests (CTest)
+        run: ctest --test-dir build --output-on-failure
+
+  esp-idf-builds:
+    name: ${{ matrix.project }} / ${{ matrix.idf_target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        idf_target: [esp32]
+        project:
+          - examples/esp/cmd_demo
+          - examples/esp/osal_demo
+          - examples/esp/thingboard_attributes_demo
+          - examples/esp/thingboard_claim_demo
+          - examples/esp/thingboard_fwu
+          - examples/esp/thingboard_provision_demo
+          - examples/esp/thingboard_rgb_lamp
+          - examples/esp/thingboard_rpc_demo
+          - examples/esp/thingboard_telemetry_attributes_demo
+          - examples/esp/thingboard_tls_demo
+          - tests/platform/esp
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build ${{ matrix.project }} for ${{ matrix.idf_target }}
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: ${{ matrix.idf_target }}
+          path: ${{ matrix.project }}
+          # kconfiglib is not pre-installed in the ESP-IDF venv; install before idf.py build
+          command: pip install kconfiglib --quiet && idf.py build

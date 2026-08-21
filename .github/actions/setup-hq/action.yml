@@ -1,0 +1,15 @@
+name: Setup hq_platform build environment
+description: Install system and Python dependencies required to build hq_platform
+
+runs:
+  using: composite
+  steps:
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build pkg-config
+
+    - name: Install Python dependencies
+      shell: bash
+      run: pip install .

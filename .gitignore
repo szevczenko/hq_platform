@@ -1,6 +1,7 @@
 /build_posix
 **/.build
 **/build*
+!**/*.yml
 **/sdkconfig
 .kconfig-venv/
 .config
