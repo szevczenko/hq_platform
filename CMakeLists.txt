@@ -42,6 +42,8 @@ endif()
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/modules.cmake)
 
 if(HQ_BUILD_TESTS AND NOT ESP_PLATFORM)
+  enable_testing()
+
   include(FetchContent)
   FetchContent_Declare(unity
     GIT_REPOSITORY https://github.com/ThrowTheSwitch/Unity.git

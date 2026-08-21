@@ -71,6 +71,8 @@ if(NOT ESP_PLATFORM)
     pthread
   )
 
+  add_test(NAME wifi_tests COMMAND wifi_tests)
+
   message(STATUS "Tests: Building Wi-Fi test application (wifi_tests)")
 
   add_executable(mqtt_tests
@@ -88,6 +90,8 @@ if(NOT ESP_PLATFORM)
     unity
     pthread
   )
+  
+  add_test(NAME mqtt_tests COMMAND mqtt_tests)
 
   message(STATUS "Tests: Building MQTT test application (mqtt_tests)")
 
@@ -152,6 +156,8 @@ if(NOT ESP_PLATFORM)
     unity
     pthread
   )
+
+  add_test(NAME tb_tests COMMAND tb_tests)
 
   message(STATUS "Tests: Building ThingsBoard test application (tb_tests)")
 
