@@ -1,0 +1,50 @@
+menu "Wi-Fi Provisioning"
+
+config WIFI_HTTP_PROVISIONING
+  bool "Enable Wi-Fi HTTP provisioning"
+  default n
+  help
+    Build the Mongoose and OSAL based Wi-Fi provisioning portal,
+    captive DNS responder, automatic fallback controller, and the
+    explicit start/stop API.
+
+if WIFI_HTTP_PROVISIONING
+
+config WIFI_HTTP_PROVISIONING_AUTO_FALLBACK
+  bool "Enable automatic provisioning fallback controller"
+  default y
+  help
+    Start the provisioning portal automatically when no usable saved
+    credentials exist or when saved credentials fail to connect.
+
+config WIFI_HTTP_PROVISIONING_HTTP_URL
+  string "Provisioning HTTP listen URL"
+  default "http://0.0.0.0:80"
+  help
+    Mongoose listen URL for the provisioning HTTP portal.
+
+config WIFI_HTTP_PROVISIONING_DNS_URL
+  string "Captive DNS listen URL"
+  default "udp://0.0.0.0:53"
+  help
+    Mongoose listen URL for the captive DNS responder. POSIX tests and
+    demos should use a high port (for example udp://127.0.0.1:10053).
+
+config WIFI_HTTP_PROVISIONING_DNS_TTL
+  int "Captive DNS answer TTL in seconds"
+  range 0 300
+  default 30
+  help
+    TTL advertised in captive DNS A-record responses.
+
+config WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS
+  int "Portal grace period after connection in milliseconds"
+  range 0 60000
+  default 5000
+  help
+    Time the provisioning portal remains active after a successful
+    station connection before transitioning to STA-only.
+
+endif
+
+endmenu

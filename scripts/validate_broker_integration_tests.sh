@@ -39,8 +39,14 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-# Build directory (defaults to the task-mandated `build` tree).
+# Build directory (defaults to the task-mandated `build` tree). Resolved to an
+# absolute path so host paths handed to Docker bind mounts are always absolute
+# (Docker rejects relative host paths for -v volumes).
 BUILD_DIR="${1:-$PROJECT_DIR/build}"
+case "$BUILD_DIR" in
+    /*) : ;;
+    *) BUILD_DIR="$PWD/$BUILD_DIR" ;;
+esac
 TESTS_DIR="$BUILD_DIR/tests"
 
 # Docker image used for the local Mosquitto brokers.
