@@ -1,0 +1,658 @@
+/*
+ * HQ Wi-Fi Provisioning portal - responsive captive-portal stylesheet.
+ *
+ * This stylesheet is served by the captive portal's own HTTP listener. It is
+ * deliberately fully self-contained: no remote stylesheets, no icon fonts, and
+ * no external font or asset downloads. The page must remain usable inside the
+ * narrow captive-browser viewport of a phone or tablet (down to 320 px wide)
+ * while still looking intentional on a desktop.
+ *
+ * Guidelines honoured here:
+ *   - Universal border-box sizing keeps padding and borders inside the
+ *     container, so no label, field, or button can push or overlap a sibling.
+ *   - Every element that can hold user-supplied text (SSIDs especially) wraps
+ *     instead of overflowing, using overflow-wrap/word-break.
+ *   - Keyboard focus is always visible via a high-contrast ring.
+ *   - Distinct styles exist for primary, secondary, disabled, loading,
+ *     success, error, and focus states.
+ *   - Reduced-motion users get the same information with animation disabled.
+ *   - The packed-asset build treats this file like any other web asset; it is
+ *     small, deterministic, and requires no network access to render.
+ */
+
+/* ---------------------------------------------------------------------------
+ * Reset and base sizing
+ * ------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 0;
+  line-height: 1.5;
+  color: #1b2430;
+  background-color: #f4f6f8;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overflow-wrap: break-word;
+}
+
+/* Media that scales with its container instead of bursting a narrow.mobile 
+   viewport. */
+img,
+svg,
+video,
+canvas,
+iframe {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ---------------------------------------------------------------------------
+ * Design tokens
+   ------------------------------------------------------------------------- */
+
+:root {
+  --brand: #0b5cad;
+  --brand-strong: #08458a;
+  --brand-soft: #e7f1fb;
+  --text-strong: #111827;
+  --text-muted: #5b6572;
+  --link: #1556c0;
+  --surface: #ffffff;
+  --surface-muted: #eef2f6;
+  --border: #c6cdd6;
+  --border-soft: #dfe4ea;
+  --focus: #075985;
+  --danger-strong: #b42318;
+  --danger-soft: #fdecec;
+  --success: #137a2d;
+  --success-soft: #e6f4ea;
+  --shadow: 0 1px 2px rgb(16 24 40 / 0.10);
+  --radius-outer: 10px;
+  --radius-inner: 7px;
+  --space-1: 0.5rem;
+  --space-2: 1rem;
+  --space-3: 1.5rem;
+  --max-width: 34rem;
+}
+
+/* -------------------------------------------------------------------------
+ * Global focus styles
+   ------------------------------------------------------------------------- */
+
+:focus {
+  outline: none;
+}
+
+/* A strong, unmistakable keyboard-focus ring. :focus-visible keeps it from
+   ringing every mouse click while remaining clearly visible to navigation. */
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: var(--radius-inner);
+}
+
+/* -------------------------------------------------------------------------
+ * Typography
+   ------------------------------------------------------------------------- */
+
+h1,
+h2,
+h3 {
+  line-height: 1.25;
+}
+
+/* -------------------------------------------------------------------------
+ * Page header & footer
+   ------------------------------------------------------------------------- */
+
+.app-header,
+.app-footer {
+  width: min(100%, var(--max-width));
+  max-width: calc(100%);
+  margin: 0 auto;
+  padding-inline: var(--space-2);
+  background-color: var(--surface-muted);
+}
+
+.app-header {
+  padding-block: var(--space-3) var(--space-1);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: clamp(1.25rem, 1.8rem, 2rem);
+  letter-spacing: -0.01em;
+  color: var(--text-strong);
+}
+
+.page-description,
+#page-description {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  max-width: var(--max-width);
+  overflow-wrap: break-word;
+}
+
+.app-footer {
+  padding-block: var(--space-2);
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+/* -------------------------------------------------------------------------
+ * Main portal container
+   ------------------------------------------------------------------------- */
+
+#portal-main {
+  width: min(100%, var(--max-width));
+  max-width: calc(100%);
+  margin: 0 auto;
+  padding: var(--space-2);
+}
+
+.portal-view {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  padding: var(--space-3) var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-outer);
+  box-shadow: var(--shadow);
+  background-color: var(--surface);
+  margin-bottom: var(--space-3);
+}
+
+.portal-view[hidden] {
+  display: none;
+}
+
+.portal-view h2 {
+  margin: 0 0 var(--space-1);
+  font-size: clamp(1rem, 1.25rem, 1.75rem);
+  color: var(--text-strong);
+}
+
+.portal-view > p {
+  margin: 0 0 var(--space-1);
+}
+
+/* -------------------------------------------------------------------------
+ * Buttons
+   ------------------------------------------------------------------------- */
+
+button {
+  font: inherit;
+  min-width: 0;
+  cursor: pointer;
+  border: 1px solid transparent;
+  padding: 0.75rem 1.1rem;
+  border-radius: var(--radius-inner);
+  -webkit-tap-highlight-color: transparent;
+}
+
+.primary {
+  display: inline-block;
+  width: auto;
+  color: #ffffff;
+  background-color: var(--brand);
+  border-color: var(--brand);
+  box-shadow: var(--shadow);
+}
+
+.primary:hover:not(:disabled) {
+  background-color: var(--brand-strong);
+}
+
+.primary:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.secondary {
+  display: inline-block;
+  width: auto;
+  color: var(--text-strong);
+  background-color: var(--surface);
+  border-color: var(--border);
+}
+
+.secondary:hover:not(:disabled) {
+  background-color: var(--surface-muted);
+}
+
+/* Disabled state, shared by buttons and fields. */
+button:disabled,
+input:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.6;
+  filter: saturate(0.55);
+  box-shadow: none;
+  background-color: var(--surface-muted);
+}
+
+/* Keep the visible focus ring even for a disabled-but-focusable control. */
+button:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+/* -------------------------------------------------------------------------
+ * Links
+   ------------------------------------------------------------------------- */
+
+a {
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+a:hover {
+  text-decoration-thickness: 0.1em;
+}
+
+a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
+}
+
+/* Skip link. */
+.skip-link {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  z-index: 1000;
+  font-weight: 600;
+  border-radius: var(--radius-inner);
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  left: var(--space-1);
+  top: var(--space-1);
+  background-color: var(--focus);
+  color: #ffffff;
+  padding: 0.6rem 1rem;
+  outline: 3px solid var(--surface);
+  outline-offset: 2px;
+}
+
+/* -------------------------------------------------------------------------
+ * Forms, fields, labels
+   ------------------------------------------------------------------------- */
+
+label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+fieldset {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-outer);
+  padding: var(--space-2) var(--space-1);
+  margin: var(--space-1) 0;
+  min-width: 0;
+}
+
+legend {
+  padding: 0 0.4rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+input[type="text"],
+input[type="password"],
+input[type="email"],
+input[type="tel"] {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0 0 var(--space-1);
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-inner);
+  background-color: #ffffff;
+  color: var(--text-strong);
+  font: inherit;
+  box-shadow: none;
+  /* SSIDs can be long: wrap, never clip or expand the field. */
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+input::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--danger-strong);
+}
+
+input:disabled {
+  border-color: var(--border-soft);
+  color: var(--text-muted);
+  background-color: var(--surface-muted);
+}
+
+form {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+}
+
+/* A flexible row that wraps so a long label, value or action never overlaps. */
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: var(--space-1);
+}
+
+/* -------------------------------------------------------------------------
+ * Network list
+   ------------------------------------------------------------------------- */
+
+#network-list,
+.network-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+}
+
+/* Each row is a wrapped flex row so a long SSID stays inside the card even at
+   320 px and never collides with the following item. */
+#network-list li,
+.network-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-1);
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 0.9rem;
+  margin-bottom: var(--space-1);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-inner);
+  background-color: #ffffff;
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+/* Selected network row. */
+#network-list li[aria-selected="true"],
+.network-list .is-selected {
+  border-color: var(--brand-strong);
+  box-shadow: 0 0 0 1px var(--brand-strong);
+}
+
+.network-name,
+.network-ssid {
+  min-width: 0;
+  flex: 1 1 6rem;
+  overflow-wrap: break-word;
+  word-break: break-all;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+/* -------------------------------------------------------------------------
+ * Notes (informational, error, success, loading)
+   ------------------------------------------------------------------------- */
+
+.status-note {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.error-note {
+  margin: var(--space-1) 0 0;
+  color: var(--danger-strong);
+  background-color: var(--danger-soft);
+  border: 1px solid var(--danger-strong);
+  border-radius: var(--radius-inner);
+  padding: 0.6rem 0.8rem;
+  font-weight: 600;
+}
+
+.error-note[hidden] {
+  display: none;
+}
+
+.alert-note {
+  margin: var(--space-1) 0 0;
+  color: var(--danger-strong);
+  background-color: var(--danger-soft);
+  border: 1px solid var(--danger-strong);
+  border-radius: var(--radius-inner);
+  padding: 0.75rem 0.9rem;
+  font-weight: 600;
+}
+/* Success state (used by the connected view). */
+.connected-notice {
+  margin: var(--space-1) 0 0;
+  color: var(--success);
+  background-color: var(--success-soft);
+  border: 1px solid var(--success);
+  border-radius: var(--radius-inner);
+  padding: 0.75rem 0.9rem;
+  font-weight: 600;
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+/* Generic success / error / loading states, primarily used by app.js. */
+.is-success {
+  color: var(--success);
+  background-color: var(--success-soft);
+  border: 1px solid var(--success);
+}
+
+.is-error {
+  color: var(--danger-strong);
+  background-color: var(--danger-soft);
+  border: 1px solid var(--danger-strong);
+}
+
+.is-loading {
+  opacity: 0.72;
+  color: var(--text-muted);
+  cursor: wait;
+}
+
+/* -------------------------------------------------------------------------
+ * Selected network & connection details
+   ------------------------------------------------------------------------- */
+
+.selected-network {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+.selected-network strong {
+  font-weight: 700;
+  color: var(--text-strong);
+  margin-left: 0.2rem;
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+.connection-details {
+  width: 100%;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-inner);
+}
+
+.connection-details div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-1);
+  align-items: baseline;
+  padding: 0.6rem 0.9rem;
+  border-top: 1px solid var(--border-soft);
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+.connection-details div:first-child {
+  border-top: 0;
+}
+
+.connection-details dt,
+.connection-details dd {
+  margin: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: break-all;
+}
+
+.connection-details dt {
+  font-weight: 700;
+  color: var(--text-muted);
+  padding-right: var(--space-1);
+}
+
+.connection-details dd {
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+/* -------------------------------------------------------------------------
+ * Connecting spinner
+   ------------------------------------------------------------------------- */
+
+.spinner {
+  display: inline-block;
+  width: 2rem;
+  height: 2rem;
+  border: 3px solid var(--brand-soft);
+  border-top-color: var(--brand-strong);
+  border-right-color: var(--brand);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Reduced motion: the spinner becomes a static dashed ring. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-style: dashed;
+  }
+}
+
+/* -------------------------------------------------------------------------
+ * Visibility helpers
+   ------------------------------------------------------------------------- */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* -------------------------------------------------------------------------
+ * Responsive tuning
+   ------------------------------------------------------------------------- */
+
+/* Narrow captive-browser viewports (<= 440 px) collapse comfortably to a
+   single content column even at 320 px wide. */
+@media (max-width: 440px) {
+  .portal-view {
+    padding: var(--space-2) var(--space-1);
+  }
+
+  #portal-main {
+    padding-left: var(--space-1);
+    padding-right: var(--space-1);
+  }
+
+  /* Full-width primary/secondary so adjacent actions never share a crowded
+     line at small sizes. */
+  .primary,
+  .secondary {
+    width: 100%;
+  }
+
+  button {
+    padding-block: 0.7rem;
+  }
+}
+
+/* Tablet-to-desktop: give the form actions a little trailing alignment. */
+@media (min-width: 560px) {
+  .form-row {
+    justify-content: flex-end;
+  }
+}
+
+/* Desktop: relax the page slightly while the portal stays capped and scannable. */
+@media (min-width: 900px) {
+  body {
+    background-color: #ecf0f4;
+  }
+
+  .app-header {
+    border-radius: var(--radius-outer);
+  }
+
+  .app-footer {
+    border-radius: var(--radius-outer);
+  }
+}
+
+/* Accessibility: honour the platform forced-colors palette when active. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid ButtonText;
+    outline-offset: 2px;
+  }
+
+  button,
+  input,
+  .alert-note,
+  .error-note,
+  .connected-notice {
+    border: 1px solid ButtonText;
+  }
+}
+
+/* The end. No external fonts. No network requests. Always. */

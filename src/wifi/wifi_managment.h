@@ -95,8 +95,25 @@ typedef struct
   wifi_mgmt_ap_info_t items[WIFI_DRV_MAX_SCAN_AP]; /**< AP record array.         */
 } wifi_mgmt_ap_list_t;
 
-/** @brief Prototype for connect/disconnect event callbacks. */
+/** @brief Prototype for connect/disconnect event callbacks (legacy API). */
 typedef void ( *wifi_mgmt_callback_t )( void );
+
+/** @brief Typed Wi-Fi management events delivered to subscribers. */
+typedef enum
+{
+  WIFI_MGMT_EVENT_CONNECTED      = 0, /**< Station connected and obtained IP.   */
+  WIFI_MGMT_EVENT_DISCONNECTED   = 1, /**< Station disconnected (user or lost). */
+  WIFI_MGMT_EVENT_CONNECT_FAILED = 2, /**< Connect attempt failed.              */
+  WIFI_MGMT_EVENT_SCAN_COMPLETED = 3, /**< Scan finished; results are available. */
+  WIFI_MGMT_EVENT_MODE_CHANGED   = 4, /**< Driver operating mode changed.       */
+} wifi_mgmt_event_t;
+
+/**
+ * @brief Prototype for typed event subscribers.
+ * @param [in] event     - event that triggered the callback
+ * @param [in] user_data - user context supplied at subscription time
+ */
+typedef void ( *wifi_mgmt_event_cb_t )( wifi_mgmt_event_t event, void* user_data );
 
 /* Public functions ----------------------------------------------------------*/
 
@@ -104,8 +121,28 @@ typedef void ( *wifi_mgmt_callback_t )( void );
  * @brief   Set the operating role before calling @c wifi_mgmt_init.
  * @param   [in] type - @c T_WIFI_TYPE_SERVER, @c T_WIFI_TYPE_CLIENT,
  *                      or @c T_WIFI_TYPE_CLI_SER
+ * @note    Applies the mode change synchronously. Prefer
+ *          @c wifi_mgmt_request_mode for runtime transitions.
  */
 void wifi_mgmt_set_wifi_type( wifi_type_t type );
+
+/**
+ * @brief   Asynchronously request a runtime transition to @p type.
+ *
+ * @details The requested mode is serialized inside the Wi-Fi worker task so
+ *          multiple transitions are applied one at a time. The HAL is stopped
+ *          and restarted only when @p type differs from the current mode, and
+ *          @c WIFI_MGMT_EVENT_MODE_CHANGED is emitted only after the HAL
+ *          transition succeeds.
+ *
+ * @param   [in] type - @c T_WIFI_TYPE_SERVER, @c T_WIFI_TYPE_CLIENT,
+ *                      or @c T_WIFI_TYPE_CLI_SER
+ * @return  true if the request was accepted (or @p type already equals the
+ *          current mode), false if @p type is invalid.
+ * @note    This call never blocks on the transition result; a HAL start
+ *          failure leaves the worker in a defined, recoverable state.
+ */
+bool wifi_mgmt_request_mode( wifi_type_t type );
 
 /**
  * @brief   Initialize the Wi-Fi management module and spawn the worker task.
@@ -206,6 +243,25 @@ bool wifi_mgmt_get_name_from_scanned_list( uint8_t number, char* name );
 void wifi_mgmt_get_scan_result( uint16_t* ap_count );
 
 /**
+ * @brief   Check whether a Wi-Fi scan is currently in progress.
+ * @return  true if a scan is active, otherwise false
+ * @note    Thread-safe; safe to call from the Mongoose task while the Wi-Fi
+ *          worker task updates scan state.
+ */
+bool wifi_mgmt_is_scan_active( void );
+
+/**
+ * @brief   Get the scan generation number.
+ *
+ * @details The generation counter increments each time a scan completes so
+ *          callers can detect that a fresh scan snapshot is available.
+ * @return  current scan generation value
+ * @note    Thread-safe; safe to call from the Mongoose task while the Wi-Fi
+ *          worker task updates scan state.
+ */
+uint32_t wifi_mgmt_get_scan_generation( void );
+
+/**
  * @brief   Get the last measured RSSI of the current connection.
  * @return  RSSI value in dBm
  */
@@ -216,6 +272,14 @@ int wifi_mgmt_get_rssi( void );
  * @return  true if credentials were read from persistent storage, otherwise false
  */
 bool wifi_mgmt_is_read_data( void );
+
+/**
+ * @brief   Check whether the Wi-Fi management module is running.
+ * @return  true once @c wifi_mgmt_start has been called and the worker task
+ *          is active, false when the module has not been started or has been
+ *          stopped/deinitialized.
+ */
+bool wifi_mgmt_is_running( void );
 
 /**
  * @brief   Check whether the driver is in the idle state.
@@ -242,14 +306,36 @@ bool wifi_mgmt_is_ready_to_scan( void );
 void wifi_mgmt_power_save( bool state );
 
 /**
- * @brief   Register a callback invoked after a successful connection.
+ * @brief   Subscribe to a typed Wi-Fi management event.
+ * @param   [in] event     - event to subscribe to
+ * @param   [in] cb        - callback invoked when @p event fires
+ * @param   [in] user_data - user context passed to @p cb
+ * @return  true on success, false on null callback or duplicate registration
+ */
+bool wifi_mgmt_subscribe( wifi_mgmt_event_t event, wifi_mgmt_event_cb_t cb, void* user_data );
+
+/**
+ * @brief   Remove a previously registered typed event subscription.
+ * @param   [in] event     - event the subscription belongs to
+ * @param   [in] cb        - callback registered for @p event
+ * @param   [in] user_data - user context supplied at subscription time
+ * @return  true if the subscription was found and removed, otherwise false
+ */
+bool wifi_mgmt_unsubscribe( wifi_mgmt_event_t event, wifi_mgmt_event_cb_t cb, void* user_data );
+
+/**
+ * @brief   Register a callback of the successful connect.
  * @param   [in] cb - callback function pointer
+ * @note    Compatibility wrapper around the typed event subscription,
+ *          equivalent to subscribing to @c WIFI_MGMT_EVENT_CONNECTED.
  */
 void wifi_mgmt_register_connect_cb( wifi_mgmt_callback_t cb );
 
 /**
- * @brief   Register a callback invoked after disconnection.
+ * @brief   Register a callback of the disconnected event.
  * @param   [in] cb - callback function pointer
+ * @note    Compatibility wrapper around the typed event subscription,
+ *          equivalent to subscribing to @c WIFI_MGMT_EVENT_DISCONNECTED.
  */
 void wifi_mgmt_register_disconnect_cb( wifi_mgmt_callback_t cb );
 

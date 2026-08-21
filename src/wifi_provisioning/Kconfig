@@ -45,6 +45,15 @@ config WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS
     Time the provisioning portal remains active after a successful
     station connection before transitioning to STA-only.
 
+config WIFI_HTTP_PROVISIONING_BODY_MAX
+  int "Provisioning request body size limit (bytes)"
+  range 128 4096
+  default 1024
+  help
+    Upper bound in bytes for provisioning request bodies, notably the
+    JSON payload submitted to POST /api/v1/wifi/credentials. Larger
+    payloads are rejected with HTTP 413 before they are buffered.
+
 endif
 
 endmenu

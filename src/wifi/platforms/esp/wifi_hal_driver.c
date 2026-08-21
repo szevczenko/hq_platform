@@ -36,6 +36,55 @@ static osal_status_t _esp_to_status( esp_err_t err )
   return OSAL_ERROR;
 }
 
+bool wifi_hal_is_valid_ipv4( const char* str )
+{
+  if ( !str || strlen( str ) == 0 || strlen( str ) > 15 )
+  {
+    return false;
+  }
+
+  int  octets = 0;
+  int  value  = 0;
+  int  digits = 0;
+  for ( size_t i = 0; i < strlen( str ); ++i )
+  {
+    char c = str[i];
+    if ( c >= '0' && c <= '9' )
+    {
+      value = value * 10 + ( c - '0' );
+      if ( value > 255 )
+      {
+        return false;
+      }
+      digits++;
+      if ( digits > 3 )
+      {
+        return false;
+      }
+    }
+    else if ( c == '.' )
+    {
+      if ( digits == 0 )
+      {
+        return false; /* empty octet */
+      }
+      octets++;
+      value  = 0;
+      digits = 0;
+    }
+    else
+    {
+      return false; /* invalid character */
+    }
+  }
+
+  if ( digits == 0 )
+  {
+    return false;
+  }
+  return octets == 3;
+}
+
 static void _emit_event( wifi_hal_event_t event, const wifi_hal_event_data_t* data )
 {
   if ( g_wifi_hal_ctx.cb )
@@ -114,6 +163,57 @@ static void _copy_ap_config( wifi_config_t* out, const wifi_hal_ap_config_t* in 
   out->ap.authmode = (wifi_auth_mode_t) in->authmode;
 }
 
+/**
+ * @brief   Configure the DNS address advertised by the soft-AP DHCP server.
+ *
+ *          Points the AP interface's own resolver at the captive DNS address
+ *          and enables the ESP DHCP server's @c DOMAIN_NAME_SERVER offer so it
+ *          advertises that DNS to DHCP clients.  Must be called while the AP
+ *          DHCP server is stopped so the DHCP options are applied before the
+ *          server is restarted.  All ESP-IDF calls stay inside this ESP HAL.
+ *
+ * @param   [in] dns_str - dotted-decimal IPv4 DNS address to advertise
+ * @return  OSAL_SUCCESS on success, OSAL_ERR_INVALID_ARGUMENT for a malformed
+ *          address, or OSAL_ERROR when the DHCP server rejects the option.
+ */
+static osal_status_t _configure_ap_dns( const char* dns_str )
+{
+  if ( !wifi_hal_is_valid_ipv4( dns_str ) )
+  {
+    return OSAL_ERR_INVALID_ARGUMENT;
+  }
+
+  esp_ip4_addr_t dns_ip = { 0 };
+  if ( esp_netif_str_to_ip4( dns_str, &dns_ip ) != ESP_OK )
+  {
+    return OSAL_ERR_INVALID_ARGUMENT;
+  }
+
+  /* Point the soft-AP interface's own DNS resolver at the captive DNS.  For
+   * an interface with a DHCP server this stores the address the server will
+   * advertise to clients. */
+  esp_netif_dns_info_t dns_info = { 0 };
+  dns_info.ip.type = ESP_IPADDR_TYPE_V4;
+  dns_info.ip.u_addr.ip4 = dns_ip;
+  if ( esp_netif_set_dns_info( g_wifi_hal_ctx.netif_ap, ESP_NETIF_DNS_MAIN,
+                               &dns_info ) != ESP_OK )
+  {
+    return OSAL_ERROR;
+  }
+
+  /* Enable the DHCP server's DNS option (OFFER_DNS) so it actually advertises
+   * the DNS address configured above. */
+  uint8_t offer = 1;
+  if ( esp_netif_dhcps_option( g_wifi_hal_ctx.netif_ap, ESP_NETIF_OP_SET,
+                               ESP_NETIF_DOMAIN_NAME_SERVER, &offer,
+                               sizeof( offer ) ) != ESP_OK )
+  {
+    return OSAL_ERROR;
+  }
+
+  return OSAL_SUCCESS;
+}
+
 osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
 {
   if ( !init )
@@ -154,15 +254,49 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
 
   if ( init->ap_ip && init->ap_gateway && init->ap_netmask )
   {
-    (void) esp_netif_dhcps_stop( g_wifi_hal_ctx.netif_ap );
+    /* Stop any already-running AP DHCP server first so the AP network options
+     * (including the optional captive DNS advertisement) are applied before
+     * the server is restarted below. */
+    esp_err_t dhcp_err = esp_netif_dhcps_stop( g_wifi_hal_ctx.netif_ap );
+    if ( dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED )
+    {
+      return OSAL_ERROR;
+    }
 
     esp_netif_ip_info_t ap_ip_info = { 0 };
     inet_pton( AF_INET, init->ap_ip, &ap_ip_info.ip );
     inet_pton( AF_INET, init->ap_gateway, &ap_ip_info.gw );
     inet_pton( AF_INET, init->ap_netmask, &ap_ip_info.netmask );
 
-    (void) esp_netif_set_ip_info( g_wifi_hal_ctx.netif_ap, &ap_ip_info );
-    (void) esp_netif_dhcps_start( g_wifi_hal_ctx.netif_ap );
+    if ( esp_netif_set_ip_info( g_wifi_hal_ctx.netif_ap, &ap_ip_info ) != ESP_OK )
+    {
+      return OSAL_ERROR;
+    }
+
+    /* Optional captive DNS override advertised by the AP DHCP server.  When
+     * omitted (non-captive use), the platform keeps its default DNS behaviour.
+     * The DNS requirement is applied while the DHCP server is stopped. */
+    if ( init->ap_dns && init->ap_dns[0] != '\0' )
+    {
+      osal_status_t st = _configure_ap_dns( init->ap_dns );
+      if ( st != OSAL_SUCCESS )
+      {
+        /* On error the AP DHCP server is left stopped and the Wi-Fi stack has
+         * not been started yet, so the AP is in a defined, inactive state. */
+        return st;
+      }
+    }
+
+    if ( esp_netif_dhcps_start( g_wifi_hal_ctx.netif_ap ) != ESP_OK )
+    {
+      return OSAL_ERROR;
+    }
+  }
+  else if ( init->ap_dns && init->ap_dns[0] != '\0' )
+  {
+    /* Advertising a captive DNS requires the AP IP/DHCP configuration, so
+     * reject the combination rather than silently dropping the request. */
+    return OSAL_ERR_INVALID_ARGUMENT;
   }
 
   (void) esp_event_handler_register( WIFI_EVENT, ESP_EVENT_ANY_ID, &_wifi_event_handler, NULL );

@@ -98,6 +98,10 @@ typedef struct
   const char*         ap_ip;      /**< Soft-AP static IP address string.  */
   const char*         ap_gateway; /**< Soft-AP gateway string.            */
   const char*         ap_netmask; /**< Soft-AP subnet mask string.        */
+  const char*         ap_dns;     /**< IPv4 DNS advertised by the AP DHCP
+                                      server.  NULL or empty to omit the
+                                      override (non-captive DHCP uses the
+                                      platform default DNS).              */
   wifi_hal_event_cb_t event_cb;   /**< Event callback (must not be NULL). */
   void*               user_data;  /**< Passed unchanged to @p event_cb.  */
 } wifi_hal_init_t;
@@ -208,5 +212,16 @@ osal_status_t wifi_hal_get_default_mac( uint8_t mac[6] );
  * @return  OSAL_SUCCESS on success, error code otherwise
  */
 osal_status_t wifi_hal_get_client_count( uint32_t* out_client_count );
+
+/**
+ * @brief   Check whether a string is a syntactically valid IPv4 address.
+ * @param   [in] str - candidate string (may be NULL)
+ * @return  true if @p str is a valid dotted-decimal IPv4 address, false otherwise
+ *
+ *          Platform-neutral validator used by HAL implementations to reject
+ *          malformed IP string configuration (e.g. @c ap_dns) without exposing
+ *          an ESP-IDF or POSIX-specific type in the public interface.
+ */
+bool wifi_hal_is_valid_ipv4( const char* str );
 
 #endif

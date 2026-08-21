@@ -15,17 +15,24 @@
 /* ---- internal state ------------------------------------------------------ */
 
 static wifi_hal_mock_state_t g_mock = { 0 };
+static bool                  g_hold_scan_done = false;
 
 /* ---- mock control API ---------------------------------------------------- */
 
 void wifi_hal_mock_reset( void )
 {
   memset( &g_mock, 0, sizeof( g_mock ) );
+  g_hold_scan_done = false;
 }
 
 void wifi_hal_mock_set_connect_result( osal_status_t result )
 {
   g_mock.connect_result = result;
+}
+
+void wifi_hal_mock_set_start_result( osal_status_t result )
+{
+  g_mock.start_result = result;
 }
 
 void wifi_hal_mock_set_scan_list( const wifi_hal_ap_record_t* list, uint16_t count )
@@ -58,6 +65,11 @@ void wifi_hal_mock_inject_event( wifi_hal_event_t event, const wifi_hal_event_da
   }
 }
 
+void wifi_hal_mock_set_scan_done_hold( bool hold )
+{
+  g_hold_scan_done = hold;
+}
+
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void )
 {
   return &g_mock;
@@ -65,11 +77,77 @@ const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void )
 
 /* ---- HAL implementation -------------------------------------------------- */
 
+bool wifi_hal_is_valid_ipv4( const char* str )
+{
+  if ( !str || strlen( str ) == 0 || strlen( str ) > 15 )
+  {
+    return false;
+  }
+
+  int  octets = 0;
+  int  value  = 0;
+  int  digits = 0;
+  for ( size_t i = 0; i < strlen( str ); ++i )
+  {
+    char c = str[i];
+    if ( c >= '0' && c <= '9' )
+    {
+      value = value * 10 + ( c - '0' );
+      if ( value > 255 )
+      {
+        return false;
+      }
+      digits++;
+      if ( digits > 3 )
+      {
+        return false;
+      }
+    }
+    else if ( c == '.' )
+    {
+      if ( digits == 0 )
+      {
+        return false; /* empty octet */
+      }
+      octets++;
+      value  = 0;
+      digits = 0;
+    }
+    else
+    {
+      return false; /* invalid character */
+    }
+  }
+
+  if ( digits == 0 )
+  {
+    return false;
+  }
+  return octets == 3;
+}
+
 osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
 {
   if ( !init )
   {
     return OSAL_INVALID_POINTER;
+  }
+
+  /* Optional AP DNS override: validate it when supplied, otherwise store as
+   * omitted (non-captive DHCP keeps the platform default DNS). */
+  if ( init->ap_dns && init->ap_dns[0] != '\0' )
+  {
+    if ( !wifi_hal_is_valid_ipv4( init->ap_dns ) )
+    {
+      return OSAL_ERR_INVALID_ARGUMENT;
+    }
+    strncpy( g_mock.ap_dns, init->ap_dns, sizeof( g_mock.ap_dns ) - 1 );
+    g_mock.ap_dns_set = true;
+  }
+  else
+  {
+    g_mock.ap_dns[0]  = '\0';
+    g_mock.ap_dns_set = false;
   }
 
   g_mock.initialized = true;
@@ -87,13 +165,15 @@ osal_status_t wifi_hal_deinit( void )
 
 osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
 {
-  g_mock.mode    = mode;
-  g_mock.started = true;
-  return OSAL_SUCCESS;
+  g_mock.mode = mode;
+  g_mock.start_count++;
+  g_mock.started = ( g_mock.start_result == OSAL_SUCCESS );
+  return g_mock.start_result;
 }
 
 osal_status_t wifi_hal_stop( void )
 {
+  g_mock.stop_count++;
   g_mock.started   = false;
   g_mock.connected = false;
   return OSAL_SUCCESS;
@@ -140,9 +220,11 @@ osal_status_t wifi_hal_start_scan( bool block )
 {
   (void) block;
 
+  g_mock.scan_start_count++;
   /* If a callback is registered, fire SCAN_DONE so the management layer
-     picks up the results. */
-  if ( g_mock.event_cb )
+     picks up the results — unless the test has asked to hold the completion
+     in order to observe the in-flight scan window. */
+  if ( g_mock.event_cb && !g_hold_scan_done )
   {
     g_mock.event_cb( WIFI_HAL_EVT_SCAN_DONE, NULL, g_mock.user_data );
   }

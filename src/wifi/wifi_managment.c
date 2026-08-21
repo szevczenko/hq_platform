@@ -2,6 +2,7 @@
 
 #include "osal_bin_sem.h"
 #include "osal_log.h"
+#include "osal_mutex.h"
 #include "osal_task.h"
 #include "wifi_config.h"
 #include "wifi_hal_driver.h"
@@ -12,6 +13,9 @@
 #define DEFAULT_SCAN_LIST_SIZE     WIFI_DRV_MAX_SCAN_AP
 /* Blocking scan timeout (ms) when callers expect results synchronously. */
 #define WIFI_SCAN_TIMEOUT_MS 10000
+
+/* Maximum number of typed event subscriptions held at once. */
+#define EVENT_SUBSCRIPTIONS_SIZE 32
 
 #ifndef NORMALPRIO
 #define NORMALPRIO 1u
@@ -47,14 +51,29 @@ typedef struct
 
 typedef struct
 {
+  wifi_mgmt_event_t    event;
+  wifi_mgmt_event_cb_t cb;
+  void*                user_data;
+} event_subscription_t;
+
+typedef struct
+{
+  event_subscription_t items[EVENT_SUBSCRIPTIONS_SIZE];
+  size_t               size;
+} event_sub_list_t;
+
+typedef struct
+{
   wifi_app_status_t state;
   bool              is_started;
   bool              is_power_save;
   bool              connected;
   bool              disconnect_req;
   bool              connect_req;
+  wifi_type_t       mode_req; /**< 0 = none, otherwise a pending async mode.   */
   bool              read_wifi_data;
   bool              scan_in_progress;
+  uint32_t          scan_generation;
   uint32_t          connect_attempts;
   uint32_t          reason_disconnect;
   uint32_t          client_cnt;
@@ -73,6 +92,12 @@ typedef struct
 
   callback_list_t on_connect_cb;
   callback_list_t on_disconnect_cb;
+  event_sub_list_t event_subs;
+  osal_mutex_id_t  event_mutex;
+
+  /* Guards scan records, scan state, IP info and connection state. Callers
+   * must not hold this mutex while dispatching events or running callbacks. */
+  osal_mutex_id_t  state_mutex;
 
   /* Multi-credential support */
   wifi_config_list_t  config_list;
@@ -121,6 +146,96 @@ static void _run_from_cb_list( callback_list_t* list )
   }
 }
 
+static bool _event_subscribe( wifi_mgmt_event_t    event,
+                              wifi_mgmt_event_cb_t cb,
+                              void*                user_data )
+{
+  if ( !cb )
+  {
+    return false;
+  }
+
+  (void) osal_mutex_take( g_ctx.event_mutex );
+
+  /* Reject duplicate registrations: same event, callback and context. */
+  for ( size_t i = 0; i < g_ctx.event_subs.size; ++i )
+  {
+    event_subscription_t* s = &g_ctx.event_subs.items[i];
+    if ( s->event == event && s->cb == cb && s->user_data == user_data )
+    {
+      (void) osal_mutex_give( g_ctx.event_mutex );
+      return false;
+    }
+  }
+
+  if ( g_ctx.event_subs.size >= EVENT_SUBSCRIPTIONS_SIZE )
+  {
+    (void) osal_mutex_give( g_ctx.event_mutex );
+    return false;
+  }
+
+  event_subscription_t* s = &g_ctx.event_subs.items[g_ctx.event_subs.size++];
+  s->event     = event;
+  s->cb        = cb;
+  s->user_data = user_data;
+
+  (void) osal_mutex_give( g_ctx.event_mutex );
+  return true;
+}
+
+static bool _event_unsubscribe( wifi_mgmt_event_t    event,
+                               wifi_mgmt_event_cb_t cb,
+                               void*                user_data )
+{
+  if ( !cb )
+  {
+    return false;
+  }
+
+  (void) osal_mutex_take( g_ctx.event_mutex );
+
+  for ( size_t i = 0; i < g_ctx.event_subs.size; ++i )
+  {
+    event_subscription_t* s = &g_ctx.event_subs.items[i];
+    if ( s->event == event && s->cb == cb && s->user_data == user_data )
+    {
+      /* Shift remaining subscriptions down to fill the gap. */
+      for ( size_t j = i + 1; j < g_ctx.event_subs.size; ++j )
+      {
+        g_ctx.event_subs.items[j - 1] = g_ctx.event_subs.items[j];
+      }
+      g_ctx.event_subs.size--;
+      (void) osal_mutex_give( g_ctx.event_mutex );
+      return true;
+    }
+  }
+
+  (void) osal_mutex_give( g_ctx.event_mutex );
+  return false;
+}
+
+static void _event_dispatch( wifi_mgmt_event_t event )
+{
+  event_subscription_t snapshot[EVENT_SUBSCRIPTIONS_SIZE];
+  size_t               count     = 0;
+
+  (void) osal_mutex_take( g_ctx.event_mutex );
+  for ( size_t i = 0; i < g_ctx.event_subs.size; ++i )
+  {
+    if ( g_ctx.event_subs.items[i].event == event )
+    {
+      snapshot[count++] = g_ctx.event_subs.items[i];
+    }
+  }
+  (void) osal_mutex_give( g_ctx.event_mutex );
+
+  /* Invoke callbacks outside the lock so handlers may subscribe/unsubscribe. */
+  for ( size_t i = 0; i < count; ++i )
+  {
+    snapshot[i].cb( event, snapshot[i].user_data );
+  }
+}
+
 static bool _lock_ip( uint32_t timeout_ms )
 {
   return osal_bin_sem_timed_wait( g_ctx.ip_sem, timeout_ms ) == OSAL_SUCCESS;
@@ -129,6 +244,16 @@ static bool _lock_ip( uint32_t timeout_ms )
 static void _unlock_ip( void )
 {
   (void) osal_bin_sem_give( g_ctx.ip_sem );
+}
+
+static void _lock_state( void )
+{
+  (void) osal_mutex_take( g_ctx.state_mutex );
+}
+
+static void _unlock_state( void )
+{
+  (void) osal_mutex_give( g_ctx.state_mutex );
 }
 
 static void _safe_update_sta_ip_string( const char* ip )
@@ -147,24 +272,28 @@ static void _safe_update_sta_ip_string( const char* ip )
 
 static void _update_ip_info( update_reason_code_t reason )
 {
+  _lock_state();
   memset( &g_ctx.ip_info, 0, sizeof( g_ctx.ip_info ) );
   strncpy( g_ctx.ip_info.ssid, g_ctx.sta_cfg.ssid, sizeof( g_ctx.ip_info.ssid ) - 1 );
   g_ctx.ip_info.urc = (int) reason;
 
   if ( reason != UPDATE_CONNECTION_OK )
   {
+    _unlock_state();
     return;
   }
 
   wifi_hal_ip_info_t hal_ip = { 0 };
   if ( wifi_hal_get_sta_ip_info( &hal_ip ) != OSAL_SUCCESS )
   {
+    _unlock_state();
     return;
   }
 
   strncpy( g_ctx.ip_info.ip, hal_ip.ip, sizeof( g_ctx.ip_info.ip ) - 1 );
   strncpy( g_ctx.ip_info.netmask, hal_ip.netmask, sizeof( g_ctx.ip_info.netmask ) - 1 );
   strncpy( g_ctx.ip_info.gw, hal_ip.gw, sizeof( g_ctx.ip_info.gw ) - 1 );
+  _unlock_state();
 }
 
 static const char* _state_name( wifi_app_status_t s )
@@ -180,8 +309,11 @@ static void _change_state( wifi_app_status_t new_state )
 {
   if ( new_state < WIFI_APP_TOP )
   {
-    osal_log_debug( "[wifi] state %s -> %s", _state_name( g_ctx.state ), _state_name( new_state ) );
+    _lock_state();
+    const wifi_app_status_t old_state = g_ctx.state;
     g_ctx.state = new_state;
+    _unlock_state();
+    osal_log_debug( "[wifi] state %s -> %s", _state_name( old_state ), _state_name( new_state ) );
   }
 }
 
@@ -194,13 +326,17 @@ static void _hal_event_cb( wifi_hal_event_t              event,
   switch ( event )
   {
     case WIFI_HAL_EVT_STA_DISCONNECTED:
+      _lock_state();
       g_ctx.connected        = false;
       g_ctx.reason_disconnect = data ? data->disconnect_reason : 0;
+      _unlock_state();
       _safe_update_sta_ip_string( "0.0.0.0" );
       break;
 
     case WIFI_HAL_EVT_STA_GOT_IP:
+      _lock_state();
       g_ctx.connected = true;
+      _unlock_state();
       if ( data )
       {
         _safe_update_sta_ip_string( data->ip_info.ip );
@@ -209,14 +345,22 @@ static void _hal_event_cb( wifi_hal_event_t              event,
 
     case WIFI_HAL_EVT_SCAN_DONE:
       {
+        /* Publish the fresh scan snapshot under the state lock so concurrent
+         * readers see either the previous snapshot or the completed one, never
+         * a partially written list. Events are dispatched only after the lock
+         * is released so handlers may re-enter the getter API without deadlock. */
+        _lock_state();
         uint16_t ap_num = DEFAULT_SCAN_LIST_SIZE;
         if ( wifi_hal_get_scanned_ap( g_ctx.scan_list, &ap_num ) == OSAL_SUCCESS )
         {
           g_ctx.scanned_ap_num = ap_num;
         }
         g_ctx.scan_in_progress = false;
+        g_ctx.scan_generation++;
+        _unlock_state();
         /* Notify any waiter that scan completed. */
         (void) osal_bin_sem_give( g_ctx.scan_sem );
+        _event_dispatch( WIFI_MGMT_EVENT_SCAN_COMPLETED );
       }
       break;
 
@@ -367,12 +511,25 @@ static void _state_init( void )
     (void) _start_mode( WIFI_HAL_MODE_APSTA );
   }
 
+  _event_dispatch( WIFI_MGMT_EVENT_MODE_CHANGED );
   _update_ip_info( UPDATE_LOST_CONNECTION );
   _change_state( WIFI_APP_IDLE );
 }
 
+static void _request_mode_change( void );
+
 static void _state_idle( void )
 {
+  _lock_state();
+  const bool mode_pending = g_ctx.mode_req != (wifi_type_t) 0;
+  _unlock_state();
+
+  if ( mode_pending )
+  {
+    _request_mode_change();
+    return;
+  }
+
   if ( g_wifi_type == T_WIFI_TYPE_SERVER )
   {
     g_ctx.connected = true;
@@ -441,6 +598,7 @@ static void _state_connect( void )
       g_ctx.connect_req      = false;
       g_ctx.is_started       = false;
       (void) wifi_hal_stop();
+      _event_dispatch( WIFI_MGMT_EVENT_CONNECT_FAILED );
       _change_state( WIFI_APP_STOP );
       return;
     }
@@ -451,11 +609,18 @@ static void _state_connect( void )
 
 static void _state_wait_connect( void )
 {
-  if ( g_ctx.connected )
+  _lock_state();
+  const bool is_conn = g_ctx.connected;
+  if ( is_conn )
   {
     g_ctx.disconnect_req    = false;
     g_ctx.connect_req       = false;
     g_ctx.connect_attempts  = 0;
+  }
+  _unlock_state();
+
+  if ( is_conn )
+  {
     _save_current_sta_config();
     _change_state( WIFI_APP_START );
     return;
@@ -466,6 +631,7 @@ static void _state_wait_connect( void )
     _try_next_credential();
     g_ctx.connect_req      = false;
     g_ctx.connect_attempts = 0;
+    _event_dispatch( WIFI_MGMT_EVENT_CONNECT_FAILED );
     _change_state( WIFI_APP_STOP );
     return;
   }
@@ -479,40 +645,144 @@ static void _state_start( void )
   osal_log_debug( "[wifi] _state_start enter, connected=%d", g_ctx.connected );
   _update_ip_info( UPDATE_CONNECTION_OK );
   _run_from_cb_list( &g_ctx.on_connect_cb );
+  _event_dispatch( WIFI_MGMT_EVENT_CONNECTED );
   _change_state( WIFI_APP_READY );
+}
+
+/* Apply a pending asynchronous mode change (always running in the worker task).
+ *
+ * The HAL is stopped and restarted only when the requested type differs from
+ * the current one, station credentials are deliberately left intact so an
+ * AP+STA -> STA (or any) transition never drops the saved network, and
+ * WIFI_MGMT_EVENT_MODE_CHANGED is emitted only after the HAL restart succeeds.
+ * On failure the pending request is cleared and the machine is left in a
+ * defined recoverable state (HAL stopped, current mode unchanged) from which
+ * the caller may safely retry. */
+static void _request_mode_change( void )
+{
+  _lock_state();
+  const wifi_type_t requested = g_ctx.mode_req;
+  g_ctx.mode_req = (wifi_type_t) 0;
+  g_ctx.connected   = false;
+  g_ctx.is_started  = false;
+  _unlock_state();
+
+  if ( requested != T_WIFI_TYPE_SERVER &&
+       requested != T_WIFI_TYPE_CLIENT &&
+       requested != T_WIFI_TYPE_CLI_SER )
+  {
+    return;
+  }
+
+  wifi_hal_mode_t hal_mode = WIFI_HAL_MODE_STA;
+  if ( requested == T_WIFI_TYPE_SERVER )
+  {
+    hal_mode = WIFI_HAL_MODE_AP;
+  }
+  else if ( requested == T_WIFI_TYPE_CLIENT )
+  {
+    hal_mode = WIFI_HAL_MODE_STA;
+  }
+  else
+  {
+    hal_mode = WIFI_HAL_MODE_APSTA;
+  }
+
+  /* Always cycle the HAL when a distinct mode is requested. It was either still
+   * running in the old mode (stop + restart) or already stopped (restart). */
+  (void) wifi_hal_stop();
+
+  if ( _start_mode( hal_mode ) != OSAL_SUCCESS )
+  {
+    /* Start failed: keep current mode, HAL stopped, IDLE/READY drive a retry. */
+    osal_log_error( "[wifi] mode change to %u failed, HAL left stopped", (unsigned) requested );
+    return;
+  }
+
+  _lock_state();
+  g_wifi_type = requested;
+  _unlock_state();
+  _update_ip_info( UPDATE_LOST_CONNECTION );
+  _event_dispatch( WIFI_MGMT_EVENT_MODE_CHANGED );
 }
 
 static void _state_stop( void )
 {
   osal_log_debug( "[wifi] _state_stop enter" );
-  _run_from_cb_list( &g_ctx.on_disconnect_cb );
 
+  /* Snapshot the connection flags atomically and decide which IP-reason code
+   * to publish. The state lock is released before _update_ip_info (which takes
+   * it internally) and before any callback/event dispatch, so subscribers may
+   * re-enter the getter API without deadlocking. */
+  bool do_failed = false;
+  bool do_user   = false;
+  bool do_lost   = false;
+  _lock_state();
+  const bool was_connected = g_ctx.connected;
   if ( g_ctx.disconnect_req )
   {
     g_ctx.disconnect_req = false;
     if ( g_ctx.reason_disconnect != 0 )
     {
-      _update_ip_info( UPDATE_FAILED_ATTEMPT );
+      do_failed   = true;
       g_ctx.reason_disconnect = 0;
     }
     else
     {
-      _update_ip_info( UPDATE_USER_DISCONNECT );
+      do_user = true;
     }
   }
-  else if ( !g_ctx.connected )
+  else if ( !was_connected )
+  {
+    do_lost = true;
+  }
+  _unlock_state();
+
+  /* Publish the updated IP snapshot before notifying subscribers so a handler
+   * reading management state at event time observes the post-disconnect
+   * snapshot (is_connected() false, ip_info reason set). */
+  if ( do_failed )
+  {
+    _update_ip_info( UPDATE_FAILED_ATTEMPT );
+  }
+  else if ( do_user )
+  {
+    _update_ip_info( UPDATE_USER_DISCONNECT );
+  }
+  else if ( do_lost )
   {
     _update_ip_info( UPDATE_LOST_CONNECTION );
   }
 
   (void) wifi_hal_disconnect();
+  _lock_state();
   g_ctx.connected = false;
+  _unlock_state();
+
+  /* Notify subscribers only after the state transition is final. The event
+   * handlers take an internal snapshot under the event mutex and invoke each
+   * callback after releasing it, so no subscriber runs under a WiFi lock. */
+  (void) _run_from_cb_list( &g_ctx.on_disconnect_cb );
+  if ( was_connected )
+  {
+    _event_dispatch( WIFI_MGMT_EVENT_DISCONNECTED );
+  }
+
   _change_state( WIFI_APP_IDLE );
 }
 
 static void _state_ready( void )
 {
-  if ( g_ctx.disconnect_req || !g_ctx.connected || g_ctx.connect_req )
+  _lock_state();
+  const bool mode_pending = g_ctx.mode_req != (wifi_type_t) 0;
+  const bool stop_req     = g_ctx.disconnect_req || !g_ctx.connected || g_ctx.connect_req;
+  _unlock_state();
+  if ( mode_pending )
+  {
+    _request_mode_change();
+    return;
+  }
+  if ( stop_req )
   {
     _change_state( WIFI_APP_STOP );
     return;
@@ -524,16 +794,19 @@ static void _state_ready( void )
 
 static void _state_deinit( void )
 {
+  _lock_state();
   g_ctx.is_started        = false;
   g_ctx.is_power_save     = false;
   g_ctx.connected         = false;
   g_ctx.disconnect_req    = false;
   g_ctx.connect_req       = false;
+  g_ctx.mode_req          = (wifi_type_t) 0;
   g_ctx.connect_attempts  = 0;
   g_ctx.reason_disconnect = 0;
   g_ctx.client_cnt        = 0;
   g_ctx.scanned_ap_num    = 0;
   g_ctx.scan_in_progress  = false;
+  _unlock_state();
 
   _update_ip_info( UPDATE_LOST_CONNECTION );
 
@@ -595,6 +868,9 @@ void wifi_mgmt_init( void )
 {
   _init_list( &g_ctx.on_connect_cb );
   _init_list( &g_ctx.on_disconnect_cb );
+  memset( &g_ctx.event_subs, 0, sizeof( g_ctx.event_subs ) );
+  (void) osal_mutex_create( &g_ctx.event_mutex, "wifi_evt" );
+  (void) osal_mutex_create( &g_ctx.state_mutex, "wifi_state" );
 
   (void) osal_bin_sem_create( &g_ctx.ip_sem, "wifi_ip", OSAL_SEM_FULL );
   (void) osal_bin_sem_create( &g_ctx.scan_sem, "wifi_scan", OSAL_SEM_EMPTY );
@@ -630,7 +906,43 @@ void wifi_mgmt_init( void )
 
 void wifi_mgmt_set_wifi_type( wifi_type_t type )
 {
+  if ( type == g_wifi_type )
+  {
+    return;
+  }
+
   g_wifi_type = type;
+
+  /* Only notify once the module is live (mutex created). */
+  if ( g_ctx.state != WIFI_APP_DISABLE )
+  {
+    _event_dispatch( WIFI_MGMT_EVENT_MODE_CHANGED );
+  }
+}
+
+bool wifi_mgmt_request_mode( wifi_type_t type )
+{
+  if ( type != T_WIFI_TYPE_SERVER &&
+       type != T_WIFI_TYPE_CLIENT &&
+       type != T_WIFI_TYPE_CLI_SER )
+  {
+    return false;
+  }
+
+  _lock_state();
+  if ( type == g_wifi_type )
+  {
+    /* Repeated request for the current mode: harmless no-op. */
+    g_ctx.mode_req = (wifi_type_t) 0;
+    _unlock_state();
+    return true;
+  }
+
+  /* Queue the transition. The Wi-Fi worker task applies it and emits
+   * MODE_CHANGED only after the HAL restart succeeds. */
+  g_ctx.mode_req = type;
+  _unlock_state();
+  return true;
 }
 
 void wifi_mgmt_stop( void )
@@ -657,15 +969,21 @@ void wifi_mgmt_start( void )
 
 static bool _scan( bool block )
 {
+  _lock_state();
   if ( g_wifi_type == T_WIFI_TYPE_SERVER || g_ctx.scan_in_progress )
   {
+    _unlock_state();
     return false;
   }
 
-  if ( g_ctx.state != WIFI_APP_IDLE && g_ctx.state != WIFI_APP_READY )
+  const bool state_ok = g_ctx.state == WIFI_APP_IDLE || g_ctx.state == WIFI_APP_READY;
+  if ( !state_ok )
   {
+    _unlock_state();
     return false;
   }
+  g_ctx.scan_in_progress = true;
+  _unlock_state();
 
   /* Clear stale SCAN_DONE semaphore state from previous scans.
    * This prevents a new blocking scan from returning immediately. */
@@ -673,11 +991,11 @@ static bool _scan( bool block )
   {
   }
 
-  g_ctx.scan_in_progress = true;
-
   if ( wifi_hal_start_scan( block ) != OSAL_SUCCESS )
   {
+    _lock_state();
     g_ctx.scan_in_progress = false;
+    _unlock_state();
     return false;
   }
 
@@ -687,7 +1005,9 @@ static bool _scan( bool block )
     if ( osal_bin_sem_timed_wait( g_ctx.scan_sem, WIFI_SCAN_TIMEOUT_MS ) != OSAL_SUCCESS )
     {
       /* Timed out waiting for results; clear flag and report failure. */
+      _lock_state();
       g_ctx.scan_in_progress = false;
+      _unlock_state();
       return false;
     }
   }
@@ -707,33 +1027,64 @@ bool wifi_mgmt_start_scan_no_block( void )
 
 void wifi_mgmt_get_scan_result( uint16_t* ap_count )
 {
-  if ( ap_count )
+  if ( !ap_count )
   {
-    *ap_count = g_ctx.scanned_ap_num;
+    return;
   }
+
+  _lock_state();
+  *ap_count = g_ctx.scanned_ap_num;
+  _unlock_state();
+}
+
+bool wifi_mgmt_is_scan_active( void )
+{
+  _lock_state();
+  const bool active = g_ctx.scan_in_progress;
+  _unlock_state();
+  return active;
+}
+
+uint32_t wifi_mgmt_get_scan_generation( void )
+{
+  _lock_state();
+  const uint32_t gen = g_ctx.scan_generation;
+  _unlock_state();
+  return gen;
 }
 
 bool wifi_mgmt_get_name_from_scanned_list( uint8_t number, char* name )
 {
-  if ( !name || number >= g_ctx.scanned_ap_num )
+  if ( !name )
   {
+    return false;
+  }
+
+  _lock_state();
+  if ( number >= g_ctx.scanned_ap_num )
+  {
+    _unlock_state();
     return false;
   }
 
   strncpy( name, g_ctx.scan_list[number].ssid, MAX_SSID_SIZE );
   name[MAX_SSID_SIZE] = '\0';
+  _unlock_state();
   return true;
 }
 
 bool wifi_mgmt_set_from_ap_list( uint8_t num )
 {
+  _lock_state();
   if ( num >= g_ctx.scanned_ap_num )
   {
+    _unlock_state();
     return false;
   }
 
   memset( g_ctx.sta_cfg.ssid, 0, sizeof( g_ctx.sta_cfg.ssid ) );
   strncpy( g_ctx.sta_cfg.ssid, g_ctx.scan_list[num].ssid, sizeof( g_ctx.sta_cfg.ssid ) - 1 );
+  _unlock_state();
   return true;
 }
 
@@ -780,7 +1131,9 @@ bool wifi_mgmt_connect( void )
     return false;
   }
 
+  _lock_state();
   g_ctx.connect_req = true;
+  _unlock_state();
   return true;
 }
 
@@ -791,38 +1144,66 @@ bool wifi_mgmt_disconnect( void )
     return false;
   }
 
+  _lock_state();
   g_ctx.disconnect_req = true;
+  _unlock_state();
   return true;
 }
 
 bool wifi_mgmt_is_connected( void )
 {
-  return g_ctx.connected && !g_ctx.connect_req;
+  _lock_state();
+  const bool conn = g_ctx.connected && !g_ctx.connect_req;
+  _unlock_state();
+  return conn;
 }
 
 bool wifi_mgmt_is_ready_to_scan( void )
 {
-  return g_ctx.state == WIFI_APP_IDLE || g_ctx.state == WIFI_APP_READY;
+  _lock_state();
+  const bool ok = g_ctx.state == WIFI_APP_IDLE || g_ctx.state == WIFI_APP_READY;
+  _unlock_state();
+  return ok;
 }
 
 bool wifi_mgmt_ready_to_connect( void )
 {
-  return g_ctx.state == WIFI_APP_IDLE;
+  _lock_state();
+  const bool ok = g_ctx.state == WIFI_APP_IDLE;
+  _unlock_state();
+  return ok;
 }
 
 bool wifi_mgmt_trying_connect( void )
 {
-  return g_ctx.state == WIFI_APP_WAIT_CONNECT || g_ctx.state == WIFI_APP_CONNECT;
+  _lock_state();
+  const bool ok = g_ctx.state == WIFI_APP_WAIT_CONNECT || g_ctx.state == WIFI_APP_CONNECT;
+  _unlock_state();
+  return ok;
 }
 
 bool wifi_mgmt_is_read_data( void )
 {
-  return g_ctx.read_wifi_data;
+  _lock_state();
+  const bool ok = g_ctx.read_wifi_data;
+  _unlock_state();
+  return ok;
 }
 
 bool wifi_mgmt_is_idle( void )
 {
-  return g_ctx.state == WIFI_APP_IDLE;
+  _lock_state();
+  const bool ok = g_ctx.state == WIFI_APP_IDLE;
+  _unlock_state();
+  return ok;
+}
+
+bool wifi_mgmt_is_running( void )
+{
+  _lock_state();
+  const bool running = g_ctx.state != WIFI_APP_DISABLE;
+  _unlock_state();
+  return running;
 }
 
 int wifi_mgmt_get_rssi( void )
@@ -834,6 +1215,16 @@ void wifi_mgmt_power_save( bool state )
 {
   g_ctx.is_power_save = state;
   (void) wifi_hal_set_power_save( state );
+}
+
+bool wifi_mgmt_subscribe( wifi_mgmt_event_t event, wifi_mgmt_event_cb_t cb, void* user_data )
+{
+  return _event_subscribe( event, cb, user_data );
+}
+
+bool wifi_mgmt_unsubscribe( wifi_mgmt_event_t event, wifi_mgmt_event_cb_t cb, void* user_data )
+{
+  return _event_unsubscribe( event, cb, user_data );
 }
 
 void wifi_mgmt_register_connect_cb( wifi_mgmt_callback_t cb )
@@ -886,7 +1277,9 @@ bool wifi_mgmt_get_ip_info( wifi_mgmt_ip_info_t* info )
     return false;
   }
 
+  _lock_state();
   *info = g_ctx.ip_info;
+  _unlock_state();
   return true;
 }
 
@@ -897,20 +1290,25 @@ bool wifi_mgmt_get_access_points( wifi_mgmt_ap_list_t* list )
     return false;
   }
 
+  /* Copy the scan snapshot under the state lock so a concurrent SCAN_DONE
+   * update can never leave count and items inconsistent. */
+  _lock_state();
   memset( list, 0, sizeof( *list ) );
-  list->count = g_ctx.scanned_ap_num;
-  if ( list->count > WIFI_DRV_MAX_SCAN_AP )
+  uint16_t n = g_ctx.scanned_ap_num;
+  if ( n > WIFI_DRV_MAX_SCAN_AP )
   {
-    list->count = WIFI_DRV_MAX_SCAN_AP;
+    n = WIFI_DRV_MAX_SCAN_AP;
   }
+  list->count = n;
 
-  for ( uint16_t i = 0; i < list->count; ++i )
+  for ( uint16_t i = 0; i < n; ++i )
   {
     strncpy( list->items[i].ssid, g_ctx.scan_list[i].ssid, MAX_SSID_SIZE );
     list->items[i].chan = g_ctx.scan_list[i].channel;
     list->items[i].rssi = g_ctx.scan_list[i].rssi;
     list->items[i].auth = g_ctx.scan_list[i].authmode;
   }
+  _unlock_state();
 
   return true;
 }

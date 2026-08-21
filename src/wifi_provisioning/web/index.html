@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>HQ Wi-Fi Provisioning</title>
+    <link rel="stylesheet" href="app.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#portal-main">Skip to portal content</a>
+
+    <header class="app-header">
+      <h1>HQ Wi-Fi Provisioning Portal</h1>
+      <p id="page-description">
+        Connect this device to a Wi-Fi network so it can reach the internet.
+      </p>
+    </header>
+
+    <main id="portal-main">
+      <!-- Live region announces background activity to assistive technology. -->
+      <div id="status-announcement" class="visually-hidden" aria-live="polite"></div>
+
+      <!-- ============ Network list view ============ -->
+      <section id="view-network-list" class="portal-view" data-view="network-list" aria-labelledby="network-list-title">
+        <h2 id="network-list-title">Available Networks</h2>
+        <p id="network-list-hint">
+          Choose a network to join, or add a hidden network that is not listed.
+        </p>
+
+        <button type="button" id="rescan-button" class="secondary">
+          Rescan for networks
+        </button>
+
+        <p id="scan-progress" class="status-note" role="status" aria-live="polite" hidden>
+          Scanning for available networks…
+        </p>
+
+        <ul id="network-list" aria-label="Available networks">
+          <li class="empty-list-note" id="network-list-empty" role="status">
+            No networks found yet. Press “Rescan for networks” to look for them.
+          </li>
+        </ul>
+
+        <fieldset id="hidden-ssid" class="hidden-ssid-entry">
+          <legend>Add a hidden network</legend>
+          <label for="hidden-ssid-input">Network name (SSID)</label>
+          <input
+            type="text"
+            id="hidden-ssid-input"
+            name="hidden-ssid"
+            autocomplete="off"
+            maxlength="32"
+            spellcheck="false"
+          />
+          <button type="button" id="hidden-ssid-next" class="primary">Next</button>
+        </fieldset>
+      </section>
+
+      <!-- ============ Password entry view ============ -->
+      <section id="view-password" class="portal-view" data-view="password" aria-labelledby="password-title" hidden>
+        <h2 id="password-title">Enter Wi-Fi Password</h2>
+        <p id="selected-network" class="selected-network" aria-live="polite">
+          Network: <strong id="password-network-name"></strong>
+        </p>
+
+        <form id="password-form">
+          <label for="password-input">Wi-Fi password</label>
+          <input type="password" id="password-input" autocomplete="off" maxlength="64" />
+          <button type="submit" id="connect-button" class="primary">Connect</button>
+          <button type="button" id="password-back-button" class="secondary">Back to networks</button>
+        </form>
+
+        <p id="password-error" class="error-note" role="alert" hidden>
+          Please enter the Wi-Fi password for this network.
+        </p>
+      </section>
+
+      <!-- ============ Connecting view ============ -->
+      <section id="view-connecting" class="portal-view" data-view="connecting" aria-labelledby="connecting-title" hidden>
+        <h2 id="connecting-title">Connecting</h2>
+        <div id="connecting-spinner" class="spinner" role="img" aria-label="Connecting to the network"></div>
+        <p id="connecting-text" class="status-note" role="status" aria-live="polite">
+          Connecting to <strong id="connecting-network-name"></strong>…
+        </p>
+        <button type="button" id="connecting-cancel-button" class="secondary">
+          Cancel
+        </button>
+      </section>
+
+      <!-- ============ Failure view ============ -->
+      <section id="view-failure" class="portal-view" data-view="failure" aria-labelledby="failure-title" hidden>
+        <h2 id="failure-title">Connection Failed</h2>
+        <p id="failure-message" class="alert-note" role="alert">
+          This device could not join the selected network.
+        </p>
+        <p id="failure-detail" class="alert-note" role="alert"></p>
+
+        <button type="button" id="failure-retry-button" class="primary">Try again</button>
+        <button type="button" id="failure-back-button" class="secondary">Choose another network</button>
+      </section>
+
+      <!-- ============ Connected view ============ -->
+      <section id="view-connected" class="portal-view" data-view="connected" aria-labelledby="connected-title" hidden>
+        <h2 id="connected-title">Connected</h2>
+        <p id="connected-summary" class="connected-notice" role="status" aria-live="polite">
+          This device is now connected to <strong id="connected-network-name"></strong>.
+        </p>
+        <dl class="connection-details">
+          <div>
+            <dt>Network</dt>
+            <dd id="connected-network-detail"></dd>
+          </div>
+          <div>
+            <dt>Status</dt>
+            <dd id="connected-status-detail">Connected</dd>
+          </div>
+        </dl>
+        <button type="button" id="connected-disconnect-button" class="secondary">
+          Disconnect
+        </button>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>HQ Wi-Fi Provisioning · This page is served locally by your device.</p>
+    </footer>
+  </body>
+</html>

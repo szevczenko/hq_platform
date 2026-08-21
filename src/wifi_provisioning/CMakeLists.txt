@@ -17,7 +17,16 @@ if(CONFIG_WIFI_HTTP_PROVISIONING)
 
   set(WIFI_PROVISIONING_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/wifi_http_provisioning.c
   )
+
+  # The automatic fallback controller is an optional policy layer: it is
+  # compiled only when CONFIG_WIFI_HTTP_PROVISIONING_AUTO_FALLBACK=y.
+  if(CONFIG_WIFI_HTTP_PROVISIONING_AUTO_FALLBACK)
+    list(APPEND WIFI_PROVISIONING_SOURCES
+      ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning_controller.c
+    )
+  endif()
 
   if(ESP_PLATFORM)
     idf_component_register(SRCS ${WIFI_PROVISIONING_SOURCES}

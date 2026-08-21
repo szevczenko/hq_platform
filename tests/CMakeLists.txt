@@ -42,6 +42,7 @@ if(NOT ESP_PLATFORM)
   add_executable(wifi_tests
     ${WIFI_TEST_DIR}/wifi_tests_runner.c
     ${WIFI_TEST_DIR}/wifi_hal_mock.c
+    ${WIFI_TEST_DIR}/wifi_hal_mock_test.c
     ${WIFI_TEST_DIR}/wifi_config_test.c
     ${WIFI_TEST_DIR}/wifi_utils_test.c
     ${WIFI_TEST_DIR}/wifi_mgmt_test.c
@@ -223,6 +224,383 @@ if(NOT ESP_PLATFORM)
   set_tests_properties(captive_dns_server_loopback_tests PROPERTIES LABELS "unit;mongoose")
 
   message(STATUS "Tests: Building captive DNS server loopback test application (captive_dns_server_loopback_tests)")
+
+  # ---- Wi-Fi HTTP provisioning application lifecycle tests ----
+  # Only built when the optional provisioning component is enabled.
+  if(CONFIG_WIFI_HTTP_PROVISIONING)
+    add_executable(wifi_http_provisioning_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning/wifi_http_provisioning_test.c
+    )
+
+    target_include_directories(wifi_http_provisioning_tests
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+    )
+
+    if(CONFIG_HQ_PLATFORM_POSIX)
+      target_include_directories(wifi_http_provisioning_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+      )
+    endif()
+
+    target_link_libraries(wifi_http_provisioning_tests
+      hq_wifi_provisioning
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_http_provisioning_tests COMMAND wifi_http_provisioning_tests)
+    set_tests_properties(wifi_http_provisioning_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+    message(STATUS "Tests: Building Wi-Fi HTTP provisioning lifecycle test application (wifi_http_provisioning_tests)")
+
+    # ---- Wi-Fi HTTP provisioning lifecycle robustness tests ----
+    # Exercises repeated start/stop cycles, HTTP and DNS bind-failure rollback,
+    # recovery after a failed start, and the guarantee that stopping
+    # provisioning never deinitializes the shared Mongoose process (so MQTT
+    # and ThingsBoard, which ride the same process, keep running).  Listener
+    # failures are injected with real socket conflicts.  Registered as a
+    # separate target so a lifecycle regression is isolated from the route
+    # tests.
+    add_executable(wifi_http_provisioning_lifecycle_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning/wifi_http_provisioning_lifecycle_test.c
+    )
+
+    target_include_directories(wifi_http_provisioning_lifecycle_tests
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+    )
+
+    if(CONFIG_HQ_PLATFORM_POSIX)
+      target_include_directories(wifi_http_provisioning_lifecycle_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+      )
+    endif()
+
+    target_link_libraries(wifi_http_provisioning_lifecycle_tests
+      hq_wifi_provisioning
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_http_provisioning_lifecycle_tests COMMAND wifi_http_provisioning_lifecycle_tests)
+    set_tests_properties(wifi_http_provisioning_lifecycle_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+    message(STATUS "Tests: Building Wi-Fi HTTP provisioning lifecycle robustness test application (wifi_http_provisioning_lifecycle_tests)")
+
+    # ---- Wi-Fi HTTP provisioning callback subscription tests ----
+    # Verifies the status route's typed Wi-Fi event subscriptions are taken on
+    # a clean start and released on every stop, across repeated cycles and
+    # bind-failure rollbacks. The test compiles the provisioning module against
+    # a mock Wi-Fi management API (which counts live subscriptions) while using
+    # the real Mongoose process and captive DNS service, so no WiFiMgmt source
+    # is linked here (that would pull in the real driver).
+    add_executable(wifi_http_provisioning_subscription_tests
+      ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning/wifi_http_provisioning_subscription_test.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning/wifi_http_provisioning.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning/wifi_provisioning.c
+    )
+
+    target_include_directories(wifi_http_provisioning_subscription_tests
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning
+      PRIVATE ${WIFI_SRC_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+      PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+    )
+
+    if(CONFIG_HQ_PLATFORM_POSIX)
+      target_include_directories(wifi_http_provisioning_subscription_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+      )
+    endif()
+
+    target_link_libraries(wifi_http_provisioning_subscription_tests
+      hq_mongoose
+      hq_osal
+      hq_cjson
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_http_provisioning_subscription_tests COMMAND wifi_http_provisioning_subscription_tests)
+    set_tests_properties(wifi_http_provisioning_subscription_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+    message(STATUS "Tests: Building Wi-Fi HTTP provisioning callback subscription test application (wifi_http_provisioning_subscription_tests)")
+
+    # ---- Wi-Fi HTTP provisioning status endpoint tests (mock Wi-Fi HAL) ----
+    # Built only when the optional provisioning component is enabled.  The mock
+    # HAL gives deterministic control over the Wi-Fi link state (connect
+    # results and injected events), so this target compiles the Wi-Fi
+    # management sources directly instead of linking the platform driver.
+    set(WIFI_PROVISIONING_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning)
+    set(WIFI_PROVISIONING_SRC_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning)
+
+    add_executable(wifi_http_provisioning_status_tests
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_status_test.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+      ${WIFI_SRC_DIR}/wifi_managment.c
+      ${WIFI_SRC_DIR}/wifi_config.c
+      ${WIFI_SRC_DIR}/wifi_utils.c
+      ${WIFI_TEST_DIR}/wifi_hal_mock.c
+    )
+
+    target_include_directories(wifi_http_provisioning_status_tests
+      PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
+      PRIVATE ${WIFI_SRC_DIR}
+      PRIVATE ${WIFI_TEST_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+      PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+    )
+
+    if(CONFIG_HQ_PLATFORM_POSIX)
+      target_include_directories(wifi_http_provisioning_status_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+      )
+    endif()
+
+    target_link_libraries(wifi_http_provisioning_status_tests
+      hq_mongoose
+      hq_osal
+      hq_cjson
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_http_provisioning_status_tests COMMAND wifi_http_provisioning_status_tests)
+    set_tests_properties(wifi_http_provisioning_status_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+    message(STATUS "Tests: Building Wi-Fi HTTP provisioning status test application (wifi_http_provisioning_status_tests)")
+
+    # ---- Wi-Fi HTTP provisioning scan endpoint tests (mock Wi-Fi HAL) ----
+    # Exercises POST /api/v1/wifi/scans and GET /api/v1/wifi/networks against
+    # the real HTTP listener, the shared Mongoose process, and the mock HAL so
+    # scan start, in-flight window, completion, and failure can be driven
+    # deterministically.
+    add_executable(wifi_http_provisioning_scan_tests
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_scan_test.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+      ${WIFI_SRC_DIR}/wifi_managment.c
+      ${WIFI_SRC_DIR}/wifi_config.c
+      ${WIFI_SRC_DIR}/wifi_utils.c
+      ${WIFI_TEST_DIR}/wifi_hal_mock.c
+    )
+
+    target_include_directories(wifi_http_provisioning_scan_tests
+      PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
+      PRIVATE ${WIFI_SRC_DIR}
+      PRIVATE ${WIFI_TEST_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+      PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+    )
+
+    if(CONFIG_HQ_PLATFORM_POSIX)
+      target_include_directories(wifi_http_provisioning_scan_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+      )
+    endif()
+
+    target_link_libraries(wifi_http_provisioning_scan_tests
+      hq_mongoose
+      hq_osal
+      hq_cjson
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_http_provisioning_scan_tests COMMAND wifi_http_provisioning_scan_tests)
+    set_tests_properties(wifi_http_provisioning_scan_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+    message(STATUS "Tests: Building Wi-Fi HTTP provisioning scan test application (wifi_http_provisioning_scan_tests)")
+
+    # ---- Wi-Fi HTTP provisioning credential endpoint tests (mock Wi-Fi HAL) ----
+    # Exercises POST /api/v1/wifi/credentials over the real HTTP listener
+    # against the shared Mongoose process and the mock HAL so valid and invalid
+    # submissions (byte-length, body-size, Content-Type, and JSON validation)
+    # can be driven deterministically over HTTP.
+    add_executable(wifi_http_provisioning_credentials_tests
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_credentials_test.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+      ${WIFI_SRC_DIR}/wifi_managment.c
+      ${WIFI_SRC_DIR}/wifi_config.c
+      ${WIFI_SRC_DIR}/wifi_utils.c
+      ${WIFI_TEST_DIR}/wifi_hal_mock.c
+    )
+
+    target_include_directories(wifi_http_provisioning_credentials_tests
+      PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
+      PRIVATE ${WIFI_SRC_DIR}
+      PRIVATE ${WIFI_TEST_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+      PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+    )
+
+    if(CONFIG_HQ_PLATFORM_POSIX)
+      target_include_directories(wifi_http_provisioning_credentials_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+      )
+    endif()
+
+    target_link_libraries(wifi_http_provisioning_credentials_tests
+      hq_mongoose
+      hq_osal
+      hq_cjson
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_http_provisioning_credentials_tests COMMAND wifi_http_provisioning_credentials_tests)
+    set_tests_properties(wifi_http_provisioning_credentials_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+    message(STATUS "Tests: Building Wi-Fi HTTP provisioning credential test application (wifi_http_provisioning_credentials_tests)")
+
+    # ---- Wi-Fi HTTP provisioning disconnect endpoint tests (mock Wi-Fi HAL) ----
+    # Exercises DELETE /api/v1/wifi/connection over the real HTTP listener
+    # against the shared Mongoose process and the mock HAL so an accepted
+    # asynchronous disconnect (connected and already-disconnected), an
+    # un-requestable disconnect (Wi-Fi stopped -> stable service error), and
+    # method rejection are driven deterministically over HTTP. Also proves the
+    # provisioning HTTP listener and lifecycle stay reachable after a station
+    # disconnect and that no response leaks credential data.
+    add_executable(wifi_http_provisioning_disconnect_tests
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_disconnect_test.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+      ${WIFI_SRC_DIR}/wifi_managment.c
+      ${WIFI_SRC_DIR}/wifi_config.c
+      ${WIFI_SRC_DIR}/wifi_utils.c
+      ${WIFI_TEST_DIR}/wifi_hal_mock.c
+    )
+
+    target_include_directories(wifi_http_provisioning_disconnect_tests
+      PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
+      PRIVATE ${WIFI_SRC_DIR}
+      PRIVATE ${WIFI_TEST_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+      PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+    )
+
+    if(CONFIG_HQ_PLATFORM_POSIX)
+      target_include_directories(wifi_http_provisioning_disconnect_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+      )
+    endif()
+
+    target_link_libraries(wifi_http_provisioning_disconnect_tests
+      hq_mongoose
+      hq_osal
+      hq_cjson
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_http_provisioning_disconnect_tests COMMAND wifi_http_provisioning_disconnect_tests)
+    set_tests_properties(wifi_http_provisioning_disconnect_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+    message(STATUS "Tests: Building Wi-Fi HTTP provisioning disconnect test application (wifi_http_provisioning_disconnect_tests)")
+
+    # ---- Wi-Fi HTTP provisioning captive portal routing tests (mock Wi-Fi HAL) ----
+    # Exercises the captive-check handling and fallback routing over the real
+    # HTTP listener against the shared Mongoose process and the mock HAL:
+    # Android /generate_204, Apple /hotspot-detect.html, and Windows /ncsi.txt
+    # and /connecttest.txt probes all resolve to the portal; the portal root is
+    # served directly; unknown browser GET routes redirect to the portal root;
+    # API routes are never redirected; unsupported methods return 405 with
+    # Allow: GET; and HTTPS is not intercepted (a raw TLS handshake receives no
+    # portal response).
+    add_executable(wifi_http_provisioning_captive_tests
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_captive_test.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+      ${WIFI_SRC_DIR}/wifi_managment.c
+      ${WIFI_SRC_DIR}/wifi_config.c
+      ${WIFI_SRC_DIR}/wifi_utils.c
+      ${WIFI_TEST_DIR}/wifi_hal_mock.c
+    )
+
+    target_include_directories(wifi_http_provisioning_captive_tests
+      PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
+      PRIVATE ${WIFI_SRC_DIR}
+      PRIVATE ${WIFI_TEST_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+      PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+    )
+
+    if(CONFIG_HQ_PLATFORM_POSIX)
+      target_include_directories(wifi_http_provisioning_captive_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+      )
+    endif()
+
+    target_link_libraries(wifi_http_provisioning_captive_tests
+      hq_mongoose
+      hq_osal
+      hq_cjson
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_http_provisioning_captive_tests COMMAND wifi_http_provisioning_captive_tests)
+    set_tests_properties(wifi_http_provisioning_captive_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+    message(STATUS "Tests: Building Wi-Fi HTTP provisioning captive routing test application (wifi_http_provisioning_captive_tests)")
+
+    # ---- Wi-Fi provisioning automatic fallback controller tests ----
+    # Built only when CONFIG_WIFI_HTTP_PROVISIONING_AUTO_FALLBACK is enabled
+    # (the controller source is compiled exclusively under that guard).
+    # The controller is linked against lightweight mocks of the Wi-Fi
+    # management and provisioning lifecycle APIs so the policy can be driven
+    # deterministically by injecting typed events.
+    if(CONFIG_WIFI_HTTP_PROVISIONING_AUTO_FALLBACK)
+      add_executable(wifi_provisioning_controller_tests
+        ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_controller_test.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
+      )
+
+      target_include_directories(wifi_provisioning_controller_tests
+        PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
+        PRIVATE ${WIFI_SRC_DIR}
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+        PRIVATE ${HQ_CONFIG_DIR}
+      )
+
+      if(CONFIG_HQ_PLATFORM_POSIX)
+        target_include_directories(wifi_provisioning_controller_tests
+          PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+        )
+      endif()
+
+      target_link_libraries(wifi_provisioning_controller_tests
+        unity
+        pthread
+      )
+
+      add_test(NAME wifi_provisioning_controller_tests COMMAND wifi_provisioning_controller_tests)
+      set_tests_properties(wifi_provisioning_controller_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+      message(STATUS "Tests: Building Wi-Fi provisioning controller test application (wifi_provisioning_controller_tests)")
+    endif()
+  endif()
 
   # ---- ThingsBoard client tests (uses mock MQTT) ----
   set(TB_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thingsboard)

@@ -154,6 +154,9 @@ typedef struct
   wifi_hal_event_cb_t   event_cb;
   void*                 user_data;
 
+  char                  ap_dns[16]; /**< DNS advertised by AP DHCP (empty when omitted). */
+  bool                  ap_dns_set; /**< True when a non-empty ap_dns was configured.    */
+
   const sim_ap_t*       active_ap;      /**< AP we're connected to (or NULL). */
 
   /* Disconnect timer thread */
@@ -193,6 +196,55 @@ static const sim_ap_t* _find_ap( const char* ssid )
     }
   }
   return NULL;
+}
+
+bool wifi_hal_is_valid_ipv4( const char* str )
+{
+  if ( !str || strlen( str ) == 0 || strlen( str ) > 15 )
+  {
+    return false;
+  }
+
+  int  octets = 0;
+  int  value  = 0;
+  int  digits = 0;
+  for ( size_t i = 0; i < strlen( str ); ++i )
+  {
+    char c = str[i];
+    if ( c >= '0' && c <= '9' )
+    {
+      value = value * 10 + ( c - '0' );
+      if ( value > 255 )
+      {
+        return false;
+      }
+      digits++;
+      if ( digits > 3 )
+      {
+        return false;
+      }
+    }
+    else if ( c == '.' )
+    {
+      if ( digits == 0 )
+      {
+        return false; /* empty octet */
+      }
+      octets++;
+      value  = 0;
+      digits = 0;
+    }
+    else
+    {
+      return false; /* invalid character */
+    }
+  }
+
+  if ( digits == 0 )
+  {
+    return false;
+  }
+  return octets == 3;
 }
 
 static void _fire_event( wifi_hal_event_t event, const wifi_hal_event_data_t* data )
@@ -408,6 +460,23 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
   pthread_mutex_init( &g_sim.conn_mutex, NULL );
   pthread_cond_init( &g_sim.conn_cond, NULL );
   pthread_mutex_init( &g_sim.state_mutex, NULL );
+
+  /* Optional AP DNS override: validate it when supplied, otherwise store as
+   * omitted (non-captive DHCP keeps the platform default DNS). */
+  g_sim.ap_dns_set = ( init->ap_dns && init->ap_dns[0] != '\0' );
+  if ( g_sim.ap_dns_set )
+  {
+    if ( !wifi_hal_is_valid_ipv4( init->ap_dns ) )
+    {
+      osal_log_error( "[wifi-sim] invalid AP DNS \"%s\"", init->ap_dns );
+      return OSAL_ERR_INVALID_ARGUMENT;
+    }
+    strncpy( g_sim.ap_dns, init->ap_dns, sizeof( g_sim.ap_dns ) - 1 );
+  }
+  else
+  {
+    g_sim.ap_dns[0] = '\0';
+  }
 
   pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.event_cb    = init->event_cb;
