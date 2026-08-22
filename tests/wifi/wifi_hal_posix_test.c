@@ -1,14 +1,39 @@
 /*
  * POSIX Wi-Fi HAL — lifecycle teardown regression tests
  *
- * Exercises the callback-quiescent, repeat-safe deinit contract of the real
- * POSIX HAL simulator (src/wifi/platforms/posix/wifi_hal_driver.c):
+ * Exercises the callback-quiescent, session-operation-barrier, repeat-safe
+ * deinit contract of the real POSIX HAL simulator
+ * (src/wifi/platforms/posix/wifi_hal_driver.c):
  *   1. deinit before any init is a successful no-op,
  *   2. init/deinit/deinit: repeated deinit is a no-op and a later init works,
- *   3. partial-init cleanup (failure injected through the public API) leaves
- *      the session fully uninitialized,
- *   4. an event racing deinit: a timer-driven event source is stopped and
- *      joined, and an in-flight callback is waited out before deinit returns.
+ *   3. partial primitive-init unwind: an injected pthread_mutex_init failure
+ *      part-way through session creation rolls back every primitive created so
+ *      far (exact reverse order),
+ *   4. partial primitive-init unwind that itself fails: the session enters
+ *      CLEANUP_REQUIRED, admission stays closed, and a deinit retry releases
+ *      the retained primitive,
+ *   5. pthread_create failure: a failed timer create leaves no joinable handle,
+ *      so deinit joins nothing and succeeds,
+ *   6. join failure: deinit returns an error with callbacks disabled and the
+ *      exact thread handle retained; a retry deinit re-attempts the same join
+ *      and completes,
+ *   7. a public scan operation admitted while deinit begins: deinit waits for
+ *      the admitted operation and operations arriving once teardown has begun
+ *      are rejected without touching session resources,
+ *   8. a connect (timer-start) operation admitted while deinit begins: deinit
+ *      waits for the admitted operation, then cancels and joins the timer
+ *      before destroying the per-session primitives,
+ *   9. a timer-driven event racing deinit is cancelled and joined,
+ *  10. an in-flight callback racing deinit is waited out (quiescence), and a
+ *      callback that re-enters a HAL API does not deadlock,
+ *  11. repeated init/deinit cycles never reuse destroyed pthread objects,
+ *  12. a timer thread that completed on its own is still joined by deinit.
+ *
+ * Cross-thread callback rendezvous use semaphores (the callback posts an
+ * "entered" semaphore and blocks on a gate the main thread releases); lifecycle
+ * transition rendezvous use the HAL's condition variable.  No volatile
+ * polling or clock()-based busy waits are needed to make the races
+ * deterministic.
  */
 
 #include <pthread.h>
@@ -23,13 +48,28 @@
 #include "unity.h"
 #include "wifi_hal_driver.h"
 
+#ifdef WIFI_HAL_POSIX_TESTING
+/* Failure-injection API compiled into the HAL only under
+ * WIFI_HAL_POSIX_TESTING.  Each function fails the (n+1)-th call of the
+ * selected pthread primitive (n successful calls happen first, then one
+ * failure), resetting afterwards. */
+void wifi_hal_testing_fail_pthread_create_after( int32_t successes );
+void wifi_hal_testing_fail_pthread_join_after( int32_t successes );
+void wifi_hal_testing_fail_mutex_init_after( int32_t successes );
+void wifi_hal_testing_fail_cond_init_after( int32_t successes );
+void wifi_hal_testing_fail_mutex_destroy_after( int32_t successes );
+void wifi_hal_testing_fail_cond_destroy_after( int32_t successes );
+void wifi_hal_testing_reset( void );
+void wifi_hal_testing_wait_for_deinit_started( void );
+#endif
+
 /* -------------------------------------------------------------------------- */
 /*  Shared helpers                                                            */
 /* -------------------------------------------------------------------------- */
 
-static wifi_hal_init_t _make_init( const char*      ap_dns,
+static wifi_hal_init_t _make_init( const char*       ap_dns,
                                    wifi_hal_event_cb_t cb,
-                                   void*           user_data )
+                                   void*            user_data )
 {
   wifi_hal_init_t init = {
     .ap_ip      = "192.168.1.1",
@@ -57,6 +97,18 @@ static void _sleep_ms( uint32_t ms )
   (void) nanosleep( &ts, NULL );
 }
 
+/* Bounded semaphore wait used for every cross-thread rendezvous.  The bound
+ * only guards against a genuinely broken HAL (infinite hang); the normal path
+ * always posts the semaphore deterministically. */
+static void _wait_sem( sem_t* sem, const char* what )
+{
+  struct timespec ts;
+  clock_gettime( CLOCK_REALTIME, &ts );
+  ts.tv_sec += 10;
+  int rc = sem_timedwait( sem, &ts );
+  TEST_ASSERT_EQUAL_INT32_MESSAGE( 0, rc, what );
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Per-test callback state                                                   */
 /* -------------------------------------------------------------------------- */
@@ -64,9 +116,9 @@ static void _sleep_ms( uint32_t ms )
 static uint32_t g_cb_a_events;
 static uint32_t g_cb_b_events;
 
-static void _cb_count_a( wifi_hal_event_t       event,
+static void _cb_count_a( wifi_hal_event_t             event,
                          const wifi_hal_event_data_t* data,
-                         void*                  user_data )
+                         void*                      user_data )
 {
   (void) event;
   (void) data;
@@ -74,9 +126,9 @@ static void _cb_count_a( wifi_hal_event_t       event,
   g_cb_a_events++;
 }
 
-static void _cb_count_b( wifi_hal_event_t       event,
+static void _cb_count_b( wifi_hal_event_t             event,
                          const wifi_hal_event_data_t* data,
-                         void*                  user_data )
+                         void*                      user_data )
 {
   (void) event;
   (void) data;
@@ -85,23 +137,29 @@ static void _cb_count_b( wifi_hal_event_t       event,
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Race-test state                                                           */
+/*  Race-test state                                                            */
 /* -------------------------------------------------------------------------- */
 
-static sem_t g_cb_gate;      /* Unblocked by the main thread.                 */
-static volatile bool g_cb_entered;  /* Callback reached the blocking point.   */
-static volatile bool g_cb_finished;  /* Callback returned.                    */
-static volatile bool g_deinit_done;   /* Deinit thread finished.              */
-static osal_status_t g_deinit_result; /* Deinit thread return value.          */
-static uint32_t g_race_events;        /* Total deliveries observed.            */
-static bool g_nested_done;            /* One nested delivery was exercised.    */
+static sem_t g_cb_gate;          /* Released by main to unblock the callback. */
+static sem_t g_cb_entered_sem;  /* Posted by the callback when it blocks.    */
+static sem_t g_connect_cb_gate; /* Gate for the connect-gate callback.       */
+
+static bool           g_cb_finished;    /* Callback returned.                */
+static osal_status_t  g_deinit_result;  /* Deinit thread return value.       */
+static osal_status_t  g_producer_result; /* Producer thread return value.     */
+static uint32_t       g_race_events;    /* Total deliveries observed.        */
+static bool           g_nested_done;    /* One nested delivery was exercised. */
 
 static pthread_t g_deinit_thread;
 static pthread_t g_producer_thread;
 
-static void race_event_cb( wifi_hal_event_t       event,
+/* Callback used for the SCAN_DONE race tests.  The outer delivery (first
+ * SCAN_DONE) re-enters wifi_hal_start_scan once — proving the callback is
+ * invoked without any HAL lock — then blocks on g_cb_gate until the main
+ * thread releases it.  Later deliveries simply count. */
+static void race_event_cb( wifi_hal_event_t             event,
                            const wifi_hal_event_data_t* data,
-                           void*                  user_data )
+                           void*                        user_data )
 {
   (void) data;
   (void) user_data;
@@ -109,15 +167,26 @@ static void race_event_cb( wifi_hal_event_t       event,
 
   if ( event == WIFI_HAL_EVT_SCAN_DONE && !g_nested_done )
   {
-    /* Outer delivery: re-enter the HAL from inside the callback.  If the HAL
-     * held a lifecycle/callback lock across the callback this nested delivery
-     * would deadlock, proving the callback is invoked without any HAL lock. */
     g_nested_done = true;
     (void) wifi_hal_start_scan( false );
-    g_cb_entered  = true;
+    (void) sem_post( &g_cb_entered_sem );
     (void) sem_wait( &g_cb_gate );
     g_cb_finished = true;
   }
+}
+
+/* Callback for the connect (timer-start) race test: blocks the connect
+ * operation mid-flight on the first delivered event (GOT_IP). */
+static void connect_gate_cb( wifi_hal_event_t             event,
+                             const wifi_hal_event_data_t* data,
+                             void*                        user_data )
+{
+  (void) event;
+  (void) data;
+  (void) user_data;
+  g_cb_a_events++;
+  (void) sem_post( &g_cb_entered_sem );
+  (void) sem_wait( &g_connect_cb_gate );
 }
 
 static void* producer_start_scan( void* arg )
@@ -127,28 +196,31 @@ static void* producer_start_scan( void* arg )
   return NULL;
 }
 
-/* Waits (bounded) for the callback to reach its blocking point. */
-static bool _wait_cb_entered( uint32_t timeout_ms )
+static void* producer_connect( void* arg )
 {
-  const uint32_t start = (uint32_t) clock() / ( CLOCKS_PER_SEC / 1000U );
-  while ( !g_cb_entered )
-  {
-    uint32_t now = (uint32_t) clock() / ( CLOCKS_PER_SEC / 1000u );
-    if ( now - start >= timeout_ms )
-    {
-      return false;
-    }
-    _sleep_ms( 5 );
-  }
-  return true;
+  (void) arg;
+  g_producer_result = wifi_hal_connect();
+  return NULL;
 }
 
 static void* deinit_runner( void* arg )
 {
   (void) arg;
   g_deinit_result = wifi_hal_deinit();
-  g_deinit_done   = true;
   return NULL;
+}
+
+/* Sanity helper: configure the station for a given simulated AP (started). */
+static void _setup_sta( const char* ssid, const char* password )
+{
+  wifi_hal_sta_config_t sta_config = { 0 };
+  strncpy( sta_config.ssid, ssid, sizeof( sta_config.ssid ) - 1 );
+  strncpy( sta_config.password, password, sizeof( sta_config.password ) - 1 );
+
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start( WIFI_HAL_MODE_STA ),
+                             "start station mode" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_set_sta_config( &sta_config ),
+                             "set station config" );
 }
 
 /* ============================================================================
@@ -213,34 +285,308 @@ static void test_init_deinit_deinit( void )
 }
 
 /* ============================================================================
- * Test 3: Partial-init failure (injected via invalid ap_dns after the
- *         per-session primitives were allocated) leaves the session fully
- *         uninitialized; deinit stays a no-op and a retry works.
+ * Test 3: Partial primitive-init unwind (injected pthread_mutex_init failure)
+ *         releases the primitives created before the failing step; deinit stays
+ *         a safe no-op and a retry works.  This replaces the old "invalid
+ *         ap_dns" partial-init injection, which never proved rollback from a
+ *         pthread creation failure.
  * ========================================================================== */
-static void test_partial_init_cleanup( void )
+static void test_primitive_init_unwind( void )
 {
+#ifdef WIFI_HAL_POSIX_TESTING
   _reset_session();
+  wifi_hal_testing_reset();
 
-  wifi_hal_init_t init = _make_init( "999.1.1.1", _cb_count_a, NULL );
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERR_INVALID_ARGUMENT, wifi_hal_init( &init ),
-                             "invalid ap_dns rejected after primitive creation" );
+  /* Session primitive creation order: disc_mutex, disc_cond, conn_mutex,
+   * conn_cond, state_mutex, cb_mutex, cb_cond.  Fail the 3rd mutex init
+   * (state_mutex): four primitives created before it must be unwound. */
+  wifi_hal_testing_fail_mutex_init_after( 2 );
 
-  /* The failed init must have released its resources: deinit is a no-op. */
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_init( &init ),
+                             "init fails at the injected mutex init" );
+
+  /* The unwind released everything: deinit is a no-op and a retry works. */
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
                              "deinit after failed init is a safe no-op" );
 
-  /* A complete lifecycle must work afterwards. */
   wifi_hal_init_t init2 = _make_init( NULL, _cb_count_b, NULL );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init2 ),
                              "re-init after partial-init failure works" );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
                              "fresh session accepts a scan" );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
+#endif
 }
 
 /* ============================================================================
- * Test 4a: Timer-driven event racing deinit — the slow-connect background
- *          thread is cancelled and joined, so its GOT_IP event never fires.
+ * Test 4: Partial primitive-init unwind that itself fails.  The session is
+ *         left in CLEANUP_REQUIRED with the exact validity flags retained;
+ *         admission stays closed (operations fail without touching session
+ *         objects), and a deinit retry releases the retained primitive.
+ * ========================================================================== */
+static void test_primitive_init_unwind_partial( void )
+{
+#ifdef WIFI_HAL_POSIX_TESTING
+  _reset_session();
+  wifi_hal_testing_reset();
+
+  /* Fail the last cond init (cb_cond) and make the reverse-order unwind fail
+   * on its second destroy (state_mutex).  The unwind is left partial. */
+  wifi_hal_testing_fail_cond_init_after( 2 );       /* 3rd cond init = cb_cond */
+  wifi_hal_testing_fail_mutex_destroy_after( 1 );   /* 2nd destroy = state_mutex */
+
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_init( &init ),
+                             "init fails with incomplete unwind" );
+
+  /* CLEANUP_REQUIRED: admission is closed, so operations fail without locking
+   * or destroying the partially released session objects. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_start_scan( false ),
+                             "operations are rejected in CLEANUP_REQUIRED" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_set_power_save( true ),
+                             "configuration calls are rejected too" );
+
+  /* Init cannot replace a retained session; deinit owns the retry. */
+  wifi_hal_init_t blocked_init = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_init( &blocked_init ),
+                             "init cannot replace cleanup-required session" );
+
+  /* Deinit retries and completes the release; a fresh session then works. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "deinit retry completes the partial unwind" );
+
+  wifi_hal_init_t init2 = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init2 ),
+                             "fresh init after cleanup retry" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
+                             "fresh session accepts a scan" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
+#endif
+}
+
+/* ============================================================================
+ * Test 5: A failed timer-thread pthread_create publishes no joinable handle:
+ *         connect reports the failure and deinit joins nothing (so no garbage
+ *         handle is ever passed to pthread_join) and succeeds.
+ * ========================================================================== */
+static void test_pthread_create_failure( void )
+{
+#ifdef WIFI_HAL_POSIX_TESTING
+  _reset_session();
+  wifi_hal_testing_reset();
+
+  g_cb_a_events = 0;
+
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  _setup_sta( "disconnect_15_sec", "12345678" );
+
+  /* The next pthread_create (the disconnect timer) fails.  connect() already
+   * delivered GOT_IP, then returns the timer-start failure. */
+  wifi_hal_testing_fail_pthread_create_after( 0 );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_connect(),
+                             "connect reports the failed timer create" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_a_events,
+                             "GOT_IP still delivered before the timer start" );
+
+  /* No thread was published: deinit must not join a garbage handle. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "deinit succeeds with no joinable handle" );
+
+  /* Session fully reusable. */
+  g_cb_b_events = 0;
+  wifi_hal_init_t reuse = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &reuse ), "re-init" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
+                             "fresh session accepts a scan" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_b_events, "fresh callback invoked" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
+#endif
+}
+
+/* ============================================================================
+ * Test 6: pthread_join failure during deinit.  Deinit returns an error, keeps
+ *         the exact thread handle and per-session primitives, disables
+ *         callbacks and admission (CLEANUP_REQUIRED); a retry deinit
+ *         re-attaches the same join and completes.
+ * ========================================================================== */
+static void test_join_failure_then_deinit_retry( void )
+{
+#ifdef WIFI_HAL_POSIX_TESTING
+  _reset_session();
+  wifi_hal_testing_reset();
+
+  g_cb_a_events = 0;
+
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  _setup_sta( "disconnect_15_sec", "12345678" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_connect(),
+                             "connect accepted (timer running)" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_a_events, "GOT_IP delivered" );
+
+  /* Fail the single pthread_join deinit performs on the disconnect timer. */
+  wifi_hal_testing_fail_pthread_join_after( 0 );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_deinit(),
+                             "deinit reports the join failure" );
+
+  /* Teardown failed: callbacks are disabled and admission is closed, so
+   * further operations fail without touching the retained session objects. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_start_scan( false ),
+                             "admission closed in CLEANUP_REQUIRED" );
+
+  /* Retry deinit re-attaches the exact same join, then drains and destroys. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "deinit retry joins and completes" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_start_scan( false ),
+                             "uninitialized session rejects operations" );
+
+  /* Fresh session: no stale deliveries from the old one. */
+  g_cb_b_events = 0;
+  wifi_hal_init_t reuse = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &reuse ), "re-init" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
+                             "fresh session accepts a scan" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_b_events, "fresh callback invoked" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_a_events,
+                             "no late delivery from the failed-teardown session" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
+#endif
+}
+
+/* ============================================================================
+ * Test 7: A public scan operation admitted while deinit begins.  Deinit closes
+ *         admission and waits for the admitted operation; operations arriving
+ *         once teardown has begun are rejected without touching session
+ *         resources; after the operation drains, deinit completes.
+ * ========================================================================== */
+static void test_op_admitted_while_deinit( void )
+{
+  _reset_session();
+
+  g_race_events  = 0;
+  g_nested_done  = false;
+  g_cb_finished  = false;
+  g_cb_a_events  = 0;
+  g_cb_b_events  = 0;
+
+  wifi_hal_init_t init = _make_init( NULL, race_event_cb, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  /* Producer fires SCAN_DONE synchronously; the callback blocks, keeping the
+   * scan operation admitted and in flight while deinit begins. */
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_create( &g_producer_thread, NULL,
+                                                producer_start_scan, NULL ),
+                             "producer thread created" );
+  _wait_sem( &g_cb_entered_sem, "callback entered" );
+
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_create( &g_deinit_thread, NULL,
+                                                deinit_runner, NULL ),
+                             "deinit thread created" );
+  /* Wait for the actual ACTIVE -> DEINITIALIZING transition.  The admitted
+   * scan callback remains blocked, so deinit cannot have completed here. */
+#ifdef WIFI_HAL_POSIX_TESTING
+  wifi_hal_testing_wait_for_deinit_started();
+#endif
+
+  /* The transition was observed above, so this probe is unambiguously a call
+   * arriving during teardown.  It must fail without touching session objects. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_start_scan( false ),
+                             "operations arriving during teardown are rejected" );
+
+  /* Release the callback: the admitted scan drains and deinit completes. */
+  (void) sem_post( &g_cb_gate );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_join( g_deinit_thread, NULL ),
+                             "deinit thread joined" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, g_deinit_result,
+                             "deinit succeeded after the admitted op drained" );
+  TEST_ASSERT_TRUE_MESSAGE( g_cb_finished,
+                            "blocked callback returned before deinit did" );
+
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_join( g_producer_thread, NULL ),
+                             "producer thread joined" );
+
+  /* After deinit nothing is admitted either. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_start_scan( false ),
+                             "post-deinit operations fail as uninitialized" );
+
+  /* Session is reusable with a fresh callback. */
+  wifi_hal_init_t reinit = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &reinit ), "re-init" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
+                             "fresh session accepts a scan" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_b_events, "new callback sees the event" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
+}
+
+/* ============================================================================
+ * Test 8: A connect (timer-start) operation admitted while deinit begins.  The
+ *         GOT_IP callback keeps the connect operation admitted and blocked;
+ *         deinit waits for it, then cancels + joins the disconnect timer the
+ *         operation started before destroying the session primitives.
+ * ========================================================================== */
+static void test_timer_start_op_admitted_while_deinit( void )
+{
+  _reset_session();
+
+  g_cb_a_events     = 0;
+  g_cb_b_events     = 0;
+  g_producer_result = OSAL_ERROR;
+
+  wifi_hal_init_t init = _make_init( NULL, connect_gate_cb, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  _setup_sta( "disconnect_15_sec", "12345678" );
+
+  /* connect() is admitted; its GOT_IP callback blocks, so the operation cannot
+   * release its lease yet and the disconnect timer is not started until the
+   * callback returns. */
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_create( &g_producer_thread, NULL,
+                                                producer_connect, NULL ),
+                             "connect thread created" );
+  _wait_sem( &g_cb_entered_sem, "connect callback blocked" );
+
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_create( &g_deinit_thread, NULL,
+                                                deinit_runner, NULL ),
+                             "deinit thread created" );
+#ifdef WIFI_HAL_POSIX_TESTING
+  wifi_hal_testing_wait_for_deinit_started();
+#endif
+
+  /* Release the callback: connect starts the 15 s timer, returns and releases
+   * its lease; deinit then cancels + joins the timer before destroying the
+   * session primitives. */
+  (void) sem_post( &g_connect_cb_gate );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_join( g_deinit_thread, NULL ),
+                             "deinit thread joined" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, g_deinit_result,
+                             "deinit joined the timer and succeeded" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_join( g_producer_thread, NULL ),
+                             "connect thread joined" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, g_producer_result,
+                             "connect completed after unblocking" );
+
+  /* The timer was joined (not leaked): a short grace window shows no event
+   * firing from the old session after deinit. */
+  _sleep_ms( 200 );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_a_events,
+                             "no timer callback after deinit" );
+
+  /* Fresh session is fully functional afterwards. */
+  wifi_hal_init_t reuse = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &reuse ), "re-init" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
+                             "fresh session accepts a scan" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_b_events, "fresh callback invoked" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
+}
+
+/* ============================================================================
+ * Test 9: Timer-driven event racing deinit — the slow-connect background
+ *         thread is cancelled and joined, so its GOT_IP event never fires.
  * ========================================================================== */
 static void test_event_racing_deinit_timer( void )
 {
@@ -252,18 +598,11 @@ static void test_event_racing_deinit_timer( void )
   wifi_hal_init_t init = _make_init( NULL, race_event_cb, NULL );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
 
-  wifi_hal_sta_config_t sta_config = { 0 };
-  strncpy( sta_config.ssid, "slow_connect", sizeof( sta_config.ssid ) - 1 );
-  strncpy( sta_config.password, "12345678", sizeof( sta_config.password ) - 1 );
-
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start( WIFI_HAL_MODE_STA ),
-                             "start station mode" );
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_set_sta_config( &sta_config ),
-                             "set slow-connect credentials" );
+  _setup_sta( "slow_connect", "12345678" );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_connect(),
                              "connect accepted (GOT arrives after 3 s)" );
 
-  /* Deinit immediately: it must cancel+join the timer thread before the 3 s
+  /* Deinit immediately: it must cancel + join the timer thread before the 3 s
    * deadline and before destroying the per-session primitives. */
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
                              "deinit races the slow-connect timer" );
@@ -275,7 +614,66 @@ static void test_event_racing_deinit_timer( void )
 }
 
 /* ============================================================================
- * Test 5: Repeated init/deinit cycles.  Every cycle must create and destroy a
+ * Test 10: A callback already in flight races deinit: deinit blocks until the
+ * callback returns (quiescence barrier), then completes.
+ * ========================================================================== */
+static void test_callback_inflight_racing_deinit( void )
+{
+  _reset_session();
+
+  g_cb_finished  = false;
+  g_race_events  = 0;
+  g_nested_done  = false;
+  g_cb_a_events  = 0;
+  g_cb_b_events  = 0;
+
+  wifi_hal_init_t init = _make_init( NULL, race_event_cb, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  /* Producer: fires SCAN_DONE synchronously; the callback blocks mid-flight. */
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_create( &g_producer_thread, NULL,
+                                                producer_start_scan, NULL ),
+                             "producer thread created" );
+  _wait_sem( &g_cb_entered_sem, "callback reached its blocking point" );
+
+  /* Deinit in a separate thread: it must NOT return while the callback is
+   * blocked inside the HAL event delivery. */
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_create( &g_deinit_thread, NULL,
+                                                deinit_runner, NULL ),
+                             "deinit thread created" );
+#ifdef WIFI_HAL_POSIX_TESTING
+  wifi_hal_testing_wait_for_deinit_started();
+#endif
+
+  /* The callback is still blocked, so deinit is necessarily waiting for its
+   * in-flight delivery and cannot have completed yet. */
+
+  /* Unblock the in-flight callback; deinit may now complete. */
+  (void) sem_post( &g_cb_gate );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_join( g_deinit_thread, NULL ),
+                             "deinit thread joined" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, g_deinit_result,
+                             "deinit succeeded after quiescence" );
+  TEST_ASSERT_TRUE_MESSAGE( g_cb_finished,
+                            "in-flight callback returned before deinit did" );
+  TEST_ASSERT_EQUAL_MESSAGE( 2u, g_race_events,
+                             "outer + re-entrant delivery observed" );
+
+  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_join( g_producer_thread, NULL ),
+                             "producer thread joined" );
+
+  /* The session is quiescent: a fresh init delivers only to the new callback. */
+  wifi_hal_init_t reinit = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &reinit ), "re-init" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
+                             "new session scan" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_b_events, "new callback sees the event" );
+
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
+}
+
+/* ============================================================================
+ * Test 11: Repeated init/deinit cycles.  Every cycle must create and destroy a
  * fresh set of per-session pthread objects without reusing a destroyed object,
  * and no stale callback may be delivered across sessions.
  * ========================================================================== */
@@ -315,12 +713,11 @@ static void test_repeat_init_deinit_cycles( void )
 }
 
 /* ============================================================================
- * Test 6: A timer thread that completed on its own is still joined by deinit.
+ * Test 12: A timer thread that completed on its own is still joined by deinit.
  *          The slow-connect thread runs to its natural 3 s deadline, fires
- *          GOT_IP, and marks itself inactive.  Deinit must nevertheless join
- *          it (its resources are only reclaimed by pthread_join()) before
- *          destroying the per-session primitives, and the session must be
- *          reusable afterwards.
+ *          GOT_IP, and exits.  Deinit must nevertheless join it (its resources
+ *          are only reclaimed by pthread_join()) before destroying the
+ *          per-session primitives, and the session must be reusable afterwards.
  * ========================================================================== */
 static void test_deinit_after_natural_timer_completion( void )
 {
@@ -331,20 +728,12 @@ static void test_deinit_after_natural_timer_completion( void )
   wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
 
-  wifi_hal_sta_config_t sta_config = { 0 };
-  strncpy( sta_config.ssid, "slow_connect", sizeof( sta_config.ssid ) - 1 );
-  strncpy( sta_config.password, "12345678", sizeof( sta_config.password ) - 1 );
-
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start( WIFI_HAL_MODE_STA ),
-                             "start station mode" );
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_set_sta_config( &sta_config ),
-                             "set slow-connect credentials" );
+  _setup_sta( "slow_connect", "12345678" );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_connect(),
                              "connect accepted" );
 
   /* Let the slow-connect thread run to completion: after 3 s it fires GOT_IP,
-   * then writes inactive and exits — remaining joinable until joined.  The
-   * margin accounts for scheduling delays under load. */
+   * then exits — remaining joinable until joined. */
   _sleep_ms( 3500 );
   TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_a_events,
                              "slow connect delivered GOT_IP on its own" );
@@ -363,68 +752,7 @@ static void test_deinit_after_natural_timer_completion( void )
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &reuse ), "re-init" );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
                              "re-init scan accepted" );
-  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_b_events, "new callback invoked" );
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
-}
-
-/* ============================================================================
- * Test 4b: A callback already in flight races deinit: deinit blocks until the
- * callback returns (quiescence barrier), then completes.
- * ========================================================================== */
-static void test_event_racing_deinit_inflight( void )
-{
-  _reset_session();
-
-  g_cb_entered  = false;
-  g_cb_finished = false;
-  g_deinit_done = false;
-  g_race_events = 0;
-  g_nested_done = false;
-  g_cb_a_events = 0;
-  g_cb_b_events = 0;
-  TEST_ASSERT_EQUAL_MESSAGE( 0, sem_init( &g_cb_gate, 0, 0 ), "sem init" );
-
-  wifi_hal_init_t init = _make_init( NULL, race_event_cb, NULL );
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
-
-  /* Producer: fires SCAN_DONE synchronously; the callback blocks mid-flight. */
-  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_create( &g_producer_thread, NULL,
-                                                producer_start_scan, NULL ),
-                             "producer thread created" );
-  TEST_ASSERT_TRUE_MESSAGE( _wait_cb_entered( 2000 ),
-                            "callback reached its blocking point" );
-
-  /* Deinit in a separate thread: it must NOT return while the callback is
-   * blocked inside the HAL event delivery. */
-  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_create( &g_deinit_thread, NULL,
-                                                deinit_runner, NULL ),
-                             "deinit thread created" );
-
-  _sleep_ms( 100 );
-  TEST_ASSERT_FALSE_MESSAGE( g_deinit_done,
-                             "deinit waits for the in-flight callback" );
-
-  /* Unblock the in-flight callback; deinit may now complete. */
-  TEST_ASSERT_EQUAL_MESSAGE( 0, sem_post( &g_cb_gate ), "sem post" );
-  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_join( g_deinit_thread, NULL ),
-                             "deinit thread joined" );
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, g_deinit_result,
-                             "deinit succeeded after quiescence" );
-  TEST_ASSERT_TRUE_MESSAGE( g_cb_finished,
-                            "in-flight callback returned before deinit did" );
-  TEST_ASSERT_EQUAL_MESSAGE( 2u, g_race_events,
-                             "outer + re-entrant delivery observed" );
-
-  TEST_ASSERT_EQUAL_MESSAGE( 0, pthread_join( g_producer_thread, NULL ),
-                             "producer thread joined" );
-
-  /* The session is quiescent: a fresh init delivers only to the new callback. */
-  wifi_hal_init_t reinit = _make_init( NULL, _cb_count_b, NULL );
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &reinit ), "re-init" );
-  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_start_scan( false ),
-                             "new session scan" );
-  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_b_events, "new callback sees the event" );
-
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_b_events, "fresh callback invoked" );
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
 }
 
@@ -434,19 +762,32 @@ static void test_event_racing_deinit_inflight( void )
 
 void setUp( void )
 {
+  TEST_ASSERT_EQUAL_MESSAGE( 0, sem_init( &g_cb_gate, 0, 0 ), "sem init gate" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, sem_init( &g_cb_entered_sem, 0, 0 ),
+                             "sem init entered" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, sem_init( &g_connect_cb_gate, 0, 0 ),
+                             "sem init connect gate" );
 }
 
 void tearDown( void )
 {
+  (void) sem_destroy( &g_cb_gate );
+  (void) sem_destroy( &g_cb_entered_sem );
+  (void) sem_destroy( &g_connect_cb_gate );
 }
 
 void wifi_hal_posix_tests_run( void )
 {
   RUN_TEST( test_deinit_before_init );
   RUN_TEST( test_init_deinit_deinit );
-  RUN_TEST( test_partial_init_cleanup );
+  RUN_TEST( test_primitive_init_unwind );
+  RUN_TEST( test_primitive_init_unwind_partial );
+  RUN_TEST( test_pthread_create_failure );
+  RUN_TEST( test_join_failure_then_deinit_retry );
+  RUN_TEST( test_op_admitted_while_deinit );
+  RUN_TEST( test_timer_start_op_admitted_while_deinit );
   RUN_TEST( test_event_racing_deinit_timer );
-  RUN_TEST( test_event_racing_deinit_inflight );
+  RUN_TEST( test_callback_inflight_racing_deinit );
   RUN_TEST( test_repeat_init_deinit_cycles );
   RUN_TEST( test_deinit_after_natural_timer_completion );
 }

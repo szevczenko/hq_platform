@@ -82,9 +82,13 @@ if(NOT ESP_PLATFORM)
 
   # ---- POSIX Wi-Fi HAL lifecycle regression tests ----
   # Links the REAL POSIX HAL (not the mock) to verify the callback-quiescent,
-  # repeat-safe deinit contract: deinit-before-init, init/deinit/deinit,
-  # partial-init cleanup (injected via invalid ap_dns), and an event (timer
-  # and in-flight callback) racing deinit.
+  # session-operation-barrier, repeat-safe deinit contract: deinit-before-init,
+  # init/deinit/deinit, partial primitive-init unwind (clean and leaving
+  # CLEANUP_REQUIRED), pthread_create/join failures with a successful deinit
+  # retry, admitted operations racing deinit, and events (timer and in-flight
+  # callback) racing deinit.  WIFI_HAL_POSIX_TESTING turns on the HAL's
+  # test-only failure-injection hooks; production builds never define it and
+  # always call the real pthread APIs.
   if(CONFIG_HQ_PLATFORM_POSIX)
     add_executable(wifi_hal_posix_tests
       ${WIFI_TEST_DIR}/wifi_hal_posix_test.c
@@ -96,6 +100,8 @@ if(NOT ESP_PLATFORM)
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
       PRIVATE ${HQ_CONFIG_DIR}
     )
+
+    target_compile_definitions(wifi_hal_posix_tests PRIVATE WIFI_HAL_POSIX_TESTING)
 
     target_link_libraries(wifi_hal_posix_tests
       hq_osal

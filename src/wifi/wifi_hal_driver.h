@@ -108,6 +108,27 @@ typedef struct
 
 /* Public functions ----------------------------------------------------------*/
 
+/* Lifecycle / concurrency contract
+ * ---------------------------------------------------------------------------
+ * The HAL uses a process-lifetime lifecycle state machine with explicit
+ * states @c UNINITIALIZED, @c ACTIVE, @c DEINITIALIZING and
+ * @c CLEANUP_REQUIRED.  Exactly one init/deinit caller owns a lifecycle
+ * transition at a time; later init/deinit callers wait on the lifecycle
+ * condition and re-check the state, so a callback that re-enters a HAL API
+ * while teardown is in progress receives the teardown-state error instead of
+ * deadlocking.
+ *
+ * Concurrency boundary for the remaining HAL API (start/stop/connect/
+ * disconnect/scan/getters/configuration):
+ *   - a call that began before @c wifi_hal_deinit either completes while
+ *     holding a session lease or fails without touching session resources,
+ *   - a call that arrives once teardown has begun returns an error code
+ *     without locking any per-session primitive,
+ *   - @c wifi_hal_init waits for/serializes with teardown and never replaces a
+ *     session left in the @c CLEANUP_REQUIRED state (a further
+ *     @c wifi_hal_deinit must finish the cleanup first).
+ */
+
 /**
  * @brief   Initialize the Wi-Fi HAL.
  *
@@ -117,33 +138,55 @@ typedef struct
  *          no-op: it returns @c OSAL_SUCCESS without resetting the active
  *          session and without touching live synchronization objects.
  *
+ *          @c wifi_hal_init serializes with teardown: a call arriving while a
+ *          @c wifi_hal_deinit is in progress waits for it to finish and then
+ *          re-evaluates the session state.  It returns an error instead of
+ *          replacing a session in @c CLEANUP_REQUIRED; a further deinit must
+ *          finish that session first.
+ *
  * @param   [in] init - initialisation parameters (@p event_cb must not be NULL)
  * @return  OSAL_SUCCESS on success, error code otherwise
- * @note    On failure the HAL is left fully uninitialized: any resources
- *          allocated before the failing step are released and a later call to
+ * @note    On failure, resources allocated before the failing step are
+ *          released in exact reverse order and a later call to
  *          @c wifi_hal_deinit (or a retry of @c wifi_hal_init after
- *          @c wifi_hal_deinit) is safe.
+ *          @c wifi_hal_deinit) is safe.  If a resource could not be released,
+ *          exact per-resource validity state and the @c CLEANUP_REQUIRED
+ *          lifecycle state are retained; the session is then quiescent (no
+ *          callbacks, no operation admission) and only a further
+ *          @c wifi_hal_deinit retries the release.
  */
 osal_status_t wifi_hal_init( const wifi_hal_init_t* init );
 
 /**
  * @brief   Deinitialize the Wi-Fi HAL and release platform resources.
  *
- * @details Callback-quiescence barrier.  When this function returns
- *          @c OSAL_SUCCESS the following guarantees hold:
- *            - all event sources (event-loop handlers, background threads)
- *              are unregistered or stopped,
+ * @details Callback-quiescence and session-operation barrier.  When this
+ *          function returns @c OSAL_SUCCESS the following guarantees hold:
+ *            - all platform event sources (event-loop handlers, background
+ *              threads) are unregistered or stopped (and joined),
  *            - every callback that had already started has returned,
+ *            - every public HAL operation that had already started has
+ *              completed while holding a session lease,
  *            - the event callback and user-data pointers are cleared,
- *            - no callback can begin afterwards.
+ *            - no callback or public operation can begin afterwards.
+ *
+ *          Operations that begin while teardown is in progress return an error
+ *          code without touching per-session resources; they never deadlock on
+ *          a session-owned primitive, even when issued from inside a callback
+ *          that is itself being drained by deinit.
  *
  *          Calling this function while the HAL is uninitialized, or calling it
  *          more than once between two @c wifi_hal_init calls, is a successful
- *          no-op that changes nothing.
+ *          no-op that changes nothing.  Only one init/deinit caller owns a
+ *          lifecycle transition at a time; later deinit callers wait for the
+ *          owner and then re-check the session state.
  *
- *          When a platform resource cannot be released, an error code is
- *          returned while enough lifecycle state is kept for a safe re-call;
- *          callback delivery remains disabled in that case.
+ *          When a platform resource cannot be released (for example a
+ *          background thread cannot be joined), an error code is returned
+ *          while enough exact per-resource lifecycle state (object-validity
+ *          flags and the thread handle) is kept for a safe re-call; callback
+ *          delivery and operation admission remain disabled in that case, and
+ *          a later @c wifi_hal_deinit retries only the failed step.
  *
  * @return  OSAL_SUCCESS on success, error code otherwise
  */
