@@ -7,13 +7,27 @@
 #include "esp_wifi_default.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
+#include "osal_bin_sem.h"
 #include "osal_log.h"
+#include "osal_task.h"
 #include <string.h>
 
 typedef struct
 {
   bool initialized;
   bool started;
+  /* Separate tracking per handler registration: a single bit cannot tell which
+   * of the two registrations succeeded.  Each flag is set only after the
+   * matching esp_event_handler_register() returned ESP_OK and cleared only
+   * when its unregister actually succeeded (or the handler proved absent), so
+   * an unwind/deinit retry always knows exactly which handler to re-attempt. */
+  bool handler_wifi_registered;  /**< True once the WIFI_EVENT handler is installed.    */
+  bool handler_ip_registered;    /**< True once the IP_EVENT STA_GOT_IP handler is installed. */
+  bool wifi_inited;           /**< True once esp_wifi_init() succeeded.         */
+  bool netif_sta_created;     /**< True while netif_sta must be destroyed.      */
+  bool netif_ap_created;      /**< True while netif_ap must be destroyed.       */
+  bool cb_delivery_disabled;  /**< Deinit disabled new callback deliveries.     */
+  uint32_t cb_in_flight;      /**< Number of callbacks currently executing.     */
   wifi_hal_event_cb_t cb;
   void* cb_user_data;
   esp_netif_t* netif_sta;
@@ -21,6 +35,10 @@ typedef struct
   wifi_hal_sta_config_t sta_cfg;
   wifi_hal_ap_config_t ap_cfg;
   uint32_t client_count;
+  /* Guards cb, cb_user_data, cb_delivery_disabled and cb_in_flight.  The
+   * callback itself is always invoked outside this lock so callback code may
+   * re-enter management APIs without deadlocking. */
+  osal_bin_sem_id_t cb_lock;
 } wifi_hal_ctx_t;
 
 static wifi_hal_ctx_t g_wifi_hal_ctx = { 0 };
@@ -87,10 +105,62 @@ bool wifi_hal_is_valid_ipv4( const char* str )
 
 static void _emit_event( wifi_hal_event_t event, const wifi_hal_event_data_t* data )
 {
-  if ( g_wifi_hal_ctx.cb )
+  wifi_hal_event_cb_t cb;
+  void*               user_data;
+
+  (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
+
+  /* Deinit either disabled delivery or will do so under this lock; a delivery
+   * that starts after the disabled flag is seen drops the event. */
+  if ( g_wifi_hal_ctx.cb_delivery_disabled || g_wifi_hal_ctx.cb == NULL )
   {
-    g_wifi_hal_ctx.cb( event, data, g_wifi_hal_ctx.cb_user_data );
+    (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
+    return;
   }
+
+  cb        = g_wifi_hal_ctx.cb;
+  user_data = g_wifi_hal_ctx.cb_user_data;
+  g_wifi_hal_ctx.cb_in_flight++;
+  (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
+
+  /* Invoke outside the callback lock so the callback may re-enter management
+   * APIs (including HAL calls that emit further events) without deadlocking. */
+  cb( event, data, user_data );
+
+  (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
+  g_wifi_hal_ctx.cb_in_flight--;
+  (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
+}
+
+/* Disable callback delivery, wait for every in-flight callback to return and
+ * clear the callback/user-data pointers.  The event handlers must already be
+ * unregistered (so no new handler can start) and cb_lock must still exist. */
+static void _quiesce_callbacks( void )
+{
+  (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
+  g_wifi_hal_ctx.cb_delivery_disabled = true;
+  (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
+
+  /* Wait for every callback that was already in flight to return.  A callback
+   * that started before the disabled flag was set always decrements the
+   * counter; a callback that starts after it drops the event and returns. */
+  for ( ;; )
+  {
+    uint32_t in_flight = 0;
+    (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
+    in_flight = g_wifi_hal_ctx.cb_in_flight;
+    (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
+    if ( in_flight == 0 )
+    {
+      break;
+    }
+    (void) osal_task_delay_ms( 1 );
+  }
+
+  (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
+  g_wifi_hal_ctx.cb           = NULL;
+  g_wifi_hal_ctx.cb_user_data = NULL;
+  (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
 }
 
 static void _wifi_event_handler( void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data )
@@ -216,41 +286,75 @@ static osal_status_t _configure_ap_dns( const char* dns_str )
 
 osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
 {
-  if ( !init )
+  esp_err_t     err;
+  osal_status_t st = OSAL_SUCCESS;
+
+  if ( !init || !init->event_cb )
   {
     return OSAL_INVALID_POINTER;
   }
 
   if ( g_wifi_hal_ctx.initialized )
   {
+    /* Idempotent: a repeated init of an already initialized session must not
+     * recreate live resources (netifs, stack, handlers, callback gate). */
     return OSAL_SUCCESS;
   }
 
-  g_wifi_hal_ctx.cb = init->event_cb;
+  memset( &g_wifi_hal_ctx, 0, sizeof( g_wifi_hal_ctx ) );
+
+  /* Callback delivery gate — created first so every unwind path can delete it
+   * and every delivery is protected from the very beginning. */
+  if ( osal_bin_sem_create( &g_wifi_hal_ctx.cb_lock, "wifi_hal_cb", OSAL_SEM_FULL ) != OSAL_SUCCESS )
+  {
+    return OSAL_ERROR;
+  }
+
+  g_wifi_hal_ctx.cb           = init->event_cb;
   g_wifi_hal_ctx.cb_user_data = init->user_data;
 
-  esp_err_t err = esp_netif_init();
+  err = esp_netif_init();
   if ( err != ESP_OK && err != ESP_ERR_INVALID_STATE )
   {
-    return _esp_to_status( err );
+    st = _esp_to_status( err );
+    goto unwind;
   }
 
   err = esp_event_loop_create_default();
   if ( err != ESP_OK && err != ESP_ERR_INVALID_STATE )
   {
-    return _esp_to_status( err );
+    st = _esp_to_status( err );
+    goto unwind;
   }
 
   g_wifi_hal_ctx.netif_ap = esp_netif_create_default_wifi_ap();
+  if ( !g_wifi_hal_ctx.netif_ap )
+  {
+    /* A missing default netif is an initialization failure: unwinding below
+     * releases whatever was created so far, and netif_ap is never dereferenced
+     * by the AP configuration code. */
+    st = OSAL_ERROR;
+    goto unwind;
+  }
+  g_wifi_hal_ctx.netif_ap_created = true;
+
   g_wifi_hal_ctx.netif_sta = esp_netif_create_default_wifi_sta();
+  if ( !g_wifi_hal_ctx.netif_sta )
+  {
+    st = OSAL_ERROR;
+    goto unwind;
+  }
+  g_wifi_hal_ctx.netif_sta_created = true;
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   cfg.nvs_enable = false;
   err = esp_wifi_init( &cfg );
   if ( err != ESP_OK )
   {
-    return _esp_to_status( err );
+    st = _esp_to_status( err );
+    goto unwind;
   }
+  g_wifi_hal_ctx.wifi_inited = true;
 
   if ( init->ap_ip && init->ap_gateway && init->ap_netmask )
   {
@@ -260,7 +364,8 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
     esp_err_t dhcp_err = esp_netif_dhcps_stop( g_wifi_hal_ctx.netif_ap );
     if ( dhcp_err != ESP_OK && dhcp_err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED )
     {
-      return OSAL_ERROR;
+      st = OSAL_ERROR;
+      goto unwind;
     }
 
     esp_netif_ip_info_t ap_ip_info = { 0 };
@@ -270,7 +375,8 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
 
     if ( esp_netif_set_ip_info( g_wifi_hal_ctx.netif_ap, &ap_ip_info ) != ESP_OK )
     {
-      return OSAL_ERROR;
+      st = OSAL_ERROR;
+      goto unwind;
     }
 
     /* Optional captive DNS override advertised by the AP DHCP server.  When
@@ -278,61 +384,299 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
      * The DNS requirement is applied while the DHCP server is stopped. */
     if ( init->ap_dns && init->ap_dns[0] != '\0' )
     {
-      osal_status_t st = _configure_ap_dns( init->ap_dns );
+      st = _configure_ap_dns( init->ap_dns );
       if ( st != OSAL_SUCCESS )
       {
-        /* On error the AP DHCP server is left stopped and the Wi-Fi stack has
-         * not been started yet, so the AP is in a defined, inactive state. */
-        return st;
+        goto unwind;
       }
     }
 
     if ( esp_netif_dhcps_start( g_wifi_hal_ctx.netif_ap ) != ESP_OK )
     {
-      return OSAL_ERROR;
+      st = OSAL_ERROR;
+      goto unwind;
     }
   }
   else if ( init->ap_dns && init->ap_dns[0] != '\0' )
   {
     /* Advertising a captive DNS requires the AP IP/DHCP configuration, so
      * reject the combination rather than silently dropping the request. */
-    return OSAL_ERR_INVALID_ARGUMENT;
+    st = OSAL_ERR_INVALID_ARGUMENT;
+    goto unwind;
   }
 
-  (void) esp_event_handler_register( WIFI_EVENT, ESP_EVENT_ANY_ID, &_wifi_event_handler, NULL );
-  (void) esp_event_handler_register( IP_EVENT, IP_EVENT_STA_GOT_IP, &_wifi_event_handler, NULL );
+  err = esp_event_handler_register( WIFI_EVENT, ESP_EVENT_ANY_ID, &_wifi_event_handler, NULL );
+  if ( err != ESP_OK )
+  {
+    /* Only a real registration success counts: ESP_ERR_INVALID_ARG here means
+     * the handler was not registered, which must fail this init, not silently
+     * produce an "initialized" HAL with a missing event source. */
+    st = _esp_to_status( err );
+    goto unwind;
+  }
+  g_wifi_hal_ctx.handler_wifi_registered = true;
+
+  err = esp_event_handler_register( IP_EVENT, IP_EVENT_STA_GOT_IP, &_wifi_event_handler, NULL );
+  if ( err != ESP_OK )
+  {
+    st = _esp_to_status( err );
+    goto unwind;
+  }
+  g_wifi_hal_ctx.handler_ip_registered = true;
 
   g_wifi_hal_ctx.initialized = true;
   return OSAL_SUCCESS;
+
+unwind:
+  /* Unwind every partial-init failure: unregister the handlers (if any were
+   * registered) so no callback can be delivered after we return, disable and
+   * drain callback delivery, clear the callback state, then release the
+   * Wi-Fi stack and the default netifs that were actually created.  The
+   * session is left fully uninitialized so a later wifi_hal_deinit() is a
+   * safe no-op and a retried init starts from clean state.  If any release
+   * cannot be completed (for example a handler that is still registered
+   * because the event loop is busy), the session flag and the callback gate
+   * are kept so a later wifi_hal_deinit() retries the release; callback
+   * delivery is disabled either way so no stale callback can reach the user.
+   */
+  {
+    bool unwind_incomplete = false;
+
+  /* Unregister each handler individually, keyed by its own registration flag.
+   * A handler that was never registered (flag clear, e.g. the second
+   * registration failed) is skipped entirely instead of producing a bogus
+   * ESP_ERR_NOT_FOUND failure on every retry.  A handler whose unregister
+   * reports it as already absent (ESP_ERR_NOT_FOUND) or as un-registrable
+   * (ESP_ERR_INVALID_ARG) is treated as gone and its flag is cleared. */
+  if ( g_wifi_hal_ctx.handler_wifi_registered )
+  {
+    esp_err_t uerr = esp_event_handler_unregister( WIFI_EVENT, ESP_EVENT_ANY_ID, &_wifi_event_handler );
+    if ( uerr == ESP_OK || uerr == ESP_ERR_NOT_FOUND || uerr == ESP_ERR_INVALID_ARG )
+    {
+      g_wifi_hal_ctx.handler_wifi_registered = false;
+    }
+    else
+    {
+      /* The WIFI handler may still be registered; it must stay tracked so a
+       * later deinit retries the unregistration before any new init runs. */
+      unwind_incomplete = true;
+    }
+  }
+  if ( g_wifi_hal_ctx.handler_ip_registered )
+  {
+    esp_err_t uerr = esp_event_handler_unregister( IP_EVENT, IP_EVENT_STA_GOT_IP, &_wifi_event_handler );
+    if ( uerr == ESP_OK || uerr == ESP_ERR_NOT_FOUND || uerr == ESP_ERR_INVALID_ARG )
+    {
+      g_wifi_hal_ctx.handler_ip_registered = false;
+    }
+    else
+    {
+      unwind_incomplete = true;
+    }
+  }
+
+  /* Disable new deliveries, wait for any already-running callback and clear the
+   * pointers while the callback gate still exists.  Even if a handler could not
+   * be unregistered, it can no longer reach the user through this gate. */
+  _quiesce_callbacks();
+
+  /* Release the Wi-Fi stack.  esp_wifi_stop() is only meaningful after
+   * esp_wifi_init() succeeded: calling it on an uninitialized stack returns
+   * ESP_ERR_WIFI_NOT_INIT, which must not be misread as an incomplete unwind
+   * that keeps the session alive.  The init path never starts the stack, so
+   * this is normally an ESP_ERR_WIFI_NOT_STARTED no-op — kept as a defensive
+   * stop for any stack that turned itself on during init. */
+  if ( g_wifi_hal_ctx.wifi_inited )
+  {
+    esp_err_t serr = esp_wifi_stop();
+    if ( serr != ESP_OK && serr != ESP_ERR_WIFI_NOT_STARTED )
+    {
+      unwind_incomplete = true;
+    }
+  }
+  if ( g_wifi_hal_ctx.wifi_inited )
+  {
+    esp_err_t derr = esp_wifi_deinit();
+    if ( derr != ESP_OK && derr != ESP_ERR_WIFI_NOT_INIT )
+    {
+      unwind_incomplete = true;
+    }
+    else
+    {
+      g_wifi_hal_ctx.wifi_inited = false;
+    }
+  }
+
+  if ( g_wifi_hal_ctx.netif_sta_created && g_wifi_hal_ctx.netif_sta )
+  {
+    esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_sta );
+    g_wifi_hal_ctx.netif_sta = NULL;
+    g_wifi_hal_ctx.netif_sta_created = false;
+  }
+
+  if ( g_wifi_hal_ctx.netif_ap_created && g_wifi_hal_ctx.netif_ap )
+  {
+    esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_ap );
+    g_wifi_hal_ctx.netif_ap = NULL;
+    g_wifi_hal_ctx.netif_ap_created = false;
+  }
+
+  if ( unwind_incomplete )
+  {
+    /* Safe-retry state: keep the session flag and the callback gate so a later
+     * wifi_hal_deinit() completes the release.  Delivery is disabled and the
+     * callback pointers are cleared, so callback delivery is quiescent. */
+    g_wifi_hal_ctx.initialized = true;
+    osal_log_error( "[wifi-hal] init unwind incomplete, retry via deinit" );
+    return st;
+  }
+
+  if ( g_wifi_hal_ctx.cb_lock )
+  {
+    if ( osal_bin_sem_delete( g_wifi_hal_ctx.cb_lock ) != OSAL_SUCCESS )
+    {
+      /* The callback gate could not be released: keep it (and the session
+       * flag) so a later wifi_hal_deinit() re-attempts the deletion.  Delivery
+       * is already disabled and the callback pointers are cleared, so the
+       * retained gate is quiescent. */
+      g_wifi_hal_ctx.initialized = true;
+      osal_log_error( "[wifi-hal] init unwind incomplete (callback gate retained), "
+                      "retry via deinit" );
+      return st;
+    }
+    g_wifi_hal_ctx.cb_lock = NULL;
+  }
+
+  memset( &g_wifi_hal_ctx, 0, sizeof( g_wifi_hal_ctx ) );
+  return st;
+  }
 }
 
 osal_status_t wifi_hal_deinit( void )
 {
+  osal_status_t result = OSAL_SUCCESS;
+  esp_err_t     err;
+
   if ( !g_wifi_hal_ctx.initialized )
   {
+    /* Uninitialized and repeated deinit are successful no-ops. */
     return OSAL_SUCCESS;
   }
 
-  (void) esp_event_handler_unregister( WIFI_EVENT, ESP_EVENT_ANY_ID, &_wifi_event_handler );
-  (void) esp_event_handler_unregister( IP_EVENT, IP_EVENT_STA_GOT_IP, &_wifi_event_handler );
-  (void) esp_wifi_stop();
-  (void) esp_wifi_deinit();
+  /* 1. Unregister the event handlers before callback quiescence.  On top of
+   *    removing the event source, the event loop dispatches handlers while
+   *    holding its own loop lock, so unregistering also waits for a handler
+   *    that is currently running to return.  Each handler is unregistered
+   *    individually, keyed by its own registration flag: skipping a handler
+   *    whose flag is already clear keeps a deinit retry from reporting a bogus
+   *    ESP_ERR_NOT_FOUND for a handler that never existed (or was already
+   *    removed) and therefore never returning success.  A flag is cleared
+   *    only when the matching handler is confirmed gone; otherwise it stays
+   *    set so no later init can run while the handler is still registered. */
+  if ( g_wifi_hal_ctx.handler_wifi_registered )
+  {
+    err = esp_event_handler_unregister( WIFI_EVENT, ESP_EVENT_ANY_ID, &_wifi_event_handler );
+    if ( err != ESP_OK && err != ESP_ERR_NOT_FOUND && err != ESP_ERR_INVALID_ARG )
+    {
+      result = OSAL_ERROR;
+    }
+    else
+    {
+      g_wifi_hal_ctx.handler_wifi_registered = false;
+    }
+  }
+  if ( g_wifi_hal_ctx.handler_ip_registered )
+  {
+    err = esp_event_handler_unregister( IP_EVENT, IP_EVENT_STA_GOT_IP, &_wifi_event_handler );
+    if ( err != ESP_OK && err != ESP_ERR_NOT_FOUND && err != ESP_ERR_INVALID_ARG )
+    {
+      result = OSAL_ERROR;
+    }
+    else
+    {
+      g_wifi_hal_ctx.handler_ip_registered = false;
+    }
+  }
 
-  /* Default Wi-Fi netifs must be destroyed explicitly before next init.
-   * Otherwise esp_netif keeps duplicate keys and esp_netif_create_default_wifi_ap() asserts.
-   */
-  if ( g_wifi_hal_ctx.netif_sta )
+  /* 2. Callback quiescence: disable new deliveries, wait for every callback
+   *    already in flight to return, and clear the callback/user-data
+   *    pointers.  From this point on no later callback can begin. */
+  _quiesce_callbacks();
+
+  /* 3. Release the Wi-Fi stack.  The state flags are cleared only when the
+   *    release actually happened (or was already done), so that when a release
+   *    fails the retained lifecycle state lets a retry of wifi_hal_deinit()
+   *    attempt it again instead of skipping it. */
+  if ( g_wifi_hal_ctx.started )
+  {
+    err = esp_wifi_stop();
+    if ( err == ESP_OK || err == ESP_ERR_WIFI_NOT_STARTED )
+    {
+      g_wifi_hal_ctx.started = false;
+    }
+    else
+    {
+      result = OSAL_ERROR;
+    }
+  }
+
+  if ( g_wifi_hal_ctx.wifi_inited )
+  {
+    err = esp_wifi_deinit();
+    if ( err == ESP_OK || err == ESP_ERR_WIFI_NOT_INIT )
+    {
+      g_wifi_hal_ctx.wifi_inited = false;
+    }
+    else
+    {
+      result = OSAL_ERROR;
+    }
+  }
+
+  /* 4. Destroy the default Wi-Fi netifs exactly once. */
+  if ( g_wifi_hal_ctx.netif_sta_created && g_wifi_hal_ctx.netif_sta )
   {
     esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_sta );
     g_wifi_hal_ctx.netif_sta = NULL;
+    g_wifi_hal_ctx.netif_sta_created = false;
   }
 
-  if ( g_wifi_hal_ctx.netif_ap )
+  if ( g_wifi_hal_ctx.netif_ap_created && g_wifi_hal_ctx.netif_ap )
   {
     esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_ap );
     g_wifi_hal_ctx.netif_ap = NULL;
+    g_wifi_hal_ctx.netif_ap_created = false;
   }
 
+  if ( result != OSAL_SUCCESS )
+  {
+    /* Teardown could not release a platform resource.  Callback delivery is
+     * already disabled and the callback pointers are cleared; keep the
+     * session flag and the callback gate so a retry of wifi_hal_deinit()
+     * may attempt the release again. */
+    g_wifi_hal_ctx.initialized = true;
+    osal_log_error( "[wifi-hal] deinit: partial teardown, retry required" );
+    return OSAL_ERROR;
+  }
+
+  if ( g_wifi_hal_ctx.cb_lock )
+  {
+    if ( osal_bin_sem_delete( g_wifi_hal_ctx.cb_lock ) != OSAL_SUCCESS )
+    {
+      /* The callback gate could not be released.  Do NOT zero the context:
+       * keep the session flag and the cb_lock handle so a retry of
+       * wifi_hal_deinit() can attempt the deletion again.  Callback delivery
+       * is already disabled and the pointers are cleared, so the retained
+       * gate stays quiescent. */
+      g_wifi_hal_ctx.initialized = true;
+      osal_log_error( "[wifi-hal] deinit: failed to delete callback gate, "
+                      "retry required" );
+      return OSAL_ERROR;
+    }
+    g_wifi_hal_ctx.cb_lock = NULL;
+  }
+
+  g_wifi_hal_ctx.initialized = false;
   memset( &g_wifi_hal_ctx, 0, sizeof( g_wifi_hal_ctx ) );
   return OSAL_SUCCESS;
 }

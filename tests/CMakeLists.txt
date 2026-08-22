@@ -80,6 +80,35 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building Wi-Fi test application (wifi_tests)")
 
+  # ---- POSIX Wi-Fi HAL lifecycle regression tests ----
+  # Links the REAL POSIX HAL (not the mock) to verify the callback-quiescent,
+  # repeat-safe deinit contract: deinit-before-init, init/deinit/deinit,
+  # partial-init cleanup (injected via invalid ap_dns), and an event (timer
+  # and in-flight callback) racing deinit.
+  if(CONFIG_HQ_PLATFORM_POSIX)
+    add_executable(wifi_hal_posix_tests
+      ${WIFI_TEST_DIR}/wifi_hal_posix_test.c
+      ${WIFI_SRC_DIR}/platforms/posix/wifi_hal_driver.c
+    )
+
+    target_include_directories(wifi_hal_posix_tests
+      PRIVATE ${WIFI_SRC_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+    )
+
+    target_link_libraries(wifi_hal_posix_tests
+      hq_osal
+      unity
+      pthread
+    )
+
+    add_test(NAME wifi_hal_posix_tests COMMAND wifi_hal_posix_tests)
+    set_tests_properties(wifi_hal_posix_tests PROPERTIES LABELS "unit;wifi")
+
+    message(STATUS "Tests: Building POSIX Wi-Fi HAL test application (wifi_hal_posix_tests)")
+  endif()
+
   add_executable(mqtt_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/mqtt/mqtt_config_test.c
   )

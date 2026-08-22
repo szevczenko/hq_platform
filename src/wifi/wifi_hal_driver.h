@@ -110,13 +110,41 @@ typedef struct
 
 /**
  * @brief   Initialize the Wi-Fi HAL.
- * @param   [in] init - initialisation parameters
+ *
+ * @details Registers the event callback and allocates the per-session platform
+ *          resources (synchronization objects, event handlers, Wi-Fi stack).
+ *          When the HAL is already initialized the call is an idempotent
+ *          no-op: it returns @c OSAL_SUCCESS without resetting the active
+ *          session and without touching live synchronization objects.
+ *
+ * @param   [in] init - initialisation parameters (@p event_cb must not be NULL)
  * @return  OSAL_SUCCESS on success, error code otherwise
+ * @note    On failure the HAL is left fully uninitialized: any resources
+ *          allocated before the failing step are released and a later call to
+ *          @c wifi_hal_deinit (or a retry of @c wifi_hal_init after
+ *          @c wifi_hal_deinit) is safe.
  */
 osal_status_t wifi_hal_init( const wifi_hal_init_t* init );
 
 /**
- * @brief   Deinitialize the Wi-Fi HAL and free platform resources.
+ * @brief   Deinitialize the Wi-Fi HAL and release platform resources.
+ *
+ * @details Callback-quiescence barrier.  When this function returns
+ *          @c OSAL_SUCCESS the following guarantees hold:
+ *            - all event sources (event-loop handlers, background threads)
+ *              are unregistered or stopped,
+ *            - every callback that had already started has returned,
+ *            - the event callback and user-data pointers are cleared,
+ *            - no callback can begin afterwards.
+ *
+ *          Calling this function while the HAL is uninitialized, or calling it
+ *          more than once between two @c wifi_hal_init calls, is a successful
+ *          no-op that changes nothing.
+ *
+ *          When a platform resource cannot be released, an error code is
+ *          returned while enough lifecycle state is kept for a safe re-call;
+ *          callback delivery remains disabled in that case.
+ *
  * @return  OSAL_SUCCESS on success, error code otherwise
  */
 osal_status_t wifi_hal_deinit( void );
