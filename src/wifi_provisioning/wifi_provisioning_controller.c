@@ -65,6 +65,12 @@ static wifi_controller_ctx_t s_ctx = {
   false                                              /* grace_timer_active */
 };
 
+/* Latched when an explicit success-grace override is installed.  It lets an
+ * application configure the grace period before wifi_provisioning_controller_
+ * init() runs; without it init() would overwrite the override with the build
+ * default.  The value is intentionally not reset by init()/deinit(). */
+static bool s_grace_override = false;
+
 /* Private helpers ------------------------------------------------------- */
 
 /* Shut the portal down. The listeners are closed first and only then is a
@@ -203,7 +209,11 @@ bool wifi_provisioning_controller_init( void )
   s_ctx.enabled            = true;
   s_ctx.fallback_started   = false;
   s_ctx.grace_timer_active = false;
-  s_ctx.grace_ms           = CONFIG_WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS;
+  /* The configured default applies only until the first explicit override. */
+  if ( !s_grace_override )
+  {
+    s_ctx.grace_ms = CONFIG_WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS;
+  }
   s_ctx.state              = WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT;
 
   /* The grace timer is created once and reused across sessions. A failure to
@@ -276,7 +286,8 @@ bool wifi_provisioning_controller_stop( void )
 
 void wifi_provisioning_controller_set_success_grace_ms( uint32_t grace_ms )
 {
-  s_ctx.grace_ms = grace_ms;
+  s_ctx.grace_ms       = grace_ms;
+  s_grace_override     = true;
 }
 
 bool wifi_provisioning_controller_is_provisioning( void )

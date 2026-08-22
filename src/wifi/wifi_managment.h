@@ -163,6 +163,25 @@ void wifi_mgmt_stop( void );
 void wifi_mgmt_start( void );
 
 /**
+ * @brief   Wait until Wi-Fi startup completes.
+ *
+ * @details Blocks the calling task until the Wi-Fi worker has finished
+ *          bringing the stack up: the HAL event callback is installed, the
+ *          requested HAL mode has been started successfully, the initial
+ *          snapshots (IP state, mode event) are published, and the machine
+ *          reached the idle or ready state.  The readiness signal is emitted
+ *          synchronously from the init transition, so callers may rely on it
+ *          to distinguish "worker task created" from "Wi-Fi initialized".
+ *
+ * @param   [in] timeout_ms - maximum time to wait, in milliseconds
+ * @return  true if startup completed successfully, false if the wait timed
+ *          out or if HAL initialization / mode startup failed.
+ * @note    When the module has not been started, or after @c wifi_mgmt_stop,
+ *          the call returns false once @p timeout_ms elapses.
+ */
+bool wifi_mgmt_wait_ready( uint32_t timeout_ms );
+
+/**
  * @brief   Select the station to connect to from the last scan result.
  * @param   [in] num - zero-based index into the scanned AP list
  * @return  true if the index is valid, otherwise false
@@ -275,9 +294,13 @@ bool wifi_mgmt_is_read_data( void );
 
 /**
  * @brief   Check whether the Wi-Fi management module is running.
- * @return  true once @c wifi_mgmt_start has been called and the worker task
- *          is active, false when the module has not been started or has been
- *          stopped/deinitialized.
+ * @return  true once startup has completed (state @c WIFI_APP_IDLE or beyond),
+ *          false while the module is still initializing (@c WIFI_APP_INIT), is
+ *          being stopped (@c WIFI_APP_DEINIT), or has not been started
+ *          (@c WIFI_APP_DISABLE) — i.e. the worker task existing alone does
+ *          not make the module "running".
+ * @note    Prefer @c wifi_mgmt_wait_ready over polling this function when the
+ *          caller needs to distinguish task creation from completed init.
  */
 bool wifi_mgmt_is_running( void );
 

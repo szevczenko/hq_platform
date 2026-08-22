@@ -19,6 +19,8 @@ typedef struct
 
   uint32_t              start_count;
   uint32_t              stop_count;
+  uint32_t              init_count;   /**< Number of wifi_hal_init calls.   */
+  uint32_t              deinit_count; /**< Number of wifi_hal_deinit calls. */
 
   uint32_t              scan_start_count; /**< Number of wifi_hal_start_scan calls. */
 
@@ -49,6 +51,9 @@ void wifi_hal_mock_set_connect_result( osal_status_t result );
 /* Configure the return value of wifi_hal_start(). */
 void wifi_hal_mock_set_start_result( osal_status_t result );
 
+/* Configure the return value of wifi_hal_init(). Default is OSAL_SUCCESS. */
+void wifi_hal_mock_set_init_result( osal_status_t result );
+
 /* Set the predefined AP list returned by wifi_hal_get_scanned_ap(). */
 void wifi_hal_mock_set_scan_list( const wifi_hal_ap_record_t* list, uint16_t count );
 
@@ -62,6 +67,19 @@ void wifi_hal_mock_inject_event( wifi_hal_event_t event, const wifi_hal_event_da
  * immediately so tests can observe the in-flight scan window before manually
  * completing it via inject_event(WIFI_HAL_EVT_SCAN_DONE). */
 void wifi_hal_mock_set_scan_done_hold( bool hold );
+
+/* When @p hold is true, wifi_hal_init() blocks inside the mock BEFORE storing
+ * the registered event callback.  This lets tests hold the Wi-Fi worker in the
+ * middle of startup and prove that readiness is not reported before the HAL
+ * callback is installed. */
+void wifi_hal_mock_set_init_hold( bool hold );
+
+/* Block until the Wi-Fi worker has entered wifi_hal_init() and is parked at
+ * the init barrier (before the event callback is stored), or until the timeout
+ * elapses.  This lets the test acknowledge arrival at the barrier instead of
+ * inferring it from wait_ready() timing.
+ * @return true if the worker reached wifi_hal_init(), false on timeout. */
+bool wifi_hal_mock_wait_init_entered( uint32_t timeout_ms );
 
 /* Get read-only pointer to internal mock state for assertions. */
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void );

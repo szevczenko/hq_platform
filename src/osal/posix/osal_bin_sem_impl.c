@@ -2,6 +2,7 @@
 #include <semaphore.h>
 #include <stdlib.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "osal_bin_sem.h"
 #include "osal_assert.h"

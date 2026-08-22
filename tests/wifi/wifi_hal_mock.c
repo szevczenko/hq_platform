@@ -9,6 +9,8 @@
 
 #include "wifi_hal_mock.h"
 
+#include "osal_bin_sem.h"
+#include "osal_task.h"
 #include <stdbool.h>
 #include <string.h>
 
@@ -16,6 +18,13 @@
 
 static wifi_hal_mock_state_t g_mock = { 0 };
 static bool                  g_hold_scan_done = false;
+static bool                  g_hold_init   = false;
+static osal_status_t         g_init_result = OSAL_SUCCESS;
+
+/* Signals that a Wi-Fi worker has entered wifi_hal_init() (used to acknowledge
+ * arrival at the init barrier without timing-based inference). */
+static osal_bin_sem_id_t g_init_entered_sem;
+static bool              g_init_entered_created = false;
 
 /* ---- mock control API ---------------------------------------------------- */
 
@@ -23,6 +32,21 @@ void wifi_hal_mock_reset( void )
 {
   memset( &g_mock, 0, sizeof( g_mock ) );
   g_hold_scan_done = false;
+  g_hold_init      = false;
+  g_init_result    = OSAL_SUCCESS;
+
+  if ( !g_init_entered_created )
+  {
+    (void) osal_bin_sem_create( &g_init_entered_sem, "wifi_mock_init_entered", OSAL_SEM_EMPTY );
+    g_init_entered_created = true;
+  }
+  else
+  {
+    /* Drain any leftover "entered" token from a previous round. */
+    while ( osal_bin_sem_timed_wait( g_init_entered_sem, 0 ) == OSAL_SUCCESS )
+    {
+    }
+  }
 }
 
 void wifi_hal_mock_set_connect_result( osal_status_t result )
@@ -33,6 +57,11 @@ void wifi_hal_mock_set_connect_result( osal_status_t result )
 void wifi_hal_mock_set_start_result( osal_status_t result )
 {
   g_mock.start_result = result;
+}
+
+void wifi_hal_mock_set_init_result( osal_status_t result )
+{
+  g_init_result = result;
 }
 
 void wifi_hal_mock_set_scan_list( const wifi_hal_ap_record_t* list, uint16_t count )
@@ -68,6 +97,16 @@ void wifi_hal_mock_inject_event( wifi_hal_event_t event, const wifi_hal_event_da
 void wifi_hal_mock_set_scan_done_hold( bool hold )
 {
   g_hold_scan_done = hold;
+}
+
+void wifi_hal_mock_set_init_hold( bool hold )
+{
+  g_hold_init = hold;
+}
+
+bool wifi_hal_mock_wait_init_entered( uint32_t timeout_ms )
+{
+  return osal_bin_sem_timed_wait( g_init_entered_sem, timeout_ms ) == OSAL_SUCCESS;
 }
 
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void )
@@ -150,6 +189,25 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
     g_mock.ap_dns_set = false;
   }
 
+  g_mock.init_count++;
+
+  /* Acknowledge that the worker has entered wifi_hal_init() before the barrier
+   * blocks it and before the event callback is stored.  Tests wait on this to
+   * prove readiness is not reported before the callback is installed. */
+  (void) osal_bin_sem_give( g_init_entered_sem );
+
+  /* Initialization barrier: hold the Wi-Fi worker inside wifi_hal_init()
+   * without installing the event callback until the test lifts the barrier. */
+  while ( g_hold_init )
+  {
+    (void) osal_task_delay_ms( 10 );
+  }
+
+  if ( g_init_result != OSAL_SUCCESS )
+  {
+    return g_init_result;
+  }
+
   g_mock.initialized = true;
   g_mock.event_cb    = init->event_cb;
   g_mock.user_data   = init->user_data;
@@ -158,6 +216,7 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
 
 osal_status_t wifi_hal_deinit( void )
 {
+  g_mock.deinit_count++;
   g_mock.initialized = false;
   g_mock.started     = false;
   return OSAL_SUCCESS;

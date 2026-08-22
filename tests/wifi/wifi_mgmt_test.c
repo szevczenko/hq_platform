@@ -7,6 +7,9 @@
  * task.
  *
  * Tests:
+ * 0a. wait_ready() is held until the HAL callback is installed (init barrier)
+ * 0b. Startup mode-start failure is reported deterministically via wait_ready()
+ * 0c. Startup HAL-init failure is reported deterministically via wait_ready()
  * 1.  Init and start reach IDLE
  * 2.  Set SSID / password validation
  * 3.  Scan returns predefined AP list
@@ -231,6 +234,155 @@ static bool _wait_idle( uint32_t timeout_ms )
     elapsed += 50;
   }
   return wifi_mgmt_is_idle();
+}
+
+/* ============================================================================
+ * Test 0a: wifi_mgmt_wait_ready() is held until the HAL callback is installed
+ *
+ * Performs the very first lifecycle start with wifi_hal_init() parked at the
+ * mock barrier (before the event callback is stored).  While the worker is
+ * stuck inside init():
+ *   - wifi_mgmt_wait_ready() must NOT report ready,
+ *   - wifi_mgmt_is_running() must be false (state == INIT),
+ *   - a GOT_IP injected into the mock is dropped (no callback installed).
+ * After the barrier is lifted, wait_ready() reports success and a GOT_IP
+ * injected afterwards is delivered through the installed HAL callback, proving
+ * that events cannot be lost once readiness is reported.
+ * ========================================================================== */
+static void test_wait_ready_held_at_callback_barrier( void )
+{
+  /* Hold the worker inside wifi_hal_init(); the callback is not stored yet. */
+  wifi_hal_mock_set_init_hold( true );
+  wifi_mgmt_start();
+
+  /* First acknowledge that the worker has actually reached wifi_hal_init() and
+   * is parked at the barrier (before the event callback is stored).  Without
+   * this the assertion below could pass just because the worker has not run
+   * yet, rather than because init is held before callback installation. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_init_entered( 2000 ),
+                            "worker entered wifi_hal_init() at the barrier" );
+
+  /* Readiness must NOT be reported while the init barrier is held. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 150 ),
+                             "not ready while HAL init is held" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "not running while state is INIT" );
+
+  /* A GOT_IP injected before the callback exists is dropped. */
+  wifi_hal_event_data_t evt_data = { 0 };
+  strncpy( evt_data.ip_info.ip, "192.168.77.1", sizeof( evt_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_connected(),
+                             "pre-callback GOT_IP is not delivered" );
+
+  /* Release the barrier: startup completes and readiness is reported. */
+  wifi_hal_mock_set_init_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "ready once HAL init completes" );
+
+  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
+  TEST_ASSERT_TRUE_MESSAGE( ms->initialized, "HAL initialized" );
+  TEST_ASSERT_TRUE_MESSAGE( ms->started, "HAL started" );
+  TEST_ASSERT_NOT_NULL_MESSAGE( (void*) ms->event_cb, "HAL callback installed" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(), "running after startup" );
+
+  /* Post-ready GOT_IP cannot be lost: the HAL callback is present now. */
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_connected(),
+                            "post-ready GOT_IP is delivered" );
+
+  /* Drop the link again so later tests start from a clean idle station. */
+  wifi_hal_event_data_t disc_data = { 0 };
+  disc_data.disconnect_reason = 2;
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_DISCONNECTED, &disc_data );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_connected(), "idle after disconnect" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "machine idle after barrier test" );
+}
+
+/* ============================================================================
+ * Test 0b: Startup mode-start failure is reported deterministically
+ *
+ * Shuts the module down, sabotages the HAL mode start, and starts again:
+ * wifi_mgmt_wait_ready() must return false without relying on timing sleeps,
+ * the HAL must be stopped AND deinitialized on the failure path, the module
+ * must be not running, and a fresh start with a healthy HAL must complete
+ * successfully.
+ * ========================================================================== */
+static void test_startup_failure_is_deterministic( void )
+{
+  /* Stop the current lifecycle; stop() blocks until state == DISABLE. */
+  wifi_mgmt_stop();
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "not running after stop" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 100 ),
+                             "not ready after stop" );
+
+  /* Sabotage the HAL mode start and trigger a fresh init round. */
+  const uint32_t start_before   = wifi_hal_mock_get_state()->start_count;
+  const uint32_t init_before    = wifi_hal_mock_get_state()->init_count;
+  const uint32_t deinit_before  = wifi_hal_mock_get_state()->deinit_count;
+  wifi_hal_mock_set_start_result( OSAL_ERROR );
+  wifi_mgmt_start();
+
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 2000 ),
+                             "startup failure reported by wait_ready" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "not running after failed startup" );
+  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
+  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms->start_count,
+                             "HAL start attempted exactly once" );
+  TEST_ASSERT_EQUAL_MESSAGE( init_before + 1, ms->init_count,
+                             "HAL init attempted exactly once" );
+  TEST_ASSERT_EQUAL_MESSAGE( deinit_before + 1, ms->deinit_count,
+                             "HAL deinitialized on the mode-start failure path" );
+  TEST_ASSERT_FALSE_MESSAGE( ms->started, "HAL left stopped after failure" );
+  TEST_ASSERT_FALSE_MESSAGE( ms->initialized,
+                             "HAL left deinitialized after failure" );
+
+  /* Retry with a healthy HAL: startup completes. */
+  wifi_hal_mock_set_start_result( OSAL_SUCCESS );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "startup succeeds after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(), "running after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after retry" );
+}
+
+/* ============================================================================
+ * Test 0c: Startup HAL-init failure is reported deterministically
+ *
+ * Same contract as test 0b but for the HAL initialization step: the failure is
+ * surfaced through wifi_mgmt_wait_ready(), the HAL is deinitialized so a retry
+ * never re-initializes an already initialized HAL, and a healthy retry
+ * completes.
+ * ========================================================================== */
+static void test_startup_init_failure_is_deterministic( void )
+{
+  /* Stop the current lifecycle; stop() blocks until state == DISABLE. */
+  wifi_mgmt_stop();
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "not running after stop" );
+
+  /* Sabotage HAL initialization and trigger a fresh init round. */
+  const uint32_t init_before = wifi_hal_mock_get_state()->init_count;
+  wifi_hal_mock_set_init_result( OSAL_ERROR );
+  wifi_mgmt_start();
+
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 2000 ),
+                             "init failure reported by wait_ready" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "not running after failed init" );
+  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
+  TEST_ASSERT_EQUAL_MESSAGE( init_before + 1, ms->init_count,
+                             "HAL init attempted exactly once" );
+  TEST_ASSERT_FALSE_MESSAGE( ms->initialized,
+                             "HAL left deinitialized after init failure" );
+
+  /* Retry with a healthy HAL: startup completes. */
+  wifi_hal_mock_set_init_result( OSAL_SUCCESS );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "startup succeeds after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(), "running after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after retry" );
 }
 
 /* ============================================================================
@@ -984,9 +1136,15 @@ void wifi_mgmt_tests_run( void )
   wifi_mgmt_init();
   wifi_mgmt_register_connect_cb( _on_connect );
   wifi_mgmt_register_disconnect_cb( _on_disconnect );
-  wifi_mgmt_start();
+  /* NOTE: the very first wifi_mgmt_start() is performed inside
+   * test_wait_ready_held_at_callback_barrier, which parks the HAL init at the
+   * mock barrier and proves readiness is not reported before the callback is
+   * installed. */
 
   /* --- Run all tests sequentially (single lifecycle) --- */
+  RUN_TEST( test_wait_ready_held_at_callback_barrier );
+  RUN_TEST( test_startup_failure_is_deterministic );
+  RUN_TEST( test_startup_init_failure_is_deterministic );
   RUN_TEST( test_init_reaches_idle );
   RUN_TEST( test_set_ap_password_validation );
   RUN_TEST( test_scan_predefined_list );

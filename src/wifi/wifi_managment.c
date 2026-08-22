@@ -66,6 +66,10 @@ typedef struct
 {
   wifi_app_status_t state;
   bool              is_started;
+  /* Startup lifecycle: armed by wifi_mgmt_start()/wifi_mgmt_stop(), completed
+   * by _state_init().  Both flags are written and read under state_mutex. */
+  bool              startup_done; /**< _state_init() finished (ok or failed). */
+  bool              startup_ok;   /**< Last startup round finished successfully. */
   bool              is_power_save;
   bool              connected;
   bool              disconnect_req;
@@ -89,6 +93,10 @@ typedef struct
 
   osal_bin_sem_id_t ip_sem;
   osal_bin_sem_id_t scan_sem;
+  /* Readiness token posted exactly once per startup round by _state_init();
+   * wifi_mgmt_wait_ready() uses it as a wake-up hint (the startup_done /
+   * startup_ok flags remain the authoritative outcome). */
+  osal_bin_sem_id_t ready_sem;
 
   callback_list_t on_connect_cb;
   callback_list_t on_disconnect_cb;
@@ -317,6 +325,38 @@ static void _change_state( wifi_app_status_t new_state )
   }
 }
 
+/* Publish the startup outcome and wake any wifi_mgmt_wait_ready() caller.
+ * Only _state_init() calls this, once per init round, after the HAL callback
+ * is installed, the requested mode has been started and the initial snapshots
+ * have been published. */
+static void _notify_startup_result( bool ok )
+{
+  _lock_state();
+  g_ctx.startup_done = true;
+  g_ctx.startup_ok   = ok;
+  _unlock_state();
+  (void) osal_bin_sem_give( g_ctx.ready_sem );
+}
+
+/* Publish a terminal startup failure, moving the machine to DISABLE and
+ * reporting the failed outcome within a single critical section, then waking
+ * anyone blocked in wifi_mgmt_wait_ready().
+ *
+ * Because the DISABLE state and the failure flags are published atomically
+ * before the wake-up token is released, a caller returning from the failed
+ * wait always observes a settled DISABLE state and can immediately start a new
+ * startup round — it can never act on a stale failure while the worker is still
+ * completing the old init transition. */
+static void _fail_startup( void )
+{
+  _lock_state();
+  g_ctx.startup_done = true;
+  g_ctx.startup_ok   = false;
+  g_ctx.state        = WIFI_APP_DISABLE;
+  _unlock_state();
+  (void) osal_bin_sem_give( g_ctx.ready_sem );
+}
+
 static void _hal_event_cb( wifi_hal_event_t              event,
                            const wifi_hal_event_data_t*  data,
                            void*                         user_data )
@@ -450,7 +490,10 @@ static void _setup_ap_name_with_mac( void )
 
 static osal_status_t _start_mode( wifi_hal_mode_t mode )
 {
-  if ( g_ctx.is_started )
+  _lock_state();
+  const bool already_started = g_ctx.is_started;
+  _unlock_state();
+  if ( already_started )
   {
     return OSAL_SUCCESS;
   }
@@ -470,7 +513,9 @@ static osal_status_t _start_mode( wifi_hal_mode_t mode )
   st = wifi_hal_start( mode );
   if ( st == OSAL_SUCCESS )
   {
+    _lock_state();
     g_ctx.is_started = true;
+    _unlock_state();
     (void) wifi_hal_set_power_save( false );
   }
 
@@ -480,7 +525,13 @@ static osal_status_t _start_mode( wifi_hal_mode_t mode )
 static void _state_init( void )
 {
   osal_log_debug( "[wifi] _state_init enter" );
+
+  _lock_state();
+  /* New init round: nothing has been announced to wait_ready() yet. */
+  g_ctx.startup_done     = false;
+  g_ctx.startup_ok       = false;
   g_ctx.scan_in_progress = false;
+  _unlock_state();
 
   wifi_hal_init_t init = {
     .ap_ip      = DEFAULT_AP_IP,
@@ -492,28 +543,54 @@ static void _state_init( void )
 
   if ( wifi_hal_init( &init ) != OSAL_SUCCESS )
   {
-    _change_state( WIFI_APP_DISABLE );
+    osal_log_error( "[wifi] _state_init: HAL init failed" );
+    /* Release any partially-initialized HAL resources before leaving the
+     * module disabled; a later wifi_mgmt_stop() will not reach DEINIT because
+     * the machine is already in DISABLE. */
+    (void) wifi_hal_deinit();
+    /* Publish DISABLE and the failure outcome atomically before waking
+     * wait_ready(), so a caller returning from the failed wait is always in a
+     * settled DISABLE state and can immediately start a new round. */
+    _fail_startup();
     return;
   }
 
   _setup_ap_name_with_mac();
 
+  osal_status_t st = OSAL_SUCCESS;
   if ( g_wifi_type == T_WIFI_TYPE_SERVER )
   {
-    (void) _start_mode( WIFI_HAL_MODE_AP );
+    st = _start_mode( WIFI_HAL_MODE_AP );
   }
   else if ( g_wifi_type == T_WIFI_TYPE_CLIENT )
   {
-    (void) _start_mode( WIFI_HAL_MODE_STA );
+    st = _start_mode( WIFI_HAL_MODE_STA );
   }
   else
   {
-    (void) _start_mode( WIFI_HAL_MODE_APSTA );
+    st = _start_mode( WIFI_HAL_MODE_APSTA );
+  }
+
+  if ( st != OSAL_SUCCESS )
+  {
+    osal_log_error( "[wifi] _state_init: HAL mode start failed (rc=%d)", (int) st );
+    /* Stop and deinitialize the HAL so a retry never re-initializes an already
+     * initialized HAL (which would reset/destroy/recreate synchronization
+     * objects on some platforms) and no HAL resources are leaked while the
+     * module sits in DISABLE. */
+    (void) wifi_hal_stop();
+    (void) wifi_hal_deinit();
+    _fail_startup();
+    return;
   }
 
   _event_dispatch( WIFI_MGMT_EVENT_MODE_CHANGED );
   _update_ip_info( UPDATE_LOST_CONNECTION );
   _change_state( WIFI_APP_IDLE );
+
+  /* Startup complete: HAL callback installed, requested mode started, initial
+   * snapshots published, machine at IDLE. Only now is readiness announced. */
+  _notify_startup_result( true );
 }
 
 static void _request_mode_change( void );
@@ -522,6 +599,8 @@ static void _state_idle( void )
 {
   _lock_state();
   const bool mode_pending = g_ctx.mode_req != (wifi_type_t) 0;
+  const bool server_mode  = g_wifi_type == T_WIFI_TYPE_SERVER;
+  const bool do_connect   = g_ctx.connect_req;
   _unlock_state();
 
   if ( mode_pending )
@@ -530,14 +609,16 @@ static void _state_idle( void )
     return;
   }
 
-  if ( g_wifi_type == T_WIFI_TYPE_SERVER )
+  if ( server_mode )
   {
+    _lock_state();
     g_ctx.connected = true;
+    _unlock_state();
     _change_state( WIFI_APP_START );
     return;
   }
 
-  if ( g_ctx.connect_req )
+  if ( do_connect )
   {
     _change_state( WIFI_APP_CONNECT );
   }
@@ -570,7 +651,11 @@ static void _try_next_credential( void )
 static void _state_connect( void )
 {
   osal_log_debug( "[wifi] _state_connect enter, attempts=%u", g_ctx.connect_attempts );
-  if ( !g_ctx.is_started )
+
+  _lock_state();
+  const bool started = g_ctx.is_started;
+  _unlock_state();
+  if ( !started )
   {
     if ( g_wifi_type == T_WIFI_TYPE_CLIENT )
     {
@@ -596,7 +681,9 @@ static void _state_connect( void )
       _try_next_credential();
       g_ctx.connect_attempts = 0;
       g_ctx.connect_req      = false;
+      _lock_state();
       g_ctx.is_started       = false;
+      _unlock_state();
       (void) wifi_hal_stop();
       _event_dispatch( WIFI_MGMT_EVENT_CONNECT_FAILED );
       _change_state( WIFI_APP_STOP );
@@ -806,7 +893,16 @@ static void _state_deinit( void )
   g_ctx.client_cnt        = 0;
   g_ctx.scanned_ap_num    = 0;
   g_ctx.scan_in_progress  = false;
+  /* A stopped module is no longer ready; reset the startup outcome so a later
+   * wifi_mgmt_wait_ready() blocks until the next startup round completes. */
+  g_ctx.startup_done      = false;
+  g_ctx.startup_ok        = false;
   _unlock_state();
+
+  /* Drop any leftover readiness token from a previous startup round. */
+  while ( osal_bin_sem_timed_wait( g_ctx.ready_sem, 0 ) == OSAL_SUCCESS )
+  {
+  }
 
   _update_ip_info( UPDATE_LOST_CONNECTION );
 
@@ -822,7 +918,14 @@ static void _wifi_event_task( void* arg )
 
   while ( true )
   {
-    switch ( g_ctx.state )
+    /* Snapshot the current state under the state mutex; transitions are
+     * performed by this same task, so the snapshot always matches the latest
+     * public API transition. */
+    _lock_state();
+    const wifi_app_status_t state = g_ctx.state;
+    _unlock_state();
+
+    switch ( state )
     {
       case WIFI_APP_INIT:
         _state_init();
@@ -874,6 +977,10 @@ void wifi_mgmt_init( void )
 
   (void) osal_bin_sem_create( &g_ctx.ip_sem, "wifi_ip", OSAL_SEM_FULL );
   (void) osal_bin_sem_create( &g_ctx.scan_sem, "wifi_scan", OSAL_SEM_EMPTY );
+  (void) osal_bin_sem_create( &g_ctx.ready_sem, "wifi_ready", OSAL_SEM_EMPTY );
+
+  g_ctx.startup_done = false;
+  g_ctx.startup_ok   = false;
 
   _load_saved_config();
   _update_ip_info( UPDATE_LOST_CONNECTION );
@@ -913,8 +1020,11 @@ void wifi_mgmt_set_wifi_type( wifi_type_t type )
 
   g_wifi_type = type;
 
-  /* Only notify once the module is live (mutex created). */
-  if ( g_ctx.state != WIFI_APP_DISABLE )
+  /* Only notify once the module is live; read state under the state mutex. */
+  _lock_state();
+  const bool module_live = g_ctx.state != WIFI_APP_DISABLE;
+  _unlock_state();
+  if ( module_live )
   {
     _event_dispatch( WIFI_MGMT_EVENT_MODE_CHANGED );
   }
@@ -947,22 +1057,47 @@ bool wifi_mgmt_request_mode( wifi_type_t type )
 
 void wifi_mgmt_stop( void )
 {
-  if ( g_ctx.state != WIFI_APP_DISABLE )
+  _lock_state();
+  const bool was_running = g_ctx.state != WIFI_APP_DISABLE;
+  _unlock_state();
+
+  if ( was_running )
   {
     _change_state( WIFI_APP_DEINIT );
   }
 
-  for ( int i = 0; i < 20 && g_ctx.state != WIFI_APP_DISABLE; ++i )
+  for ( int i = 0; i < 20; ++i )
   {
+    _lock_state();
+    const bool stopped = g_ctx.state == WIFI_APP_DISABLE;
+    _unlock_state();
+    if ( stopped )
+    {
+      break;
+    }
     (void) osal_task_delay_ms( 100 );
   }
 }
 
 void wifi_mgmt_start( void )
 {
-  osal_log_debug( "[wifi] wifi_mgmt_start called, current state=%s", _state_name( g_ctx.state ) );
-  if ( g_ctx.state == WIFI_APP_DISABLE )
+  _lock_state();
+  const wifi_app_status_t state       = g_ctx.state;
+  const bool              from_disable = state == WIFI_APP_DISABLE;
+  _unlock_state();
+  osal_log_debug( "[wifi] wifi_mgmt_start called, current state=%s", _state_name( state ) );
+
+  if ( from_disable )
   {
+    /* Arm a fresh startup round: drop any leftover readiness token so that
+     * wifi_mgmt_wait_ready() blocks until _state_init() completes this time. */
+    _lock_state();
+    g_ctx.startup_done = false;
+    g_ctx.startup_ok   = false;
+    _unlock_state();
+    while ( osal_bin_sem_timed_wait( g_ctx.ready_sem, 0 ) == OSAL_SUCCESS )
+    {
+    }
     _change_state( WIFI_APP_INIT );
   }
 }
@@ -1201,9 +1336,61 @@ bool wifi_mgmt_is_idle( void )
 bool wifi_mgmt_is_running( void )
 {
   _lock_state();
-  const bool running = g_ctx.state != WIFI_APP_DISABLE;
+  const wifi_app_status_t state  = g_ctx.state;
+  const bool              running = state != WIFI_APP_INIT &&
+                                    state != WIFI_APP_DEINIT &&
+                                    state != WIFI_APP_DISABLE;
   _unlock_state();
   return running;
+}
+
+bool wifi_mgmt_wait_ready( uint32_t timeout_ms )
+{
+  const uint32_t start = osal_task_get_time_ms();
+
+  for ( ;; )
+  {
+    /* The startup outcome is the authoritative result and is protected by the
+     * state mutex; the readiness token below is only a wake-up hint. */
+    _lock_state();
+    const bool done = g_ctx.startup_done;
+    const bool ok   = g_ctx.startup_ok;
+    _unlock_state();
+    if ( done )
+    {
+      return ok;
+    }
+
+    /* Consume a posted token if one is already pending; the outcome is
+     * re-read on the next iteration regardless of who consumed the token, so
+     * concurrent waiters cannot lose a completion. */
+    if ( osal_bin_sem_timed_wait( g_ctx.ready_sem, 0 ) == OSAL_SUCCESS )
+    {
+      continue;
+    }
+
+    if ( timeout_ms == OSAL_MAX_DELAY )
+    {
+      (void) osal_task_delay_ms( 10 );
+      continue;
+    }
+
+    const uint32_t elapsed = osal_task_get_time_ms() - start;
+    if ( elapsed >= timeout_ms )
+    {
+      return false;
+    }
+
+    /* Block on the readiness token for at most the remaining budget so the
+     * call never overshoots the requested timeout.  On a timeout the loop
+     * re-checks both the outcome (startup may have just finished) and the
+     * deadline before returning. */
+    const uint32_t remain = timeout_ms - elapsed;
+    if ( osal_bin_sem_timed_wait( g_ctx.ready_sem, remain ) == OSAL_SUCCESS )
+    {
+      continue;
+    }
+  }
 }
 
 int wifi_mgmt_get_rssi( void )
