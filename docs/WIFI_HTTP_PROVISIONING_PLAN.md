@@ -606,3 +606,98 @@ Hardware validation is valuable but is not a dependency or completion gate for t
 ## 14. Recommended First Implementation Slice
 
 Implement Phase 1 and Phase 2 first: the Mongoose poll-thread invocation API and standalone captive DNS responder with POSIX tests. This is the smallest slice that validates the principal missing dependency without coupling it prematurely to Wi-Fi policy or the redesigned portal.
+
+## 15. Implementation Status and Validation Record (TASK-133)
+
+### 15.1 Implemented behavior vs. the plan
+
+All phases from Section 10 are implemented and the automated validation below
+passes. The following deviations from the plan were accepted during
+implementation and are reflected in the shipped behavior:
+
+| Plan reference | Planned | Shipped behavior |
+|---|---|---|
+| §5.2 Captive DNS API | `captive_dns_server_t` struct with `captive_dns_server_start(server, mgr, config)` / `stop(server)` | A global singleton service: `captive_dns_server_set_bind_url()`, `captive_dns_server_set_ip4()`, `captive_dns_server_start()`, `captive_dns_server_stop()`, `captive_dns_server_is_running()`. The packet codec (`CaptiveDns_ParseQuery()` / `CaptiveDns_BuildResponse()`) is unchanged. |
+| §5.3 Wi-Fi subscription API | `wifi_mgmt_subscribe(callback, user_data)` | Implemented per event: `wifi_mgmt_subscribe(event, callback, user_data)` / `wifi_mgmt_unsubscribe(event, callback, user_data)` with `WIFI_MGMT_EVENT_CONNECTED|DISCONNECTED|CONNECT_FAILED|SCAN_COMPLETED|MODE_CHANGED`. Legacy callbacks are retained. |
+| §6.4 Asset generation | "compile generated output only into the provisioning target" | When `CONFIG_WIFI_HTTP_PROVISIONING=y`, `MG_ENABLE_PACKED_FS=1` and the generated `packed_fs.c` are compiled into the shared `hq_mongoose` library, so every consumer of the Mongoose library in an enabled image (not only the provisioning demo) carries the packed portal assets. This maximizes consistency between ESP and POSIX and enables the documented image-size delta (Section 12, "Packed assets increase flash") to be measured on any mongoose consumer. |
+| §8.2 item 5 | "Compile `captive_dns_server.c` only when provisioning is enabled unless another feature adopts it later" | Implemented in TASK-133: the mongoose components (POSIX library and ESP-IDF component) exclude `captive_dns_server.c` when `CONFIG_WIFI_HTTP_PROVISIONING=n`, and the mongoose captive-DNS test executables are gated the same way. A provisioning-disabled image therefore contains neither the DNS responder codec nor the DNS listener service. |
+| §7.2 Controller states | `StationConnecting / StartingPortal / Provisioning / TestingCredentials / GracePeriod / StationOnly` | Implemented as `DISABLED / AWAITING_CONNECT / ONLINE / PROVISIONING / GRACE`. The state machine covers the same policy: start on missing credentials, start after exhausted credentials, grace period after station IP, STA-only transition, explicit stop. |
+
+### 15.2 TASK-133 build and regression matrix
+
+Environment: host `x86_64` Linux; CMake + host GCC for POSIX; ESP-IDF 5.5
+(`/home/dima/projects/esp-idf`, xtensa-esp32-elf 14.2.0) for ESP32.
+
+| # | Configuration | Command | Result |
+|---|---|---|---|
+| 1 | POSIX, provisioning disabled (`defconfig/posix_minimal.defconfig`) + tests + examples | `cmake -B build_disabled -DPYTHON=.../.kconfig-venv/bin/python3 -DHQ_DEFCONFIG=defconfig/posix_minimal.defconfig -DHQ_BUILD_TESTS=ON -DHQ_BUILD_EXAMPLES=ON && cmake --build build_disabled` | PASS |
+| 2 | POSIX, provisioning enabled (`defconfig/posix.defconfig`) + tests + examples | `cmake -B build -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_TESTS=ON -DHQ_BUILD_EXAMPLES=ON && cmake --build build` | PASS |
+| 3 | All CTest targets (enabled tree) | `ctest --test-dir build -L unit --output-on-failure` | 19/19 PASS |
+| 4 | All CTest targets (disabled tree) | `ctest --test-dir build_disabled --output-on-failure` | 5/5 PASS |
+| 5 | Broker integration regression | `TASK529_BROKER_IMAGE=eclipse-mosquitto:2 bash scripts/validate_broker_integration_tests.sh build` | 26/26 PASS |
+| 6 | ESP provisioning example (enabled) | `idf.py build` in `examples/esp/wifi_provisioning_demo` (ESP-IDF 5.5) | PASS (`wifi_provisioning_demo.bin`, 946,160 B) |
+| 7 | Existing ESP example, provisioning disabled | `idf.py build` in `examples/esp/cmd_demo` (`defconfig/esp.defconfig`) | PASS (`cmd_demo.bin`, 958,976 B) |
+
+### 15.3 Enabled vs. disabled link-map comparison
+
+POSIX comparison uses the identical program (`examples/common/cmd_demo.c`)
+built in the enabled and disabled trees, so the delta is attributable only to
+the provisioning feature footprint inside the shared Mongoose library.
+
+| Marker | Enabled image | Disabled image |
+|---|---|---|
+| `libhq_wifi_provisioning.a` (portal + controller) | present | absent |
+| `wifi_http_provisioning_*`, `wifi_provisioning_controller_*` | present | absent |
+| `captive_dns_server_*` / `CaptiveDns_*` | present | absent |
+| Packed portal asset tables (`v1`..`v5`) | present | absent |
+| Packed-FS asset names `/index.html`, `/app.css`, `/app.js` | present | absent (a standalone `/index.html` literal in the vendored mongoose core exists in both trees and is not a portal asset) |
+| Portal content markers (portal/status captives) | 31 matches | 0 matches |
+| Provisioning/listener symbols in final executable | present | 0 matches |
+
+The enabled-only `wifi_provisioning_demo` additionally links the provisioning
+application symbols (`wifi_http_provisioning_start`, portal route handlers,
+`captive_dns_server_start/stop`) and serves the packed assets.
+
+ESP32 map inspection:
+- `examples/esp/wifi_provisioning_demo/build/wifi_provisioning_demo.map`:
+  335 provisioning-related symbol mentions and 35 packed-FS references
+  (feature included; `wifi_provisioning_demo.bin` = 946,160 bytes).
+- `examples/esp/cmd_demo/build/cmd_demo.map`: no `wifi_http_provisioning*`,
+  `wifi_provisioning_controller*`, `captive_dns*` or `packed_fs` symbols and
+  no portal content strings in the binary (feature excluded; `cmd_demo.bin` =
+  958,976 bytes).
+
+### 15.4 Image size and runtime resource deltas (enabled vs. disabled)
+
+`cmd_demo` (identical program, POSIX):
+
+| Metric | Enabled | Disabled | Delta |
+|---|---|---|---|
+| File size | 1,556,056 B | 1,514,920 B | **+41,136 B (+2.7 %)** |
+| Text (`.text` + rodata) | 1,336,253 B | 1,292,789 B | **+43,464 B** |
+| Data | 7,720 B | 7,720 B | 0 |
+| BSS | 62,624 B | 62,624 B | 0 |
+| Total (dec) | 1,406,597 B | 1,363,133 B | **+43,464 B (+3.19 %)** |
+
+The delta is the Mongoose footprint with provisioning enabled: the captive DNS
+responder codec/service and the packed portal assets plus `MG_ENABLE_PACKED_FS`
+support. The assets themselves are read-only data, so the resident-memory
+(RAM) delta attributable to them is ~0.
+
+Runtime resources (`wifi_provisioning_demo`, POSIX, feature active):
+
+| Metric | Disabled image | Enabled image (feature active) |
+|---|---|---|
+| Provisioning listeners | none (code not linked) | HTTP `tcp:8080` + captive DNS `udp:10053` (one socket each) riding the shared Mongoose poll thread |
+| RSS (VmRSS) while serving | n/a | 2,504 KB (whole demo process) |
+| VmSize / threads | n/a | 135,128 KB / 3 |
+| Listener release on shutdown | n/a | both ports released (0 listeners after SIGTERM) |
+
+### 15.5 Deferred manual ESP validation
+
+Per §11.4 / §13 the automated plan does not require a physical ESP32. Board
+validation (AP DHCP lease and advertised DNS, captive-assistant probing,
+persistence, heap and task growth) is tracked by
+`docs/ESP_WIFI_PROVISIONING_HIL_CHECKLIST.md` and
+`docs/ESP_WIFI_PROVISIONING_SUPPORTED_CLIENT_MATRIX.md` and is not a gate for
+this automated validation record.

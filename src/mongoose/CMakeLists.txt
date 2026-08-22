@@ -7,6 +7,16 @@ file(GLOB MONGOOSE_COMMON_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/*.c
 )
 
+# The captive DNS responder (codec + UDP listener service) belongs to the
+# Wi-Fi HTTP provisioning feature. Per the implementation plan it is compiled
+# only when provisioning is enabled, so a provisioning-disabled image links
+# neither the DNS listener service nor its packet codec.
+if(NOT CONFIG_WIFI_HTTP_PROVISIONING)
+  list(REMOVE_ITEM MONGOOSE_COMMON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/captive_dns_server.c
+  )
+endif()
+
 if(CONFIG_HQ_PLATFORM_POSIX)
   set(MONGOOSE_PLATFORM_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/posix)
   set(MONGOOSE_OSAL_PLATFORM_INCLUDE ${CMAKE_CURRENT_SOURCE_DIR}/../osal/posix)

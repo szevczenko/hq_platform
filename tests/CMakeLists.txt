@@ -147,7 +147,11 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building Mongoose process test application (mongoose_process_tests)")
 
-  # ---- Captive DNS server packet codec tests ----
+  # ---- Captive DNS server tests (codec + UDP service) ----
+  # The captive DNS responder is part of the Wi-Fi HTTP provisioning feature
+  # and is compiled into the Mongoose library only when provisioning is
+  # enabled, so its tests follow the same gate.
+  if(CONFIG_WIFI_HTTP_PROVISIONING)
   add_executable(captive_dns_server_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/mongoose/captive_dns_server_test.c
   )
@@ -224,6 +228,7 @@ if(NOT ESP_PLATFORM)
   set_tests_properties(captive_dns_server_loopback_tests PROPERTIES LABELS "unit;mongoose")
 
   message(STATUS "Tests: Building captive DNS server loopback test application (captive_dns_server_loopback_tests)")
+  endif() # CONFIG_WIFI_HTTP_PROVISIONING (captive DNS tests)
 
   # ---- Wi-Fi HTTP provisioning application lifecycle tests ----
   # Only built when the optional provisioning component is enabled.

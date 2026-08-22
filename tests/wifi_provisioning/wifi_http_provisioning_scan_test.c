@@ -263,12 +263,26 @@ static void run_scan_tests( void )
   TEST_ASSERT_TRUE_MESSAGE( strstr( body, "\"networks\":[]" ) != NULL,
                             "initial snapshot must be empty" );
 
-  /* --- start a scan (held so the in-flight window is observable) ----- */
+  /* --- start a scan (held so the in-flight window is observable) -----
+   * The Wi-Fi worker reaches the IDLE/READY state asynchronously after
+   * wifi_mgmt_start(); a scan request that lands before that window is
+   * honestly rejected by the responder as "failed". Retry the request until
+   * it reports the scan as in flight: a rejected attempt never starts a HAL
+   * scan, so exactly one HAL scan is started when the worker is ready. */
   wifi_hal_mock_set_scan_done_hold( true );
-  TEST_ASSERT_TRUE( http_request( http_port, "POST", SCANS_PATH,
-                                  resp, sizeof( resp ) ) > 0 );
-  assert_status_code( resp, 202 );
-  assert_api_headers( resp );
+  int scan_attempt = 0;
+  for ( ; scan_attempt <= 40; ++scan_attempt )
+  {
+    TEST_ASSERT_TRUE( http_request( http_port, "POST", SCANS_PATH,
+                                    resp, sizeof( resp ) ) > 0 );
+    assert_status_code( resp, 202 );
+    assert_api_headers( resp );
+    if ( strstr( body_of( resp ), "\"state\":\"scanning\"" ) != NULL )
+    {
+      break;
+    }
+    (void) osal_task_delay_ms( 25 );
+  }
   body = body_of( resp );
   assert_json_has( body, "state", "scanning" );
   assert_json_has_num( body, "generation", 0 );
@@ -391,7 +405,10 @@ int main( void )
   TEST_ASSERT_TRUE_MESSAGE( MongooseProcess_IsRunning(),
                             "Mongoose process must be running" );
 
-  run_scan_tests();
+  /* RUN_TEST installs Unity's setjmp/longjmp protection, so an assertion
+   * failure is reported as a clean Unity FAIL instead of aborting into
+   * unmapped memory (Unity.AbortFrame is otherwise zero-initialised). */
+  RUN_TEST( run_scan_tests );
 
   /* --- teardown ------------------------------------------------------- */
   wifi_http_provisioning_stop();
