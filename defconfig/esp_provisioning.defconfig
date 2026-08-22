@@ -1,0 +1,36 @@
+# ESP32 default configuration with Wi-Fi HTTP provisioning enabled.
+#
+# Same target selection as defconfig/esp.defconfig but additionally enables
+# the Wi-Fi HTTP provisioning application (portal, captive DNS, automatic
+# fallback controller). Used by the examples/esp/wifi_provisioning_demo
+# example; regular ESP examples keep using defconfig/esp.defconfig where the
+# optional provisioning component stays disabled.
+#
+# The provisioning listeners default to the well-known ports required by the
+# captive-portal workflow:
+#   - HTTP portal on port 80  (http://0.0.0.0:80)
+#   - captive DNS on port 53  (udp://0.0.0.0:53)
+# A 30 s success grace period keeps the portal available after a smartphone
+# completes the flow so the freshly provisioned device stays reachable while
+# the temporary access point is retired.
+
+CONFIG_HQ_PLATFORM_POSIX=n
+CONFIG_HQ_PLATFORM_ESP=y
+CONFIG_CMD_ESP_OUTPUT_CONSOLE=y
+# CONFIG_CMD_ESP_OUTPUT_UART is not set
+CONFIG_CMD_INPUT_TASK_STACK_SIZE=8192
+CONFIG_CMD_INPUT_TASK_PRIORITY=5
+CONFIG_OSAL_LOG_LEVEL=0
+CONFIG_MONGOOSE_LOG_LEVEL=2
+CONFIG_CMD_RX_BUFFER_SIZE=256
+CONFIG_CMD_BUFFER_SIZE=256
+CONFIG_CMD_HISTORY_BUFFER_SIZE=512
+CONFIG_CMD_MAX_BINDING_COUNT=32
+CONFIG_CMD_ENABLE_AUTOCOMPLETE=y
+CONFIG_CMD_INVITATION="hq> "
+CONFIG_LITTLEFS_MALLOC_STRATEGY_DEFAULT=y
+CONFIG_WIFI_HTTP_PROVISIONING=y
+CONFIG_WIFI_HTTP_PROVISIONING_AUTO_FALLBACK=y
+CONFIG_WIFI_HTTP_PROVISIONING_HTTP_URL="http://0.0.0.0:80"
+CONFIG_WIFI_HTTP_PROVISIONING_DNS_URL="udp://0.0.0.0:53"
+CONFIG_WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS=30000

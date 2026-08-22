@@ -30,11 +30,19 @@ endif()
 #         assets are packed during configuration on the build host.
 # ---------------------------------------------------------------------------
 if(CONFIG_WIFI_HTTP_PROVISIONING)
-  set(MONGOOSE_PACK_SOURCE "${CMAKE_SOURCE_DIR}/third_party/mongoose/test/pack.c")
-  set(MONGOOSE_WEB_DIR "${CMAKE_SOURCE_DIR}/src/wifi_provisioning/web")
+  # Components are also built by standalone ESP examples whose top-level
+  # CMakeLists sets HQ_REPO_ROOT to the repository root; CMAKE_SOURCE_DIR may
+  # point at the example directory in that case, so prefer HQ_REPO_ROOT.
+  if(DEFINED HQ_REPO_ROOT AND NOT HQ_REPO_ROOT STREQUAL "")
+    set(MONGOOSE_REPO_ROOT "${HQ_REPO_ROOT}")
+  else()
+    set(MONGOOSE_REPO_ROOT "${CMAKE_SOURCE_DIR}")
+  endif()
+  set(MONGOOSE_PACK_SOURCE "${MONGOOSE_REPO_ROOT}/third_party/mongoose/test/pack.c")
+  set(MONGOOSE_WEB_DIR "${MONGOOSE_REPO_ROOT}/src/wifi_provisioning/web")
   set(MONGOOSE_PACKED_FS_DIR "${CMAKE_BINARY_DIR}/generated/mongoose_web")
   set(MONGOOSE_PACKED_FS "${MONGOOSE_PACKED_FS_DIR}/packed_fs.c")
-  set(MONGOOSE_PACK_GENERATOR "${CMAKE_SOURCE_DIR}/cmake/packed_fs_generate.cmake")
+  set(MONGOOSE_PACK_GENERATOR "${MONGOOSE_REPO_ROOT}/cmake/packed_fs_generate.cmake")
 endif()
 
 if(ESP_PLATFORM)

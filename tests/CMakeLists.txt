@@ -599,6 +599,54 @@ if(NOT ESP_PLATFORM)
       set_tests_properties(wifi_provisioning_controller_tests PROPERTIES LABELS "unit;wifi_provisioning")
 
       message(STATUS "Tests: Building Wi-Fi provisioning controller test application (wifi_provisioning_controller_tests)")
+
+      # ---- Wi-Fi provisioning automatic fallback end-to-end flow tests ----
+      # TASK-131: drives the complete provisioning flow in the documented
+      # ownership order (OSAL -> Mongoose -> Wi-Fi management -> provisioning)
+      # against the real provisioning application, the real Wi-Fi management
+      # layer and the mock Wi-Fi HAL. Covers the host-side behaviors required
+      # for the ESP provisioning example: DNS responses, credential
+      # persistence (wifi_ap.json), and the STA-only transition after the
+      # success grace period.
+      add_executable(wifi_provisioning_fallback_flow_tests
+        ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_fallback_flow_test.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
+        ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_SRC_DIR}/wifi_config.c
+        ${WIFI_SRC_DIR}/wifi_utils.c
+        ${WIFI_TEST_DIR}/wifi_hal_mock.c
+      )
+
+      target_include_directories(wifi_provisioning_fallback_flow_tests
+        PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
+        PRIVATE ${WIFI_SRC_DIR}
+        PRIVATE ${WIFI_TEST_DIR}
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+        PRIVATE ${HQ_CONFIG_DIR}
+        PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+      )
+
+      if(CONFIG_HQ_PLATFORM_POSIX)
+        target_include_directories(wifi_provisioning_fallback_flow_tests
+          PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+        )
+      endif()
+
+      target_link_libraries(wifi_provisioning_fallback_flow_tests
+        hq_mongoose
+        hq_osal
+        hq_cjson
+        unity
+        pthread
+      )
+
+      add_test(NAME wifi_provisioning_fallback_flow_tests COMMAND wifi_provisioning_fallback_flow_tests)
+      set_tests_properties(wifi_provisioning_fallback_flow_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+      message(STATUS "Tests: Building Wi-Fi provisioning fallback flow test application (wifi_provisioning_fallback_flow_tests)")
     endif()
   endif()
 
