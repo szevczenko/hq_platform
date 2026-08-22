@@ -849,7 +849,11 @@ static void http_listener_stop_cb( struct mg_mgr * mgr, void * user )
   ( void ) user;
   if ( s_http_nc != NULL )
   {
-    mg_close_conn( s_http_nc );
+    /* Ask the poll thread to release the listener. Mongoose closes the
+     * underlying socket only when close_conn() runs in the poll loop after
+     * is_closing is set; calling mg_close_conn() here would free the
+     * connection record but leak the listening fd. */
+    s_http_nc->is_closing = 1;
     s_http_nc = NULL;
   }
 }
