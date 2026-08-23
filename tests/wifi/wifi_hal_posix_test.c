@@ -27,7 +27,14 @@
  *  10. an in-flight callback racing deinit is waited out (quiescence), and a
  *      callback that re-enters a HAL API does not deadlock,
  *  11. repeated init/deinit cycles never reuse destroyed pthread objects,
- *  12. a timer thread that completed on its own is still joined by deinit.
+ *  12. a timer thread that completed on its own is still joined by deinit,
+ *  13. wifi_hal_stop before any init is a successful idempotent no-op,
+ *  14. init/stop/stop/deinit/stop/deinit: repeated stop and stop after a
+ *      complete deinit are no-ops and a fresh stop/deinit round reports both
+ *      calls successful,
+ *  15. an injected stop join failure retains the exact join source
+ *      (CLEANUP_REQUIRED); a retry stop re-attaches the same join and only
+ *      then succeeds, and deinit completes the whole session afterwards.
  *
  * Cross-thread callback rendezvous use semaphores (the callback posts an
  * "entered" semaphore and blocks on a gate the main thread releases); lifecycle
@@ -756,6 +763,185 @@ static void test_deinit_after_natural_timer_completion( void )
   TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
 }
 
+/* ============================================================================
+ * Test 13: wifi_hal_stop is an idempotent successful no-op before any init.
+ *         Calls stop-before-init, then proves a full lifecycle still works.
+ * ========================================================================== */
+static void test_stop_before_init( void )
+{
+  _reset_session();
+
+  /* Never initialized: no started runtime can remain, so stop is a no-op. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "stop before init is a successful no-op" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "repeated stop before init is a no-op" );
+
+  /* The no-op must not have corrupted anything: a full lifecycle still works. */
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ),
+                             "init after stop-before-init works" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "deinit after normal init works" );
+}
+
+/* ============================================================================
+ * Test 14: init / stop / stop / deinit / stop / deinit — repeated stop, stop
+ *          after a complete deinit, and a fresh complete round all return
+ *          success from both idempotent calls.
+ * ========================================================================== */
+static void test_init_stop_stop_deinit_stop_deinit( void )
+{
+  _reset_session();
+
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  /* Stop with nothing started: successful no-op in the active session. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "stop with nothing started is a no-op" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "repeated stop is a no-op" );
+
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "deinit" );
+
+  /* Stop after a complete deinit (UNINITIALIZED): idempotent no-op. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "stop after deinit is a no-op" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "deinit after deinit is a no-op" );
+
+  /* A fresh complete round must return success from both calls. */
+  wifi_hal_init_t fresh = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &fresh ),
+                             "fresh init for a clean round" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "fresh round stop succeeds" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "fresh round deinit succeeds" );
+}
+
+/* ============================================================================
+ * Test 15: an injected stop join failure leaves the session CLEANUP_REQUIRED
+ *          with the exact retained join source; a later stop retries the same
+ *          release and only then returns success; deinit then completes the
+ *          whole session so a fresh stop/deinit round is fully clean.
+ * ========================================================================== */
+static void test_stop_join_failure_then_retry( void )
+{
+#ifdef WIFI_HAL_POSIX_TESTING
+  _reset_session();
+  wifi_hal_testing_reset();
+
+  g_cb_a_events = 0;
+
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  /* Slow-connect starts a joinable connection timer owned by the session. */
+  _setup_sta( "slow_connect", "12345678" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_connect(),
+                             "connect accepted (conn timer running)" );
+
+  /* Fail the single join this stop performs on the slow-connect timer. */
+  wifi_hal_testing_fail_pthread_join_after( 0 );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_stop(),
+                             "stop reports the injected join failure" );
+
+  /* The retained source is still held: admission is closed (CLEANUP_REQUIRED)
+   * and we never infer success from the lifecycle state alone. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_start_scan( false ),
+                             "admission closed while cleanup-required" );
+
+  /* Retry stop re-attaches the exact same join and releases the source; only
+   * now may it report success. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "stop retry joins and releases the timer" );
+
+  /* Deinit completes the whole teardown, after which a fresh stop/deinit round
+   * is again clean. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "deinit completes the whole teardown" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "post-deinit stop is a no-op" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "post-deinit deinit is a no-op" );
+
+  /* Fresh session: no stale deliveries and a full successful round. */
+  g_cb_b_events = 0;
+  wifi_hal_init_t fresh = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &fresh ),
+                             "fresh init works after the retry round" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "fresh round stop succeeds" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "fresh round deinit succeeds" );
+  (void) g_cb_a_events;
+#endif
+}
+/* ============================================================================
+ * Test 16: a deinit join failure stops before the session-state-clear stage,
+ *          leaving the HAL CLEANUP_REQUIRED with g_sim.started still true (a
+ *          started runtime the failed teardown never got to release).  A later
+ *          wifi_hal_stop() retries the whole retained stop-owned release — the
+ *          joinable timer AND the started runtime — and only then reports
+ *          success; deinit completes the session afterwards.
+ * ========================================================================== */
+static void test_cleanup_required_retains_started_stop_retry( void )
+{
+#ifdef WIFI_HAL_POSIX_TESTING
+  _reset_session();
+  wifi_hal_testing_reset();
+
+  g_cb_a_events = 0;
+
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  /* Start a session and open a stop-owned disconnect timer. */
+  _setup_sta( "disconnect_15_sec", "12345678" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_connect(),
+                             "connect accepted (disconnect timer running)" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, g_cb_a_events, "GOT_IP delivered" );
+
+  /* Deinit fails on the disconnect-timer join before the state-clear stage:
+   * the lifecycle becomes CLEANUP_REQUIRED and the runtime stays started. */
+  wifi_hal_testing_fail_pthread_join_after( 0 );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_deinit(),
+                             "deinit stops at the retained join" );
+
+  /* Admission is closed and stop must not infer success from that state. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_ERROR, wifi_hal_start_scan( false ),
+                             "admission closed in CLEANUP_REQUIRED" );
+
+  /* The retry stop releases the retained timer AND the started runtime; only
+   * a genuinely-complete release reports success. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "retry stop releases retained timer + runtime" );
+
+  /* Deinit then completes the whole teardown, after which a fresh stop/deinit
+   * round is again clean. */
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "deinit completes the whole teardown" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "post-deinit stop is a no-op" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "post-deinit deinit is a no-op" );
+
+  /* Fresh session: a full clean round still works. */
+  g_cb_b_events = 0;
+  wifi_hal_init_t fresh = _make_init( NULL, _cb_count_b, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &fresh ),
+                             "fresh init works after the retry round" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_stop(),
+                             "fresh round stop succeeds" );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(),
+                             "fresh round deinit succeeds" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0u, g_cb_b_events,
+                             "fresh session delivers no stale events" );
+#endif
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Runner                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -790,6 +976,10 @@ void wifi_hal_posix_tests_run( void )
   RUN_TEST( test_callback_inflight_racing_deinit );
   RUN_TEST( test_repeat_init_deinit_cycles );
   RUN_TEST( test_deinit_after_natural_timer_completion );
+  RUN_TEST( test_stop_before_init );
+  RUN_TEST( test_init_stop_stop_deinit_stop_deinit );
+  RUN_TEST( test_stop_join_failure_then_retry );
+  RUN_TEST( test_cleanup_required_retains_started_stop_retry );
 }
 
 #ifndef OSAL_TESTS_AGGREGATE

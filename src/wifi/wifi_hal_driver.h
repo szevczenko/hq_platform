@@ -127,6 +127,21 @@ typedef struct
  *   - @c wifi_hal_init waits for/serializes with teardown and never replaces a
  *     session left in the @c CLEANUP_REQUIRED state (a further
  *     @c wifi_hal_deinit must finish the cleanup first).
+ *
+ * @c wifi_hal_stop is the idempotent member of the teardown API.  It returns
+ * @c OSAL_SUCCESS as a no-op whenever no started runtime remains — before
+ * @c wifi_hal_init, after a successful @c wifi_hal_deinit, and on a repeated
+ * stop.  This no-op does not make any ordinary HAL operation legal outside an
+ * active session: start/connect/scan/configuration still require an active
+ * session lease and are rejected when the session is not @c ACTIVE.  A failed
+ * stop that retains a stop-owned event source/resource must be retried by a
+ * later stop before it may return success.
+ *
+ * The complete serialized teardown round is @c wifi_hal_stop() followed by
+ * @c wifi_hal_deinit() — even when that round's stop step has to retry a
+ * failed stop.  Deinit keeps its dependency-safe cleanup described above, so
+ * once deinit has eventually released the whole session, a fresh complete
+ * round succeeds from both idempotent calls.
  */
 
 /**
@@ -201,8 +216,35 @@ osal_status_t wifi_hal_deinit( void );
 osal_status_t wifi_hal_start( wifi_hal_mode_t mode );
 
 /**
- * @brief   Stop Wi-Fi.
- * @return  OSAL_SUCCESS on success, error code otherwise
+ * @brief   Stop Wi-Fi and release the stop-owned runtime.
+ *
+ * @details @c wifi_hal_stop is an idempotent successful no-op whenever no
+ *          started runtime remains, including:
+ *            - before @c wifi_hal_init (UNINITIALIZED),
+ *            - after a successful @c wifi_hal_deinit (UNINITIALIZED),
+ *            - on a repeated stop of an already-stopped session.
+ *          This does not make any ordinary HAL operation legal outside an
+ *          active session: start/connect/scan/configuration still require an
+ *          ACTIVE session and are rejected otherwise.
+ *
+ *          In an active session it runs under a normal session operation lease
+ *          and stops the Wi-Fi runtime plus any stop-owned event
+ *          source/resource (for example background timer threads in the POSIX
+ *          simulator).  If such an owned source genuinely cannot be released
+ *          right now, the precise retained resource and its lifecycle state are
+ *          kept, @c OSAL_ERROR is returned, and a later @c wifi_hal_stop (or
+ *          @c wifi_hal_deinit) retries exactly that failed release.  A stop
+ *          must never return success merely because lifecycle state is
+ *          deinitializing or cleanup-required; it returns success only once the
+ *          retained resource is truly released or none is retained.
+ *
+ *          The complete serialized teardown round is @c wifi_hal_stop()
+ *          followed by @c wifi_hal_deinit() — even when that round's stop step
+ *          must retry first.  Once deinit has eventually released the whole
+ *          session, a fresh round of both calls succeeds.
+ *
+ * @return  OSAL_SUCCESS if Wi-Fi is stopped (or the idempotent no-op applied),
+ *          @c OSAL_ERROR while a retained stop-owned resource is still held
  */
 osal_status_t wifi_hal_stop( void );
 

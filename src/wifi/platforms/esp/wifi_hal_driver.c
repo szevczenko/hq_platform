@@ -1130,8 +1130,86 @@ done:
   return result;
 }
 
+/* Retry the retained stop stage through the process-lifetime serializer.
+ * Used only when the lifecycle is CLEANUP_REQUIRED, where no active session
+ * lease exists.  The caller holds g_lifecycle_mutex, so a concurrent deinit
+ * cannot tear down or memset the session context while this stop inspects and
+ * releases it.  The started driver is the only stop-owned resource this HAL
+ * retains across a failed stop; it retries esp_wifi_stop() and clears the
+ * started ownership flag only on an accepted stopped result (ESP_OK, or
+ * already-stopped/not-initialized).  It returns OSAL_ERROR while the driver
+ * remains owned and never reports success merely because the lifecycle state
+ * is cleanup-required. */
+static osal_status_t _stop_cleanup_retry( void )
+{
+  if ( !g_wifi_hal_ctx.started )
+  {
+    return OSAL_SUCCESS;
+  }
+
+  esp_err_t serr = esp_wifi_stop();
+  if ( serr == ESP_OK || serr == ESP_ERR_WIFI_NOT_STARTED || serr == ESP_ERR_WIFI_NOT_INIT )
+  {
+    g_wifi_hal_ctx.started = false;
+    return OSAL_SUCCESS;
+  }
+
+  osal_log_error( "[wifi-hal] stop: retained started driver still held (0x%x)",
+                  (unsigned) serr );
+  return OSAL_ERROR;
+}
+
 osal_status_t wifi_hal_stop( void )
 {
+  /* The process-lifetime serializer is created lazily exactly once, like every
+   * other lifecycle user.  A stop before any init must not dereference a
+   * not-yet-created serializer; without one no session can ever have been
+   * created, so the ownership state alone proves whether anything is started. */
+  if ( !_ensure_lifecycle() )
+  {
+    return g_wifi_hal_ctx.started ? OSAL_ERROR : OSAL_SUCCESS;
+  }
+
+  /* Read the process-lifetime lifecycle state with the serializer held and
+   * keep it held for the CLEANUP_REQUIRED retry, so a concurrent deinit can
+   * never tear down (or memset) the session context while this stop inspects
+   * and releases it. */
+  (void) osal_mutex_take( g_lifecycle_mutex );
+  hal_state_t state = g_lifecycle_state;
+
+  if ( state == HAL_STATE_CLEANUP_REQUIRED )
+  {
+    /* A failed stop / teardown left a started driver runtime retained.  Retry
+     * the exact release here under the process-lifetime serializer; only an
+     * actual released/already-stopped result may return success, and holding
+     * the serializer guarantees no concurrent deinit is tearing the context
+     * down underneath the retry. */
+    osal_status_t rc = _stop_cleanup_retry();
+    (void) osal_mutex_give( g_lifecycle_mutex );
+    return rc;
+  }
+
+  /* Uninitialized (before init or after a complete deinit): no started
+   * runtime exists, so this is the idempotent successful stop no-op. */
+  if ( state == HAL_STATE_UNINITIALIZED )
+  {
+    (void) osal_mutex_give( g_lifecycle_mutex );
+    osal_log_info( "[wifi-hal] stop: not initialized (no-op)" );
+    return OSAL_SUCCESS;
+  }
+
+  if ( state != HAL_STATE_ACTIVE )
+  {
+    /* DEINITIALIZING: a teardown owns the session elsewhere; without an active
+     * lease this stop must not race it and has no per-session guarantee. */
+    (void) osal_mutex_give( g_lifecycle_mutex );
+    return OSAL_ERROR;
+  }
+
+  (void) osal_mutex_give( g_lifecycle_mutex );
+
+  /* Active session: run the stop under the normal operation lease so teardown
+   * waits for it to drain before destroying the session. */
   if ( !_admit_operation() )
   {
     return OSAL_ERROR;
@@ -1141,12 +1219,15 @@ osal_status_t wifi_hal_stop( void )
 
   if ( g_wifi_hal_ctx.started )
   {
-    if ( esp_wifi_stop() == ESP_OK )
+    esp_err_t serr = esp_wifi_stop();
+    if ( serr == ESP_OK || serr == ESP_ERR_WIFI_NOT_STARTED || serr == ESP_ERR_WIFI_NOT_INIT )
     {
       g_wifi_hal_ctx.started = false;
     }
     else
     {
+      /* The stop stage failed; keep started so deinit (or a later stop)
+       * retries exactly this release before any dependent netif cleanup. */
       result = OSAL_ERROR;
     }
   }

@@ -1281,29 +1281,142 @@ osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
   return OSAL_SUCCESS;
 }
 
-osal_status_t wifi_hal_stop( void )
+/* Retry the retained stop-owned release through the process-lifetime gates.
+ * Used only when the lifecycle is CLEANUP_REQUIRED, where no active session
+ * lease exists and the per-session primitives may be partially destroyed.  The
+ * caller holds the process-lifetime serializer (g_lifecycle_mutex), so a
+ * concurrent deinit cannot be tearing the session down underneath it.  The
+ * stop helpers read the created flags under their process gates and fail
+ * closed (return OSAL_ERROR) without locking a per-session object that is no
+ * longer alive, so this retry never touches momentarily destroyed state.
+ *
+ * The retry confirms EVERY stop-owned item is released before returning
+ * success — not only the two retained timer sources, but also the started
+ * simulator runtime (g_sim.started).  A failed teardown that stopped at the
+ * join stage (for example a deinit called directly after start) never reached
+ * the state-clear stage, so g_sim.started may still be true; this clears it
+ * once both timer sources are released, under the surviving protected session
+ * state.  It returns OSAL_ERROR until every item is truly released; it never
+ * reports success merely because the lifecycle state is cleanup-required. */
+static osal_status_t _stop_cleanup_retry( void )
 {
-  if ( !_admit_operation() )
-  {
-    return OSAL_ERROR;
-  }
-
   osal_status_t rc = OSAL_SUCCESS;
-  if ( _stop_disconnect_timer() != OSAL_SUCCESS || _stop_connect_timer() != OSAL_SUCCESS )
+
+  if ( _stop_disconnect_timer() != OSAL_SUCCESS )
   {
     rc = OSAL_ERROR;
-    _lifecycle_mark_cleanup_required();
+  }
+  if ( rc == OSAL_SUCCESS && _stop_connect_timer() != OSAL_SUCCESS )
+  {
+    rc = OSAL_ERROR;
   }
 
-  pthread_mutex_lock( &g_sim.state_mutex );
-  g_sim.started   = false;
-  g_sim.connected = false;
-  g_sim.active_ap = NULL;
-  pthread_mutex_unlock( &g_sim.state_mutex );
-  osal_log_info( "[wifi-sim] stopped" );
+  if ( rc == OSAL_SUCCESS && g_sim.prim_state_mutex )
+  {
+    /* Both timers are released.  Clear a runtime the failed teardown may
+     * have retained, under the surviving protected session state.  Clearing a
+     * flag that is already false is harmless and keeps the success honest. */
+    pthread_mutex_lock( &g_sim.state_mutex );
+    g_sim.started   = false;
+    g_sim.connected = false;
+    g_sim.active_ap = NULL;
+    pthread_mutex_unlock( &g_sim.state_mutex );
+  }
+  else if ( rc == OSAL_SUCCESS && !g_sim.prim_state_mutex && g_sim.started )
+  {
+    /* A started runtime whose protected session-state mutex is already gone
+     * cannot be honestly released here (a started flag is only ever set while
+     * that mutex is alive, so this is a defensive fail-closed for a state
+     * that should not occur): leave it for the deinit retry. */
+    rc = OSAL_ERROR;
+  }
 
-  _release_operation();
   return rc;
+}
+
+/* Stop Wi-Fi and release the retained stop-owned event sources.
+ *
+ * @c wifi_hal_stop is a successful idempotent no-op whenever no stop-runtime
+ * remains — including before init (UNINITIALIZED), after a successful deinit
+ * (UNINITIALIZED) and on a repeated stop of an already-stopped session.  When
+ * the HAL is ACTIVE the call runs under a normal session operation lease.
+ *
+ * Retry truthfulness: if a prior stop (or the retained stop stage of a prior
+ * stop) left a joinable timer resource, a later stop retries that exact
+ * release (even in CLEANUP_REQUIRED) and keeps returning an error until the
+ * resource is genuinely released.  It never reports success merely because
+ * lifecycle state is cleanup-required. */
+osal_status_t wifi_hal_stop( void )
+{
+  /* Read the process-lifetime lifecycle state with the process-lifetime lock
+   * held.  For the CLEANUP_REQUIRED retry the same serializer stays held across
+   * the whole release, so a concurrent deinit cannot tear the session down
+   * (and clear the per-session state) underneath the retained stop work. */
+  pthread_mutex_lock( &g_lifecycle_mutex );
+  hal_state_t state = g_lifecycle_state;
+
+  if ( state == HAL_STATE_CLEANUP_REQUIRED )
+  {
+    /* A failed stop / teardown left a stop-owned item retained (a joinable
+     * timer and possibly a started runtime).  Retry the exact release here
+     * under the process-lifetime serializer; only an actual success may be
+     * reported.  The lifecycle remains CLEANUP_REQUIRED so a later deinit
+     * retries the dependent cleanup of the rest of the session. */
+    osal_status_t rc = _stop_cleanup_retry();
+    pthread_mutex_unlock( &g_lifecycle_mutex );
+    if ( rc != OSAL_SUCCESS )
+    {
+      osal_log_error( "[wifi-sim] stop: retained stop-owned item still held" );
+    }
+    else
+    {
+      osal_log_info( "[wifi-sim] stop: released retained stop-owned items" );
+    }
+    return rc;
+  }
+
+  pthread_mutex_unlock( &g_lifecycle_mutex );
+
+  switch ( state )
+  {
+    case HAL_STATE_UNINITIALIZED:
+      /* No session exists (before init or after a complete deinit), so no
+       * started runtime can remain.  This is the idempotent successful stop. */
+      osal_log_info( "[wifi-sim] stop: not initialized (no-op)" );
+      return OSAL_SUCCESS;
+
+    case HAL_STATE_ACTIVE:
+    {
+      /* Use the active-session operation lease; every return path releases it. */
+      if ( !_admit_operation() )
+      {
+        return OSAL_ERROR;
+      }
+
+      osal_status_t rc = OSAL_SUCCESS;
+      if ( _stop_disconnect_timer() != OSAL_SUCCESS || _stop_connect_timer() != OSAL_SUCCESS )
+      {
+        rc = OSAL_ERROR;
+        _lifecycle_mark_cleanup_required();
+      }
+
+      pthread_mutex_lock( &g_sim.state_mutex );
+      g_sim.started   = false;
+      g_sim.connected = false;
+      g_sim.active_ap = NULL;
+      pthread_mutex_unlock( &g_sim.state_mutex );
+      osal_log_info( "[wifi-sim] stopped" );
+
+      _release_operation();
+      return rc;
+    }
+
+    case HAL_STATE_DEINITIALIZING:
+    default:
+      /* A teardown transition owns the session elsewhere; this stop must not
+       * race it and has no session lease to run under. */
+      return OSAL_ERROR;
+  }
 }
 
 osal_status_t wifi_hal_set_sta_config( const wifi_hal_sta_config_t* config )
