@@ -88,11 +88,6 @@ typedef struct
   uint32_t           cb_in_flight;
   wifi_hal_event_cb_t cb;
   void*              cb_user_data;
-  /* The task that is currently executing a user callback, or NULL.  Set in
-   * _emit_event() just before the callback is invoked and cleared when the
-   * callback returns.  A lifecycle call made from this task can never observe
-   * itself as an in-flight callback it is draining, so init/deinit reject it. */
-  TaskHandle_t       cb_task;
   osal_bin_sem_id_t  cb_lock;
   osal_bin_sem_id_t  cb_done;
 
@@ -115,19 +110,17 @@ typedef struct
  * shares the same fully-created serializer instead of each creating a private
  * one (FreeRTOS has no native one-time initializer).
  *
- * The condition variable is replaced by FreeRTOS task notifications: each
- * waiter holds its own per-task notification slot (an unbounded 32-bit token),
- * so a broadcast can never silently overflow a shared capacity the way a
- * counting semaphore with a hard-coded maximum could.  The broker only tracks
- * the tasks currently blocked in _cond_wait() in a process-lifetime registry.
+ * The lifecycle condition uses one task-notification slot per waiter.  A
+ * waiter is linked while it still owns the lifecycle mutex, then releases that
+ * mutex and waits on its own task notification.  Broadcast walks the linked
+ * waiters while holding the same mutex, so no wakeup can be lost between
+ * registration and blocking or bounded registry capacity be exceeded.
  */
-#define WIFI_HAL_MAX_LC_WAITERS 32u
-
-typedef struct
+typedef struct lifecycle_waiter
 {
-  TaskHandle_t handle[ WIFI_HAL_MAX_LC_WAITERS ];
-  uint32_t     n;
-} lc_waiter_reg_t;
+  TaskHandle_t              handle;
+  struct lifecycle_waiter*  next;
+} lifecycle_waiter_t;
 
 static wifi_hal_ctx_t          g_wifi_hal_ctx       = { 0 };
 static wifi_ap_record_t        scan_ap_records[64]  = { 0 };
@@ -136,8 +129,16 @@ static hal_state_t             g_lifecycle_state    = HAL_STATE_UNINITIALIZED;
 static osal_mutex_id_t         g_lifecycle_mutex    = 0;
 static bool                    g_lifecycle_ready    = false;
 static portMUX_TYPE            g_lifecycle_once_mux = portMUX_INITIALIZER_UNLOCKED;
+static lifecycle_waiter_t*     g_lifecycle_waiters  = NULL;
 static uint32_t                g_admitted_ops       = 0;
-static lc_waiter_reg_t         g_cond_waiters       = { 0 };
+/* ESP event handlers may execute concurrently on more than one task.  A
+ * single shared callback-task marker cannot identify all callbacks, while a
+ * task-local depth also handles nested event delivery correctly. */
+static __thread uint32_t       g_callback_depth     = 0;
+
+#if ( configSUPPORT_STATIC_ALLOCATION == 1 )
+static StaticSemaphore_t       g_lifecycle_mutex_storage;
+#endif
 
 /* --------------------------------------------------------------------------- */
 /* Small helpers                                                                */
@@ -152,68 +153,84 @@ static osal_status_t _esp_to_status( esp_err_t err )
 /* Process-lifetime lifecycle serializer                                       */
 /* --------------------------------------------------------------------------- */
 
-/* Create the process-lifetime lifecycle mutex exactly once.  A static
- * portMUX critical section serializes first-use creation so concurrent
- * init/deinit callers all observe and share the same fully-created mutex. */
+/* Create the process-lifetime lifecycle mutex exactly once.  The static
+ * portMUX protects first use, including a concurrent first init and deinit.
+ * The dynamic fallback keeps this source usable with an ESP-IDF configuration
+ * that disables static FreeRTOS allocation. */
 static bool _ensure_lifecycle( void )
 {
-  if ( g_lifecycle_ready )
-  {
-    return true;
-  }
+  bool ready;
+
+  /* Enter the guard even for the fast path.  This makes the publication of
+   * both handles and g_lifecycle_ready ordered on SMP targets as well as on
+   * single-core FreeRTOS configurations. */
   portENTER_CRITICAL( &g_lifecycle_once_mux );
   if ( !g_lifecycle_ready )
   {
     if ( !g_lifecycle_mutex )
     {
+#if ( configSUPPORT_STATIC_ALLOCATION == 1 )
+      g_lifecycle_mutex = xSemaphoreCreateMutexStatic( &g_lifecycle_mutex_storage );
+#else
       (void) osal_mutex_create( &g_lifecycle_mutex, "wifi_hal_lc" );
+#endif
     }
     g_lifecycle_ready = ( g_lifecycle_mutex != 0 );
   }
+  ready = g_lifecycle_ready;
   portEXIT_CRITICAL( &g_lifecycle_once_mux );
-  return g_lifecycle_ready;
+  return ready;
 }
 
-/* Wake every task currently blocked in _cond_wait().  The broadcaster owns
- * the lifecycle mutex, so it holds the exact set of waiters that released the
- * mutex and entered ulTaskNotifyTake(); each is woken with its own per-task
- * notification token, which a 32-bit slot cannot overflow under this one-token
- * per-wait protocol.  The registry is drained on the same serializer. */
+/* Wake every waiter currently linked in _cond_wait().  The caller owns the
+ * lifecycle mutex.  Each waiter has its own task-notification slot and remains
+ * linked until it has reacquired the mutex, so no wakeup can race with
+ * registration, blocking, or removal. */
 static void _cond_broadcast( void )
 {
-  const uint32_t n = g_cond_waiters.n;
-  for ( uint32_t i = 0; i < n; ++i )
+  lifecycle_waiter_t* waiter = g_lifecycle_waiters;
+  while ( waiter )
   {
-    if ( g_cond_waiters.handle[ i ] )
+    if ( waiter->handle )
     {
-      (void) xTaskNotifyGive( g_cond_waiters.handle[ i ] );
+      (void) xTaskNotifyGive( waiter->handle );
     }
+    waiter = waiter->next;
   }
-  g_cond_waiters.n = 0;
-  memset( g_cond_waiters.handle, 0, sizeof( g_cond_waiters.handle ) );
 }
 
-/* Wait while holding the lifecycle mutex.  The caller must hold
- * g_lifecycle_mutex; this registers its task then releases the mutex, blocks
- * for its own wake notification and finally re-acquires the mutex.  Because
- * both the register and the release happen under the mutex a broadcast cannot
- * be missed, and the caller re-checks its predicate after waking. */
-static void _cond_wait( void )
+/* Wait while holding the lifecycle mutex.  Registration and releasing the
+ * mutex are separated from blocking only by this waiter's linked-list entry;
+ * broadcasters hold the same mutex and therefore either see the waiter and
+ * signal it, or run before it is registered.  The caller retains ownership of
+ * the mutex when this returns. */
+static bool _cond_wait( void )
 {
-  TaskHandle_t me = xTaskGetCurrentTaskHandle();
-  if ( me == NULL )
+  lifecycle_waiter_t waiter = { 0 };
+  lifecycle_waiter_t** link;
+
+  waiter.handle = xTaskGetCurrentTaskHandle();
+  if ( !waiter.handle )
   {
-    return;
+    return false;
   }
-  if ( g_cond_waiters.n >= WIFI_HAL_MAX_LC_WAITERS )
-  {
-    osal_log_error( "[wifi-hal] lifecycle waiter registry full" );
-    return;
-  }
-  g_cond_waiters.handle[ g_cond_waiters.n++ ] = me;
+
+  waiter.next = g_lifecycle_waiters;
+  g_lifecycle_waiters = &waiter;
   (void) osal_mutex_give( g_lifecycle_mutex );
   (void) ulTaskNotifyTake( pdTRUE, portMAX_DELAY );
   (void) osal_mutex_take( g_lifecycle_mutex );
+
+  link = &g_lifecycle_waiters;
+  while ( *link && *link != &waiter )
+  {
+    link = &( *link )->next;
+  }
+  if ( *link == &waiter )
+  {
+    *link = waiter.next;
+  }
+  return true;
 }
 
 /* Grant a "session lease" to a public operation.  Returns true only when the
@@ -251,17 +268,14 @@ static void _release_operation( void )
   (void) osal_mutex_give( g_lifecycle_mutex );
 }
 
-/* Detect a lifecycle call (init/deinit) made from inside an in-flight user
- * callback on the callback's own task.  Such a call must be rejected without
- * touching the lifecycle serializer: the teardown that would satisfy its wait
- * is the very teardown that is draining this callback, so waiting on it here
- * would self-deadlock (the callback cannot return while blocked).  The check
- * only compares the current task against the task known to be executing a user
- * callback, so an ordinary non-callback lifecycle call is never misrejected. */
+/* Detect a lifecycle call made from inside an in-flight user callback.  Such
+ * a call must be rejected without touching the lifecycle serializer: the
+ * teardown that would satisfy its wait is the very teardown that is draining
+ * this callback, so waiting on it here would self-deadlock.  The marker is
+ * task-local, allowing concurrent callbacks and nested delivery. */
 static bool _lifecycle_call_from_callback( void )
 {
-  TaskHandle_t me = xTaskGetCurrentTaskHandle();
-  return ( me != NULL ) && ( me == g_wifi_hal_ctx.cb_task );
+  return g_callback_depth != 0;
 }
 
 /* --------------------------------------------------------------------------- */
@@ -321,49 +335,57 @@ bool wifi_hal_is_valid_ipv4( const char* str )
 /* Callback delivery                                                            */
 /* --------------------------------------------------------------------------- */
 
-/* Fire one event, invoking the user callback outside every lifecycle and
- * callback lock.  The gate counts an admitted delivery as in flight; teardown
- * disables delivery first, so a delivery that arrives after the disabled flag
- * is seen drops and returns without being counted. */
+/* Admit one event through a stable lifetime protocol.  The lifecycle mutex is
+ * process-lifetime and is acquired before inspecting cb_lock; teardown changes
+ * the state while holding that mutex, so it cannot delete cb_lock or cb_done
+ * while an event handler is between its pointer check and gate acquisition.
+ * Both locks are released before invoking user code. */
 static void _emit_event( wifi_hal_event_t event, const wifi_hal_event_data_t* data )
 {
-  if ( !g_wifi_hal_ctx.cb_lock )
-  {
-    return;
-  }
-
-  TaskHandle_t        my_task = xTaskGetCurrentTaskHandle();
   wifi_hal_event_cb_t cb;
   void*               user_data;
 
-  (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
-
-  if ( g_wifi_hal_ctx.cb_delivery_disabled || g_wifi_hal_ctx.cb == NULL )
+  if ( !g_lifecycle_mutex )
   {
-    (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
+    return;
+  }
+  (void) osal_mutex_take( g_lifecycle_mutex );
+  if ( g_lifecycle_state != HAL_STATE_ACTIVE || !g_wifi_hal_ctx.cb_lock )
+  {
+    (void) osal_mutex_give( g_lifecycle_mutex );
     return;
   }
 
+  (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
+  if ( g_wifi_hal_ctx.cb_delivery_disabled || g_wifi_hal_ctx.cb == NULL )
+  {
+    (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
+    (void) osal_mutex_give( g_lifecycle_mutex );
+    return;
+  }
+
+  if ( event == WIFI_HAL_EVT_AP_CLIENT_CONNECTED )
+  {
+    g_wifi_hal_ctx.client_count++;
+  }
+  else if ( event == WIFI_HAL_EVT_AP_CLIENT_DISCONNECTED && g_wifi_hal_ctx.client_count > 0 )
+  {
+    g_wifi_hal_ctx.client_count--;
+  }
   cb        = g_wifi_hal_ctx.cb;
   user_data = g_wifi_hal_ctx.cb_user_data;
   g_wifi_hal_ctx.cb_in_flight++;
-  /* Record the task executing this callback so a lifecycle re-entry from it is
-   * detectable and rejectable before it blocks on the drain awaiting itself. */
-  g_wifi_hal_ctx.cb_task = my_task;
   (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
+  (void) osal_mutex_give( g_lifecycle_mutex );
 
+  g_callback_depth++;
   cb( event, data, user_data );
+  g_callback_depth--;
 
   (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
   if ( g_wifi_hal_ctx.cb_in_flight > 0 )
   {
     g_wifi_hal_ctx.cb_in_flight--;
-  }
-  /* Only clear the callback-task marker if this delivery (still) owns it; a
-   * nested delivery retains its own marker until its own callback returns. */
-  if ( g_wifi_hal_ctx.cb_task == my_task )
-  {
-    g_wifi_hal_ctx.cb_task = NULL;
   }
   if ( g_wifi_hal_ctx.cb_in_flight == 0 && g_wifi_hal_ctx.cb_done )
   {
@@ -386,23 +408,17 @@ static void _quiesce_gate( void )
      * stored pointers and return. */
     g_wifi_hal_ctx.cb           = NULL;
     g_wifi_hal_ctx.cb_user_data = NULL;
-    g_wifi_hal_ctx.cb_task      = NULL;
     return;
   }
 
   (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
   g_wifi_hal_ctx.cb_delivery_disabled = true;
-  /* Do NOT clear cb_task here: teardown may still be draining an in-flight
-   * callback, and that callback must still be able to detect (and reject) a
-   * lifecycle re-entry that would otherwise wait on this very drain.  cb_task
-   * is cleared only once the drain below observes cb_in_flight == 0. */
   (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
 
-  /* Discard any stale completion token left by an earlier normal event so the
-   * wait below observes only the current drain's final transition to zero. */
-  while ( osal_bin_sem_timed_wait( g_wifi_hal_ctx.cb_done, 0 ) == OSAL_SUCCESS )
-  {
-  }
+  /* Discard the (at most one) stale binary completion token left by an earlier
+   * normal event so the wait below observes the current drain's final
+   * transition to zero. */
+  (void) osal_bin_sem_timed_wait( g_wifi_hal_ctx.cb_done, 0 );
 
   (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
   while ( g_wifi_hal_ctx.cb_in_flight > 0 )
@@ -416,7 +432,6 @@ static void _quiesce_gate( void )
 
   g_wifi_hal_ctx.cb           = NULL;
   g_wifi_hal_ctx.cb_user_data = NULL;
-  g_wifi_hal_ctx.cb_task      = NULL;
   (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
 }
 
@@ -465,41 +480,65 @@ static teardown_result_t _teardown_session( void )
    * other result (in particular ESP_ERR_INVALID_ARG) is NOT treated as proof
    * of absence, so the token and the registered flag are kept and this stage
    * is retried exactly. */
-  if ( g_wifi_hal_ctx.handler_wifi_registered && g_wifi_hal_ctx.handler_wifi )
+  if ( g_wifi_hal_ctx.handler_wifi_registered )
   {
-    esp_err_t uerr = esp_event_handler_instance_unregister( WIFI_EVENT,
-                                                            ESP_EVENT_ANY_ID,
-                                                            g_wifi_hal_ctx.handler_wifi );
-    if ( uerr == ESP_OK )
+    if ( !g_wifi_hal_ctx.handler_wifi )
     {
-      g_wifi_hal_ctx.handler_wifi            = NULL;
-      g_wifi_hal_ctx.handler_wifi_registered = false;
+      /* A registered instance without its token cannot be safely guessed at
+       * or replaced; preserve the ownership state for a later retry. */
+      incomplete = true;
     }
     else
     {
-      incomplete = true;
+      esp_err_t uerr = esp_event_handler_instance_unregister( WIFI_EVENT,
+                                                              ESP_EVENT_ANY_ID,
+                                                              g_wifi_hal_ctx.handler_wifi );
+      if ( uerr == ESP_OK )
+      {
+        g_wifi_hal_ctx.handler_wifi            = NULL;
+        g_wifi_hal_ctx.handler_wifi_registered = false;
+      }
+      else
+      {
+        incomplete = true;
+      }
     }
   }
-  if ( g_wifi_hal_ctx.handler_ip_registered && g_wifi_hal_ctx.handler_ip )
+  if ( g_wifi_hal_ctx.handler_ip_registered )
   {
-    esp_err_t uerr = esp_event_handler_instance_unregister( IP_EVENT,
-                                                            IP_EVENT_STA_GOT_IP,
-                                                            g_wifi_hal_ctx.handler_ip );
-    if ( uerr == ESP_OK )
+    if ( !g_wifi_hal_ctx.handler_ip )
     {
-      g_wifi_hal_ctx.handler_ip            = NULL;
-      g_wifi_hal_ctx.handler_ip_registered = false;
+      /* See the WIFI_EVENT instance case above. */
+      incomplete = true;
     }
     else
     {
-      incomplete = true;
+      esp_err_t uerr = esp_event_handler_instance_unregister( IP_EVENT,
+                                                              IP_EVENT_STA_GOT_IP,
+                                                              g_wifi_hal_ctx.handler_ip );
+      if ( uerr == ESP_OK )
+      {
+        g_wifi_hal_ctx.handler_ip            = NULL;
+        g_wifi_hal_ctx.handler_ip_registered = false;
+      }
+      else
+      {
+        incomplete = true;
+      }
     }
   }
 
   /* (3) Wait for every in-flight callback to return and clear callback state.
    * Even when a handler could not be unregistered, delivery is already
-   * disabled so it can no longer reach the user through this gate. */
+   * disabled so it can no longer reach the user through this gate.  A retained
+   * registration is a hard dependency failure: do not stop the driver or
+   * destroy netifs while its exact token still needs to be retried. */
   (void) _quiesce_gate();
+  if ( incomplete )
+  {
+    osal_log_error( "[wifi-hal] teardown: handler unregister incomplete, retry" );
+    return TEARDOWN_RETAINED;
+  }
 
   /* (4) Stop Wi-Fi if this session started it.  The idempotent return codes
    * accepted as "already stopped / not started / driver not installed" are
@@ -543,18 +582,34 @@ static teardown_result_t _teardown_session( void )
 
   /* (6) Destroy each owned default netif exactly once: clear both the pointer
    * and the ownership bit immediately after the (void) destroy call, so a
-   * retry never dest want an already-released netif. */
-  if ( g_wifi_hal_ctx.netif_sta_created && g_wifi_hal_ctx.netif_sta )
+   * retry never calls destroy on an already-released netif. */
+  if ( g_wifi_hal_ctx.netif_sta_created )
   {
-    esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_sta );
-    g_wifi_hal_ctx.netif_sta          = NULL;
-    g_wifi_hal_ctx.netif_sta_created  = false;
+    if ( !g_wifi_hal_ctx.netif_sta )
+    {
+      /* An owned netif without its handle cannot be safely released. */
+      incomplete = true;
+    }
+    else
+    {
+      esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_sta );
+      g_wifi_hal_ctx.netif_sta         = NULL;
+      g_wifi_hal_ctx.netif_sta_created = false;
+    }
   }
-  if ( g_wifi_hal_ctx.netif_ap_created && g_wifi_hal_ctx.netif_ap )
+  if ( g_wifi_hal_ctx.netif_ap_created )
   {
-    esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_ap );
-    g_wifi_hal_ctx.netif_ap          = NULL;
-    g_wifi_hal_ctx.netif_ap_created  = false;
+    if ( !g_wifi_hal_ctx.netif_ap )
+    {
+      /* An owned netif without its handle cannot be safely released. */
+      incomplete = true;
+    }
+    else
+    {
+      esp_netif_destroy_default_wifi( g_wifi_hal_ctx.netif_ap );
+      g_wifi_hal_ctx.netif_ap         = NULL;
+      g_wifi_hal_ctx.netif_ap_created = false;
+    }
   }
 
   /* (7) Delete the callback synchronization only when no retained handler can
@@ -626,20 +681,12 @@ static void _wifi_event_handler( void* arg, esp_event_base_t event_base, int32_t
 
     if ( event_id == WIFI_EVENT_AP_STACONNECTED )
     {
-      if ( g_wifi_hal_ctx.cb_lock )
-      {
-        g_wifi_hal_ctx.client_count++;
-      }
       _emit_event( WIFI_HAL_EVT_AP_CLIENT_CONNECTED, NULL );
       return;
     }
 
     if ( event_id == WIFI_EVENT_AP_STADISCONNECTED )
     {
-      if ( g_wifi_hal_ctx.cb_lock && g_wifi_hal_ctx.client_count > 0 )
-      {
-        g_wifi_hal_ctx.client_count--;
-      }
       _emit_event( WIFI_HAL_EVT_AP_CLIENT_DISCONNECTED, NULL );
       return;
     }
@@ -739,7 +786,11 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
    * and finish its cleanup, so init fails without touching that session. */
   while ( g_lifecycle_state == HAL_STATE_DEINITIALIZING )
   {
-    _cond_wait();
+    if ( !_cond_wait() )
+    {
+      (void) osal_mutex_give( g_lifecycle_mutex );
+      return OSAL_ERROR;
+    }
   }
 
   if ( g_lifecycle_state == HAL_STATE_CLEANUP_REQUIRED )
@@ -766,8 +817,7 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
    * unwind path can release them and every delivery is protected. */
   if ( osal_bin_sem_create( &g_wifi_hal_ctx.cb_lock, "wifi_hal_cb", OSAL_SEM_FULL ) != OSAL_SUCCESS )
   {
-    (void) osal_mutex_give( g_lifecycle_mutex );
-    return OSAL_ERROR;
+    goto unwind;
   }
 
   if ( osal_bin_sem_create( &g_wifi_hal_ctx.cb_done, "wifi_hal_cbdone", OSAL_SEM_EMPTY ) != OSAL_SUCCESS )
@@ -865,27 +915,38 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
     goto unwind;
   }
 
-  /* Register both handlers with the instance API and retain each token. */
+  /* Register both handlers with the instance API and retain each token only
+   * after ESP_OK.  Some shims/IDF implementations may write the output token
+   * before returning an error; a local token prevents that unowned value from
+   * being mistaken for a retained registration. */
   {
-    esp_err_t err = esp_event_handler_instance_register( WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                                         _wifi_event_handler, NULL,
-                                                         &g_wifi_hal_ctx.handler_wifi );
+    esp_event_handler_instance_t handler_wifi = NULL;
+    esp_err_t                    err = esp_event_handler_instance_register( WIFI_EVENT,
+                                                                             ESP_EVENT_ANY_ID,
+                                                                             _wifi_event_handler,
+                                                                             NULL,
+                                                                             &handler_wifi );
     if ( err != ESP_OK )
     {
       osal_log_error( "[wifi-hal] init: WIFI handler register failed (0x%x)", (unsigned) err );
       goto unwind;
     }
+    g_wifi_hal_ctx.handler_wifi            = handler_wifi;
     g_wifi_hal_ctx.handler_wifi_registered = true;
   }
   {
-    esp_err_t err = esp_event_handler_instance_register( IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                                         _wifi_event_handler, NULL,
-                                                         &g_wifi_hal_ctx.handler_ip );
+    esp_event_handler_instance_t handler_ip = NULL;
+    esp_err_t                    err = esp_event_handler_instance_register( IP_EVENT,
+                                                                             IP_EVENT_STA_GOT_IP,
+                                                                             _wifi_event_handler,
+                                                                             NULL,
+                                                                             &handler_ip );
     if ( err != ESP_OK )
     {
       osal_log_error( "[wifi-hal] init: IP handler register failed (0x%x)", (unsigned) err );
       goto unwind;
     }
+    g_wifi_hal_ctx.handler_ip            = handler_ip;
     g_wifi_hal_ctx.handler_ip_registered = true;
   }
 
@@ -953,7 +1014,11 @@ osal_status_t wifi_hal_deinit( void )
     if ( g_lifecycle_state == HAL_STATE_DEINITIALIZING )
     {
       /* Another deinitializer owns the teardown: wait and re-check. */
-      _cond_wait();
+      if ( !_cond_wait() )
+      {
+        (void) osal_mutex_give( g_lifecycle_mutex );
+        return OSAL_ERROR;
+      }
       continue;
     }
     /* ACTIVE or CLEANUP_REQUIRED: this caller owns the transition.  Close
@@ -968,7 +1033,13 @@ osal_status_t wifi_hal_deinit( void )
    * fails fast in _admit_operation() and an init caller waits likewise. */
   while ( g_admitted_ops > 0 )
   {
-    _cond_wait();
+    if ( !_cond_wait() )
+    {
+      /* Keep DEINITIALIZING and callback delivery disabled.  No operation may
+       * be started until a lifecycle owner can complete this transition. */
+      (void) osal_mutex_give( g_lifecycle_mutex );
+      return OSAL_ERROR;
+    }
   }
 
   (void) osal_mutex_give( g_lifecycle_mutex );
