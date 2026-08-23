@@ -62,6 +62,12 @@ void wifi_hal_mock_set_start_result( osal_status_t result );
 /* Configure the return value of wifi_hal_init(). Default is OSAL_SUCCESS. */
 void wifi_hal_mock_set_init_result( osal_status_t result );
 
+/* Configure the return value of wifi_hal_stop(). Default is OSAL_SUCCESS. */
+void wifi_hal_mock_set_stop_result( osal_status_t result );
+
+/* Configure the return value of wifi_hal_deinit(). Default is OSAL_SUCCESS. */
+void wifi_hal_mock_set_deinit_result( osal_status_t result );
+
 /* Set the predefined AP list returned by wifi_hal_get_scanned_ap(). */
 void wifi_hal_mock_set_scan_list( const wifi_hal_ap_record_t* list, uint16_t count );
 
@@ -131,6 +137,45 @@ bool wifi_hal_mock_wait_stop_entered_level( uint32_t level, uint32_t timeout_ms 
 bool wifi_hal_mock_wait_stop_completed_level( uint32_t level, uint32_t timeout_ms );
 bool wifi_hal_mock_wait_deinit_entered_level( uint32_t level, uint32_t timeout_ms );
 bool wifi_hal_mock_wait_deinit_completed_level( uint32_t level, uint32_t timeout_ms );
+
+/* Focused lifecycle snapshot.
+ *
+ * This is the race-free lifecycle observation surface consumed by the TASK-135
+ * stop tests.  It deliberately exposes only booleans and counters needed to
+ * synchronize a worker with an init/start/stop/deinit outcome: no callback
+ * pointer values are copied out, and the helper never returns the mutable
+ * internal address.  Every field is read (and written by lifecycle workers)
+ * under the mock mutex. */
+typedef struct
+{
+  bool     initialized;              /**< wifi_hal_init succeeded.          */
+  bool     started;                  /**< wifi_hal_start succeeded.         */
+  bool     connected;                /**< wifi_hal_connect succeeded.       */
+
+  uint32_t init_count;               /**< wifi_hal_init attempts (entered). */
+  uint32_t start_count;              /**< wifi_hal_start attempts.          */
+  uint32_t stop_count;               /**< wifi_hal_stop attempts (entered). */
+  uint32_t deinit_count;             /**< wifi_hal_deinit attempts (entered). */
+
+  uint32_t init_entered_gen;         /**< Init entered lifecycle generation.   */
+  uint32_t init_completed_gen;       /**< Init completed lifecycle generation. */
+  uint32_t stop_entered_gen;         /**< Stop entered lifecycle generation.   */
+  uint32_t stop_completed_gen;       /**< Stop completed lifecycle generation. */
+  uint32_t deinit_entered_gen;       /**< Deinit entered lifecycle generation. */
+  uint32_t deinit_completed_gen;     /**< Deinit completed generation.         */
+
+  bool     event_cb_registered;      /**< Callback registration indicator.    */
+  bool     user_data_registered;     /**< User-data registration indicator.   */
+} wifi_hal_mock_lifecycle_t;
+
+/* Copy a synchronized lifecycle snapshot into @p out.
+ *
+ * For any non-NULL @p out the entire destination is zeroed before the mock
+ * mutex is taken; on lock failure the (zeroed) destination is left untouched
+ * and false is returned.  On success the snapshot fields are copied under the
+ * mock mutex, so a counter/outcome reader never races a lifecycle worker, and
+ * true is returned.  This API never returns the mutable global address. */
+bool wifi_hal_mock_get_lifecycle( wifi_hal_mock_lifecycle_t* out );
 
 /* Get read-only pointer to internal mock state for assertions. */
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void );

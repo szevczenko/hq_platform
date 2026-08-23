@@ -522,6 +522,202 @@ static void test_deinit_hold_blocks_reset_until_release( void )
 
 
 /* ============================================================================
+ * TASK-134B2 focused lifecycle snapshot + configured-result cases
+ *
+ * The mock now exposes a race-free, synchronized lifecycle snapshot
+ * (wifi_hal_mock_get_lifecycle) plus mutex-protected init/stop/deinit result
+ * setters.  Every configured failure is still a completed attempt so TASK-135
+ * can build retry flows without racing the worker.
+ * ========================================================================== */
+
+static void test_lifecycle_snapshot_fields_and_zeroing( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_reset(), "mock reset succeeds" );
+
+  /* Snapshot before any init with a garbage-filled destination: the entire
+   * destination is zeroed before the locked copy, so a never-written field
+   * (stop_count) reads zero rather than the stale 0xAA fill. */
+  wifi_hal_mock_lifecycle_t snap;
+  memset( &snap, 0xAA, sizeof( snap ) );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &snap ),
+                            "empty snapshot copied" );
+  TEST_ASSERT_FALSE( snap.initialized );
+  TEST_ASSERT_FALSE( snap.started );
+  TEST_ASSERT_FALSE( snap.connected );
+  TEST_ASSERT_FALSE( snap.event_cb_registered );
+  TEST_ASSERT_EQUAL( 0, (int) snap.stop_count );
+  TEST_ASSERT_EQUAL( 0, (int) snap.init_entered_gen );
+  TEST_ASSERT_EQUAL( 0, (int) snap.stop_completed_gen );
+
+  /* Init, start, and connect all succeed; the snapshot reflects them. */
+  wifi_hal_init_t init = _make_init( NULL );
+  init.user_data       = (void*) 0x1234; /* non-NULL so registration is visible */
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_init( &init ) );
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_start( WIFI_HAL_MODE_STA ) );
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_connect() );
+
+  /* A non-empty destination is zeroed before copy too, so fields (deinit_count,
+   * stop_count) that init/start/connect never incremented still read zero. */
+  memset( &snap, 0xAA, sizeof( snap ) );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &snap ),
+                            "populated snapshot copied" );
+  TEST_ASSERT_TRUE( snap.initialized );
+  TEST_ASSERT_TRUE( snap.started );
+  TEST_ASSERT_TRUE( snap.connected );
+  TEST_ASSERT_TRUE( snap.event_cb_registered );
+  TEST_ASSERT_TRUE( snap.user_data_registered );
+  TEST_ASSERT_EQUAL( 1, (int) snap.init_count );
+  TEST_ASSERT_EQUAL( 1, (int) snap.start_count );
+  TEST_ASSERT_EQUAL( 1, (int) snap.init_entered_gen );
+  TEST_ASSERT_EQUAL( 1, (int) snap.init_completed_gen );
+  TEST_ASSERT_EQUAL( 0, (int) snap.stop_count );
+  TEST_ASSERT_EQUAL( 0, (int) snap.deinit_count );
+}
+
+static void test_init_failure_is_visible_in_snapshot( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_reset(), "mock reset succeeds" );
+
+  wifi_hal_mock_set_init_result( OSAL_ERROR );
+  wifi_hal_init_t init = _make_init( NULL );
+  TEST_ASSERT_EQUAL( OSAL_ERROR, wifi_hal_init( &init ) );
+
+  wifi_hal_mock_lifecycle_t snap;
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &snap ),
+                            "snapshot copied" );
+  TEST_ASSERT_FALSE_MESSAGE( snap.initialized,
+                             "failed init left initialization unchanged" );
+  TEST_ASSERT_FALSE_MESSAGE( snap.event_cb_registered,
+                             "failed init did not register a callback" );
+  TEST_ASSERT_FALSE_MESSAGE( snap.user_data_registered,
+                             "failed init did not register user data" );
+  TEST_ASSERT_EQUAL( 1, (int) snap.init_entered_gen );
+  TEST_ASSERT_EQUAL( 1, (int) snap.init_completed_gen );
+
+  wifi_hal_mock_reset();
+}
+
+static void test_stop_failure_and_success_in_snapshot( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_reset(), "mock reset succeeds" );
+
+  wifi_hal_init_t init = _make_init( NULL );
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_init( &init ) );
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_start( WIFI_HAL_MODE_STA ) );
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_connect() );
+
+  /* A configured stop failure is a completed attempt but changes no state. */
+  wifi_hal_mock_set_stop_result( OSAL_ERROR );
+  TEST_ASSERT_EQUAL( OSAL_ERROR, wifi_hal_stop() );
+
+  wifi_hal_mock_lifecycle_t snap;
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &snap ),
+                            "snapshot copied" );
+  TEST_ASSERT_TRUE_MESSAGE( snap.started,  "failed stop leaves started unchanged" );
+  TEST_ASSERT_TRUE_MESSAGE( snap.connected, "failed stop leaves connected unchanged" );
+  TEST_ASSERT_EQUAL( 1, (int) snap.stop_entered_gen );
+  TEST_ASSERT_EQUAL( 1, (int) snap.stop_completed_gen );
+
+  /* A retry that succeeds clears the same fields and is the next attempt. */
+  wifi_hal_mock_set_stop_result( OSAL_SUCCESS );
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_stop() );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &snap ),
+                            "snapshot copied after retry" );
+  TEST_ASSERT_FALSE_MESSAGE( snap.started,  "successful stop clears started" );
+  TEST_ASSERT_FALSE_MESSAGE( snap.connected, "successful stop clears connected" );
+  TEST_ASSERT_EQUAL( 2, (int) snap.stop_entered_gen );
+  TEST_ASSERT_EQUAL( 2, (int) snap.stop_completed_gen );
+
+  wifi_hal_mock_reset();
+}
+
+static void test_deinit_failure_and_success_in_snapshot( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_reset(), "mock reset succeeds" );
+
+  wifi_hal_init_t init = _make_init( NULL );
+  init.user_data       = (void*) 0xABCD;
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_init( &init ) );
+
+  /* Failed deinit is a completed attempt that changes no lifecycle state. */
+  wifi_hal_mock_set_deinit_result( OSAL_ERROR );
+  TEST_ASSERT_EQUAL( OSAL_ERROR, wifi_hal_deinit() );
+
+  wifi_hal_mock_lifecycle_t snap;
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &snap ),
+                            "snapshot copied" );
+  TEST_ASSERT_TRUE_MESSAGE( snap.initialized,
+                            "failed deinit leaves initialized unchanged" );
+  TEST_ASSERT_TRUE_MESSAGE( snap.event_cb_registered,
+                            "failed deinit leaves callback registration unchanged" );
+  TEST_ASSERT_TRUE_MESSAGE( snap.user_data_registered,
+                            "failed deinit leaves user data registration unchanged" );
+  TEST_ASSERT_EQUAL( 1, (int) snap.deinit_entered_gen );
+  TEST_ASSERT_EQUAL( 1, (int) snap.deinit_completed_gen );
+
+  /* A retry with success clears all lifecycle + registration state. */
+  wifi_hal_mock_set_deinit_result( OSAL_SUCCESS );
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_deinit() );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &snap ),
+                            "snapshot copied after retry" );
+  TEST_ASSERT_FALSE_MESSAGE( snap.initialized, "successful deinit clears initialized" );
+  TEST_ASSERT_FALSE_MESSAGE( snap.event_cb_registered,
+                             "successful deinit clears callback registration" );
+  TEST_ASSERT_FALSE_MESSAGE( snap.user_data_registered,
+                             "successful deinit clears user data registration" );
+  TEST_ASSERT_EQUAL( 2, (int) snap.deinit_entered_gen );
+  TEST_ASSERT_EQUAL( 2, (int) snap.deinit_completed_gen );
+
+  wifi_hal_mock_reset();
+}
+
+/* Re-entrant callback invoked from event delivery.  It re-enters the mock
+ * control surface via the snapshot helper; if the mock lock were still held
+ * during delivery (the mutex is non-recursive) this would block forever, so a
+ * completing call proves the lock is released before invocation. */
+static bool               s_reentrant_callback_result     = false;
+static wifi_hal_mock_lifecycle_t s_reentrant_snapshot    = { 0 };
+
+static void _reentrant_event_cb( wifi_hal_event_t       event,
+                                 const wifi_hal_event_data_t* data,
+                                 void*                  user_data )
+{
+  (void) event;
+  (void) data;
+  (void) user_data;
+  s_reentrant_callback_result = wifi_hal_mock_get_lifecycle( &s_reentrant_snapshot );
+}
+
+static void test_event_delivery_holds_no_lock_during_callback( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_reset(), "mock reset succeeds" );
+
+  wifi_hal_init_t init = _make_init( NULL );
+  init.event_cb        = _reentrant_event_cb;
+  init.user_data       = (void*) 0x7777;
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_init( &init ) );
+
+  /* inject_event() path. */
+  s_reentrant_callback_result = false;
+  memset( &s_reentrant_snapshot, 0, sizeof( s_reentrant_snapshot ) );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_SCAN_DONE, NULL );
+  TEST_ASSERT_TRUE_MESSAGE( s_reentrant_callback_result,
+                            "callback re-entered snapshot under no mock lock" );
+  TEST_ASSERT_TRUE( s_reentrant_snapshot.initialized );
+  TEST_ASSERT_TRUE( s_reentrant_snapshot.event_cb_registered );
+  TEST_ASSERT_TRUE( s_reentrant_snapshot.user_data_registered );
+
+  /* start_scan() delivery path. */
+  s_reentrant_callback_result = false;
+  memset( &s_reentrant_snapshot, 0, sizeof( s_reentrant_snapshot ) );
+  TEST_ASSERT_EQUAL( OSAL_SUCCESS, wifi_hal_start_scan( false ) );
+  TEST_ASSERT_TRUE_MESSAGE( s_reentrant_callback_result,
+                            "start_scan re-entered snapshot under no mock lock" );
+
+  wifi_hal_mock_reset();
+}
+
+/* ============================================================================
  * Runner
  * ========================================================================== */
 void wifi_hal_mock_tests_run( void )
@@ -539,6 +735,11 @@ void wifi_hal_mock_tests_run( void )
   RUN_TEST( test_init_failure_still_counts_generation );
   RUN_TEST( test_stop_and_deinit_generation_waits );
   RUN_TEST( test_deinit_hold_blocks_reset_until_release );
+  RUN_TEST( test_lifecycle_snapshot_fields_and_zeroing );
+  RUN_TEST( test_init_failure_is_visible_in_snapshot );
+  RUN_TEST( test_stop_failure_and_success_in_snapshot );
+  RUN_TEST( test_deinit_failure_and_success_in_snapshot );
+  RUN_TEST( test_event_delivery_holds_no_lock_during_callback );
 }
 
 #ifndef OSAL_TESTS_AGGREGATE

@@ -22,6 +22,14 @@ static bool           g_hold_scan_done = false;
 static bool           g_hold_init      = false;
 static bool           g_hold_deinit    = false;
 static osal_status_t  g_init_result    = OSAL_SUCCESS;
+static osal_status_t  g_stop_result    = OSAL_SUCCESS;
+static osal_status_t  g_deinit_result  = OSAL_SUCCESS;
+
+/* Callback/user-data registration indicators exposed through the focused
+ * lifecycle snapshot.  These are booleans only; callback pointer values are
+ * never exposed through the snapshot API.  Protected by g_mock_mutex. */
+static bool           g_event_cb_registered  = false;
+static bool           g_user_data_registered = false;
 
 /* These primitives have process lifetime.  They are created together by the
  * first reset, on the single-threaded test bootstrap path, and are never
@@ -159,6 +167,10 @@ bool wifi_hal_mock_reset( void )
   g_hold_init              = false;
   g_hold_deinit            = false;
   g_init_result            = OSAL_SUCCESS;
+  g_stop_result            = OSAL_SUCCESS;
+  g_deinit_result          = OSAL_SUCCESS;
+  g_event_cb_registered    = false;
+  g_user_data_registered   = false;
   g_init_completed_gen     = 0;
   g_stop_completed_gen     = 0;
   g_deinit_completed_gen   = 0;
@@ -183,12 +195,20 @@ bool wifi_hal_mock_reset( void )
 
 void wifi_hal_mock_set_connect_result( osal_status_t result )
 {
-  g_mock.connect_result = result;
+  if ( _mock_lock() )
+  {
+    g_mock.connect_result = result;
+    _mock_unlock();
+  }
 }
 
 void wifi_hal_mock_set_start_result( osal_status_t result )
 {
-  g_mock.start_result = result;
+  if ( _mock_lock() )
+  {
+    g_mock.start_result = result;
+    _mock_unlock();
+  }
 }
 
 void wifi_hal_mock_set_init_result( osal_status_t result )
@@ -196,6 +216,24 @@ void wifi_hal_mock_set_init_result( osal_status_t result )
   if ( _mock_lock() )
   {
     g_init_result = result;
+    _mock_unlock();
+  }
+}
+
+void wifi_hal_mock_set_stop_result( osal_status_t result )
+{
+  if ( _mock_lock() )
+  {
+    g_stop_result = result;
+    _mock_unlock();
+  }
+}
+
+void wifi_hal_mock_set_deinit_result( osal_status_t result )
+{
+  if ( _mock_lock() )
+  {
+    g_deinit_result = result;
     _mock_unlock();
   }
 }
@@ -224,9 +262,23 @@ void wifi_hal_mock_set_ip_info( const wifi_hal_ip_info_t* info )
 
 void wifi_hal_mock_inject_event( wifi_hal_event_t event, const wifi_hal_event_data_t* data )
 {
-  if ( g_mock.event_cb )
+  wifi_hal_event_cb_t cb;
+  void*               user_data;
+
+  /* Copy the callback/user data under the mock mutex, release the mutex, then
+   * invoke so no mock lock is held during delivery (a re-entrant callback that
+   * re-enters a mock control API therefore cannot deadlock). */
+  if ( !_mock_lock() )
   {
-    g_mock.event_cb( event, data, g_mock.user_data );
+    return;
+  }
+  cb        = g_mock.event_cb;
+  user_data = g_mock.user_data;
+  _mock_unlock();
+
+  if ( cb )
+  {
+    cb( event, data, user_data );
   }
 }
 
@@ -475,6 +527,43 @@ bool wifi_hal_mock_wait_deinit_completed_level( uint32_t level, uint32_t timeout
   return _wait_generation( &g_deinit_completed_gen, g_deinit_completed_sem, level, timeout_ms );
 }
 
+bool wifi_hal_mock_get_lifecycle( wifi_hal_mock_lifecycle_t* out )
+{
+  if ( out != NULL )
+  {
+    /* Zero the whole destination before taking the lock so a failed copy is
+     * never mistaken for a valid snapshot and no stale field survives. */
+    memset( out, 0, sizeof( *out ) );
+  }
+
+  if ( !_mock_lock() )
+  {
+    return false;
+  }
+
+  if ( out != NULL )
+  {
+    out->initialized          = g_mock.initialized;
+    out->started              = g_mock.started;
+    out->connected            = g_mock.connected;
+    out->init_count           = g_mock.init_count;
+    out->start_count          = g_mock.start_count;
+    out->stop_count           = g_mock.stop_count;
+    out->deinit_count         = g_mock.deinit_count;
+    out->init_entered_gen     = g_mock.init_count;
+    out->init_completed_gen   = g_init_completed_gen;
+    out->stop_entered_gen     = g_mock.stop_count;
+    out->stop_completed_gen   = g_stop_completed_gen;
+    out->deinit_entered_gen   = g_mock.deinit_count;
+    out->deinit_completed_gen = g_deinit_completed_gen;
+    out->event_cb_registered  = g_event_cb_registered;
+    out->user_data_registered = g_user_data_registered;
+  }
+
+  _mock_unlock();
+  return true;
+}
+
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void )
 {
   return &g_mock;
@@ -600,9 +689,11 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
   result = g_init_result;
   if ( result == OSAL_SUCCESS )
   {
-    g_mock.initialized = true;
-    g_mock.event_cb    = init->event_cb;
-    g_mock.user_data   = init->user_data;
+    g_mock.initialized        = true;
+    g_mock.event_cb           = init->event_cb;
+    g_mock.user_data          = init->user_data;
+    g_event_cb_registered     = ( init->event_cb != NULL );
+    g_user_data_registered    = ( init->user_data != NULL );
   }
   /* Publish the completed generation once the effects and result are final,
    * while the invocation is still marked active.  A completion waiter can
@@ -616,7 +707,8 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
 
 osal_status_t wifi_hal_deinit( void )
 {
-  bool hold;
+  bool          hold;
+  osal_status_t result;
 
   if ( !g_mock_ready || !_mock_lock() )
   {
@@ -651,31 +743,51 @@ osal_status_t wifi_hal_deinit( void )
     _mock_unlock();
   }
 
-  /* Apply the mock effects, then publish the completed generation, while still
-   * marked active so a waiter can never observe a stale partial generation. */
+  /* Read the configured result and apply the mock effects before publishing the
+   * completed generation, while still marked active so a waiter can never
+   * observe a stale partial generation. */
   if ( !_mock_lock() )
   {
     return OSAL_ERROR;
   }
-  g_mock.initialized = false;
-  g_mock.started     = false;
+  result = g_deinit_result;
+  if ( result == OSAL_SUCCESS )
+  {
+    g_mock.initialized        = false;
+    g_mock.started            = false;
+    g_mock.connected          = false;
+    g_mock.event_cb           = NULL;
+    g_mock.user_data          = NULL;
+    g_event_cb_registered     = false;
+    g_user_data_registered    = false;
+  }
   g_deinit_completed_gen++;
   (void) osal_bin_sem_give( g_deinit_completed_sem );
   g_deinit_active = false;
   _mock_unlock();
-  return OSAL_SUCCESS;
+  return result;
 }
 
 osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
 {
-  g_mock.mode = mode;
+  osal_status_t result;
+
+  if ( !g_mock_ready || !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
+  g_mock.mode       = mode;
   g_mock.start_count++;
-  g_mock.started = ( g_mock.start_result == OSAL_SUCCESS );
-  return g_mock.start_result;
+  result            = g_mock.start_result;
+  g_mock.started    = ( result == OSAL_SUCCESS );
+  _mock_unlock();
+  return result;
 }
 
 osal_status_t wifi_hal_stop( void )
 {
+  osal_status_t result;
+
   if ( !g_mock_ready || !_mock_lock() )
   {
     return OSAL_ERROR;
@@ -688,19 +800,24 @@ osal_status_t wifi_hal_stop( void )
   (void) osal_bin_sem_give( g_stop_entered_sem );
   _mock_unlock();
 
-  /* Apply the mock effects, then publish the completed generation, while still
-   * marked active so a waiter can never observe a partial generation. */
+  /* Read the configured result and apply the mock effects before publishing the
+   * completed generation, while still marked active so a waiter can never
+   * observe a partial generation. */
   if ( !_mock_lock() )
   {
     return OSAL_ERROR;
   }
-  g_mock.started   = false;
-  g_mock.connected = false;
+  result = g_stop_result;
+  if ( result == OSAL_SUCCESS )
+  {
+    g_mock.started   = false;
+    g_mock.connected = false;
+  }
   g_stop_completed_gen++;
   (void) osal_bin_sem_give( g_stop_completed_sem );
   g_stop_active = false;
   _mock_unlock();
-  return OSAL_SUCCESS;
+  return result;
 }
 
 osal_status_t wifi_hal_set_sta_config( const wifi_hal_sta_config_t* config )
@@ -727,30 +844,54 @@ osal_status_t wifi_hal_set_ap_config( const wifi_hal_ap_config_t* config )
 
 osal_status_t wifi_hal_connect( void )
 {
-  if ( g_mock.connect_result == OSAL_SUCCESS )
+  osal_status_t result;
+
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
+  result = g_mock.connect_result;
+  if ( result == OSAL_SUCCESS )
   {
     g_mock.connected = true;
   }
-  return g_mock.connect_result;
+  _mock_unlock();
+  return result;
 }
 
 osal_status_t wifi_hal_disconnect( void )
 {
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
   g_mock.connected = false;
+  _mock_unlock();
   return OSAL_SUCCESS;
 }
 
 osal_status_t wifi_hal_start_scan( bool block )
 {
+  wifi_hal_event_cb_t cb;
+  void*               user_data;
+
   (void) block;
 
-  g_mock.scan_start_count++;
-  /* If a callback is registered, fire SCAN_DONE so the management layer
-     picks up the results — unless the test has asked to hold the completion
-     in order to observe the in-flight scan window. */
-  if ( g_mock.event_cb && !g_hold_scan_done )
+  if ( !_mock_lock() )
   {
-    g_mock.event_cb( WIFI_HAL_EVT_SCAN_DONE, NULL, g_mock.user_data );
+    return OSAL_ERROR;
+  }
+  g_mock.scan_start_count++;
+  /* Copy the callback/user data under the mock mutex, then release before
+     delivering so no mock lock is held during invocation. */
+  cb                 = g_mock.event_cb;
+  user_data          = g_mock.user_data;
+  bool fire_scan_done = ( cb != NULL ) && !g_hold_scan_done;
+  _mock_unlock();
+
+  if ( fire_scan_done )
+  {
+    cb( WIFI_HAL_EVT_SCAN_DONE, NULL, user_data );
   }
 
   return OSAL_SUCCESS;
