@@ -64,6 +64,14 @@ static uint32_t g_init_completed_gen   = 0;
 static uint32_t g_stop_completed_gen   = 0;
 static uint32_t g_deinit_completed_gen = 0;
 
+/* Number of HAL events that were actually delivered through a registered
+ * callback.  Protected by g_mock_mutex; incremented synchronously by
+ * inject_event on the caller's thread, so the value is observable immediately
+ * after inject_event returns.  Exposed through wifi_hal_mock.h so the TASK-135C
+ * lifecycle tests can prove that an event injected after deinit cannot reach
+ * the management layer (the callback is dropped during HAL deinit). */
+static uint32_t g_delivered_events = 0;
+
 /* ---- mock control API ---------------------------------------------------- */
 
 static bool _bootstrap_sem( osal_bin_sem_id_t* sem, const char* name )
@@ -171,6 +179,7 @@ bool wifi_hal_mock_reset( void )
   g_deinit_result          = OSAL_SUCCESS;
   g_event_cb_registered    = false;
   g_user_data_registered   = false;
+  g_delivered_events       = 0;
   g_init_completed_gen     = 0;
   g_stop_completed_gen     = 0;
   g_deinit_completed_gen   = 0;
@@ -267,13 +276,19 @@ void wifi_hal_mock_inject_event( wifi_hal_event_t event, const wifi_hal_event_da
 
   /* Copy the callback/user data under the mock mutex, release the mutex, then
    * invoke so no mock lock is held during delivery (a re-entrant callback that
-   * re-enters a mock control API therefore cannot deadlock). */
+   * re-enters a mock control API therefore cannot deadlock).  The delivery
+   * counter is updated under the same lock, so it is observable immediately
+   * after inject_event returns and proves whether a callback was reached. */
   if ( !_mock_lock() )
   {
     return;
   }
   cb        = g_mock.event_cb;
   user_data = g_mock.user_data;
+  if ( cb )
+  {
+    ++g_delivered_events;
+  }
   _mock_unlock();
 
   if ( cb )
@@ -562,6 +577,17 @@ bool wifi_hal_mock_get_lifecycle( wifi_hal_mock_lifecycle_t* out )
 
   _mock_unlock();
   return true;
+}
+
+uint32_t wifi_hal_mock_get_delivered_event_count( void )
+{
+  uint32_t count = 0;
+  if ( _mock_lock() )
+  {
+    count = g_delivered_events;
+    _mock_unlock();
+  }
+  return count;
 }
 
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void )

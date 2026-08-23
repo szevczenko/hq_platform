@@ -148,6 +148,13 @@ typedef struct
   wifi_config_list_t  config_list;
   uint8_t             current_cred_nb;
   bool                config_loaded;
+
+#ifdef WIFI_MGMT_TEST_OBSERVABILITY
+  /* Test-only lifecycle generation: incremented by each successful init and
+   * never reset by deinit, so a reinit is always a new generation.  Not part
+   * of a production build. */
+  uint32_t            lifecycle_generation;
+#endif
 } wifi_ctx_t;
 
 static wifi_ctx_t g_ctx = {
@@ -1261,6 +1268,10 @@ void wifi_mgmt_init( void )
    * state only after the whole object graph is valid — never before the task
    * creation succeeds. */
   g_ctx.initialized = true;
+#ifdef WIFI_MGMT_TEST_OBSERVABILITY
+  /* A reinit after deinit is a fresh lifecycle: publish a new generation. */
+  ++g_ctx.lifecycle_generation;
+#endif
   return;
 
 init_failed:
@@ -2044,3 +2055,63 @@ bool wifi_mgmt_get_access_points( wifi_mgmt_ap_list_t* list )
 
   return true;
 }
+
+#ifdef WIFI_MGMT_TEST_OBSERVABILITY
+
+bool wifi_mgmt_test_snapshot( wifi_mgmt_test_snapshot_t* out )
+{
+  uint32_t mask  = 0;
+  uint32_t count = 0;
+  uint32_t gen   = 0;
+  uint32_t worker_live = 0;
+
+  if ( !out )
+  {
+    return false;
+  }
+  memset( out, 0, sizeof( *out ) );
+
+  /* The module lifetime is owned by the serialized lifecycle caller; the
+   * snapshot is only ever taken at acknowledged init/start/stop/deinit
+   * boundaries, so no concurrent teardown can release the state mutex here. */
+  if ( g_ctx.state_mutex != NULL )
+  {
+    _lock_state();
+  }
+
+  /* Live-object mask and count, derived from the actual handles so a snapshot
+   * never compares allocator handle values across lifecycle rounds. */
+  if ( g_ctx.ip_sem != NULL )       { mask |= WIFI_MGMT_TEST_OBJ_IP_SEM;       ++count; }
+  if ( g_ctx.scan_sem != NULL )     { mask |= WIFI_MGMT_TEST_OBJ_SCAN_SEM;     ++count; }
+  if ( g_ctx.ready_sem != NULL )    { mask |= WIFI_MGMT_TEST_OBJ_READY_SEM;    ++count; }
+  if ( g_ctx.stop_sem != NULL )     { mask |= WIFI_MGMT_TEST_OBJ_STOP_SEM;     ++count; }
+  if ( g_ctx.quit_sem != NULL )     { mask |= WIFI_MGMT_TEST_OBJ_QUIT_SEM;     ++count; }
+  if ( g_ctx.event_mutex != NULL )  { mask |= WIFI_MGMT_TEST_OBJ_EVENT_MUTEX;  ++count; }
+  if ( g_ctx.state_mutex != NULL )  { mask |= WIFI_MGMT_TEST_OBJ_STATE_MUTEX;  ++count; }
+
+#ifdef ESP_PLATFORM
+  if ( g_wifi_task_id != (osal_task_id_t) NULL )
+#else
+  if ( g_wifi_task_id != (osal_task_id_t) 0 )
+#endif
+  {
+    mask |= WIFI_MGMT_TEST_OBJ_WORKER_TASK;
+    ++count;
+    worker_live = 1;
+  }
+
+  gen = g_ctx.lifecycle_generation;
+
+  if ( g_ctx.state_mutex != NULL )
+  {
+    _unlock_state();
+  }
+
+  out->lifecycle_generation = gen;
+  out->worker_live          = worker_live;
+  out->objects_mask         = mask;
+  out->object_count         = count;
+  return true;
+}
+
+#endif /* WIFI_MGMT_TEST_OBSERVABILITY */

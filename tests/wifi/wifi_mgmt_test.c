@@ -1458,6 +1458,348 @@ static void test_repeated_init_is_noop( void )
 
   _reset_event( &g_ev_repeat_init );
 }
+/* ============================================================================
+ * TASK-135C  Deterministic Wi-Fi lifecycle regression
+ *
+ * Runs full management lifetimes (init -> init -> start -> ready -> stop ->
+ * start -> ready -> deinit -> deinit) and observes them through the test-only
+ * snapshot API (WIFI_MGMT_TEST_OBSERVABILITY) exposed by wifi_managment.c/h.
+ * All synchronization is inherited from the TASK-134B acknowledged lifecycle
+ * rounds and TASK-134B2 snapshots; no unsynchronized volatile completion flag
+ * or helper-task sleep ordering is introduced here.
+ * ========================================================================== */
+
+static event_rec_t         g_lifecycle_typed;
+static volatile bool       g_lifecycle_legacy_fired = false;
+
+static void _lifecycle_legacy_cb( void )
+{
+  g_lifecycle_legacy_fired = true;
+}
+
+static void _lifecycle_snap( wifi_mgmt_test_snapshot_t* snap )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_test_snapshot( snap ),
+                            "management test snapshot is readable" );
+}
+
+/* Assert a fully released module: no worker and no live management object. */
+static void _lifecycle_assert_empty( const char* where )
+{
+  wifi_mgmt_test_snapshot_t snap = { 0 };
+  _lifecycle_snap( &snap );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( 0, snap.worker_live, where );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( 0, snap.objects_mask, where );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( 0, snap.object_count, where );
+}
+
+/* Assert a fully initialized module: exactly one worker and every object. */
+static void _lifecycle_assert_full( const char* where )
+{
+  wifi_mgmt_test_snapshot_t snap = { 0 };
+  _lifecycle_snap( &snap );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( 1, snap.worker_live, where );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( WIFI_MGMT_TEST_OBJ_ALL_MASK, snap.objects_mask,
+                                    where );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( WIFI_MGMT_TEST_OBJ_ALL_COUNT, snap.object_count,
+                                    where );
+}
+
+/* Build a fresh ready module: mock reset, type, init, start, await ready.  Must
+ * only be called from a clean (uninitialized) boundary so the mock reset can
+ * never race a live management worker's lifecycle invocation. */
+static void _lifecycle_build_ready( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_reset(), "mock reset succeeds" );
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module becomes ready" );
+}
+
+/* Drive the station connect flow and inject GOT_IP (mirrors the existing
+ * connect test's deterministic sequence). */
+static void _lifecycle_connect_flow( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_ap_name( "TestAP", 6 ),
+                            "set_ap_name succeeds" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_password( "TestPass", 8 ),
+                            "set_password succeeds" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_connect(), "connect request accepted" );
+  osal_task_delay_ms( 300 );
+  wifi_hal_event_data_t evt_data = { 0 };
+  strncpy( evt_data.ip_info.ip, "192.168.1.10", sizeof( evt_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+}
+
+/* ============================================================================
+ * Repeated init -> init -> start -> ready -> stop -> start -> ready -> deinit
+ * -> deinit cycles.
+ *
+ * Each new cycle starts from a never-initialized boundary and ends fully
+ * deinitialized.  Across stop/start the same single worker and the same
+ * lifecycle generation are retained; after each reinit a fresh lifecycle
+ * generation is published; after each successful deinit there are zero live
+ * workers and zero live management objects (never by comparing allocator
+ * handle values).
+ * ========================================================================== */
+static void test_lifecycle_repeated_cycles( void )
+{
+  ( void ) wifi_mgmt_deinit(); /* Clean baseline from an earlier target. */
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  wifi_hal_mock_reset();
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+
+  uint32_t prev_generation = 0;
+
+  for ( int cycle = 0; cycle < 3; ++cycle )
+  {
+    wifi_mgmt_test_snapshot_t snap = { 0 };
+
+    /* Cycle top: never-initialized boundary. */
+    _lifecycle_assert_empty( "uninitialized cycle boundary" );
+
+    /* init (first): one worker, every object live, a fresh generation. */
+    wifi_mgmt_init();
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( WIFI_MGMT_TEST_OBJ_ALL_MASK, snap.objects_mask );
+    TEST_ASSERT_EQUAL_UINT32( WIFI_MGMT_TEST_OBJ_ALL_COUNT, snap.object_count );
+    if ( cycle > 0 )
+    {
+      TEST_ASSERT_GREATER_THAN_MESSAGE( prev_generation, snap.lifecycle_generation,
+                                        "reinit publishes a new lifecycle generation" );
+    }
+    const uint32_t gen_init = snap.lifecycle_generation;
+
+    /* init (repeat) is a no-op: still one worker and the same generation. */
+    wifi_mgmt_init();
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( gen_init, snap.lifecycle_generation );
+
+    /* start -> ready. */
+    wifi_mgmt_start();
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module becomes ready" );
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( gen_init, snap.lifecycle_generation );
+
+    /* stop retains the worker and the same lifecycle generation. */
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "clean stop acknowledged" );
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( gen_init, snap.lifecycle_generation );
+    TEST_ASSERT_EQUAL_UINT32( WIFI_MGMT_TEST_OBJ_ALL_MASK, snap.objects_mask );
+
+    /* start -> ready again: the same worker generation survives stop/start. */
+    wifi_mgmt_start();
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready again" );
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( gen_init, snap.lifecycle_generation );
+
+    /* deinit -> deinit: zero live workers and zero live objects. */
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "first deinit succeeds" );
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "repeat deinit is idempotent" );
+    _lifecycle_assert_empty( "after successful deinit" );
+
+    prev_generation = gen_init;
+  }
+}
+
+/* ============================================================================
+ * Event injection after deinit cannot call management.
+ *
+ * Before deinit a GOT_IP injection is delivered through the registered HAL
+ * callback (observed by the mock delivery counter).  After deinit the HAL
+ * callback registration is dropped and the delivered-event counter is frozen:
+ * injecting GOT_IP / DISCONNECTED / SCAN_DONE after deinit cannot reach the
+ * management layer, because no callback is registered and no object is live.
+ * ========================================================================== */
+static void test_lifecycle_event_after_deinit_is_inert( void )
+{
+  ( void ) wifi_mgmt_deinit();
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  _lifecycle_build_ready();
+
+  /* A real HAL event reaches management before deinit. */
+  const uint32_t delivered_before = wifi_hal_mock_get_delivered_event_count();
+  wifi_hal_event_data_t evt = { 0 };
+  strncpy( evt.ip_info.ip, "192.168.1.10", sizeof( evt.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt );
+  TEST_ASSERT_GREATER_THAN_MESSAGE( delivered_before,
+                                    wifi_hal_mock_get_delivered_event_count(),
+                                    "pre-deinit injection reaches the callback" );
+
+  /* Deinit drops the HAL callback and releases every management object. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit succeeds" );
+  wifi_hal_mock_lifecycle_t hl = { 0 };
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &hl ) );
+  TEST_ASSERT_FALSE_MESSAGE( hl.event_cb_registered,
+                             "HAL callback registration dropped after deinit" );
+  TEST_ASSERT_FALSE_MESSAGE( hl.user_data_registered,
+                             "HAL user data dropped after deinit" );
+  _lifecycle_assert_empty( "module uninitialized after deinit" );
+
+  /* Post-deinit injections cannot call management (delivery counter frozen). */
+  const uint32_t after_deinit = wifi_hal_mock_get_delivered_event_count();
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_DISCONNECTED, NULL );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_SCAN_DONE, NULL );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( after_deinit,
+                                    wifi_hal_mock_get_delivered_event_count(),
+                                    "post-deinit injections reach no callback" );
+}
+
+/* ============================================================================
+ * Typed and legacy registrations do not survive reinit.
+ *
+ * Module #1 takes a legacy connect callback and a typed CONNECTED subscription
+ * and both demonstrably fire.  After deinit + reinit the same legacy callback
+ * and the same typed event recorder must NOT fire during a fresh connect flow,
+ * the typed subscription slot is free again (the identical subscription is
+ * accepted, not rejected as a duplicate), and fresh registrations work.
+ * ========================================================================== */
+static void test_lifecycle_registrations_do_not_survive_reinit( void )
+{
+  ( void ) wifi_mgmt_deinit();
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  /* ---- Module #1: live legacy + typed registrations ---- */
+  _lifecycle_build_ready();
+  _reset_event( &g_lifecycle_typed );
+  g_lifecycle_legacy_fired = false;
+  wifi_mgmt_register_connect_cb( _lifecycle_legacy_cb );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED, _record_event, &g_lifecycle_typed ),
+    "typed subscription registered in module #1" );
+
+  _lifecycle_connect_flow();
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_lifecycle_typed, 3000 ),
+                            "typed CONNECTED fired in module #1" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_for( &g_lifecycle_legacy_fired, 3000 ),
+                            "legacy connect callback fired in module #1" );
+
+  /* ---- Module #2: same boundary, reinitialized ---- */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "module #1 deinitialized" );
+  _lifecycle_build_ready();
+
+  _reset_event( &g_lifecycle_typed );
+  g_lifecycle_legacy_fired = false;
+  _lifecycle_connect_flow();
+  /* Give an erroneous callback a bounded chance to fire; none may. */
+  osal_task_delay_ms( 500 );
+  TEST_ASSERT_FALSE_MESSAGE( g_lifecycle_legacy_fired,
+                             "legacy registration did not survive reinit" );
+  TEST_ASSERT_FALSE_MESSAGE( g_lifecycle_typed.fired,
+                             "typed registration did not survive reinit" );
+
+  /* The identical typed subscription is accepted again: storage was cleared. */
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED, _record_event, &g_lifecycle_typed ),
+    "typed subscription accepted after reinit (slot was cleared)" );
+
+  /* Fresh registrations work: disconnect and re-connect in module #2. */
+  _reset_event( &g_lifecycle_typed );
+  g_lifecycle_legacy_fired = false;
+  wifi_mgmt_register_connect_cb( _lifecycle_legacy_cb );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_disconnect(), "disconnect request accepted" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 3000 ), "module returns to idle" );
+  _lifecycle_connect_flow();
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_lifecycle_typed, 3000 ),
+                            "fresh typed CONNECTED fired in module #2" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_for( &g_lifecycle_legacy_fired, 3000 ),
+                            "fresh legacy connect callback fired in module #2" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "module #2 deinitialized" );
+  _lifecycle_assert_empty( "after module #2 deinit" );
+}
+
+/* ============================================================================
+ * Failed and timed-out deinit retain exactly the resources needed for retry.
+ *
+ * A worker-owned HAL stop error, a worker HAL deinit error, and a deinit whose
+ * stop round times out (worker parked inside a fresh init round) must all make
+ * wifi_mgmt_deinit() return false while keeping the worker and the full
+ * management object mask live.  After the failure is repaired, a serialized
+ * deinit retry releases everything.
+ * ========================================================================== */
+static void test_lifecycle_failed_deinit_retains_objects( void )
+{
+  ( void ) wifi_mgmt_deinit();
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  /* ---- Worker HAL stop error ---- */
+  _lifecycle_build_ready();
+  wifi_hal_mock_set_stop_result( OSAL_ERROR );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_deinit(),
+                             "deinit false when the worker stop errors" );
+  _lifecycle_assert_full( "objects retained after stop-error deinit" );
+
+  wifi_hal_mock_set_stop_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit retry succeeds" );
+  _lifecycle_assert_empty( "all objects released after retry" );
+
+  /* ---- Worker HAL deinit error ---- */
+  _lifecycle_build_ready();
+  wifi_hal_mock_set_deinit_result( OSAL_ERROR );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_deinit(),
+                             "deinit false when the worker HAL deinit errors" );
+  _lifecycle_assert_full( "objects retained after HAL-deinit-error deinit" );
+
+  wifi_hal_mock_set_deinit_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit retry succeeds" );
+  _lifecycle_assert_empty( "all objects released after retry" );
+}
+
+static void test_lifecycle_timed_out_deinit_retains_objects( void )
+{
+  ( void ) wifi_mgmt_deinit();
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  _lifecycle_build_ready();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop to a clean DISABLE boundary" );
+
+  wifi_hal_mock_lifecycle_t before = { 0 };
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+
+  /* Park a fresh init round so the worker cannot service the stop request that
+   * deinit issues first; that stop exhausts its wall-clock budget and deinit
+   * must return false with every object retained. */
+  wifi_hal_mock_set_init_hold( true );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_init_entered_level( before.init_count + 1, 3000 ),
+    "worker parked inside the fresh wifi_hal_init round" );
+
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_deinit(),
+                             "deinit stop round times out while init is parked" );
+  _lifecycle_assert_full( "objects retained after timed-out deinit" );
+
+  /* Repair: release the parked init; the pending stop round completes. */
+  wifi_hal_mock_set_init_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_entered_level( before.stop_count + 1, 5000 ),
+    "pending stop reaches the worker after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_completed_level( before.stop_count + 1, 5000 ),
+    "pending stop completed after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_entered_level( before.deinit_count + 1, 5000 ),
+    "pending worker deinit entered after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 1, 5000 ),
+    "pending worker deinit completed after init release" );
+
+  /* A serialized deinit retry releases everything. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit retry succeeds" );
+  _lifecycle_assert_empty( "all objects released after timed-out deinit retry" );
+}
 
 /* ============================================================================
  * Runner
@@ -1526,6 +1868,18 @@ void wifi_mgmt_tests_run( void )
   /* --- One-time stop --- */
   wifi_mgmt_stop();
   osal_task_delay_ms( 300 );
+
+  /* --- TASK-135C: deterministic lifecycle regression (isolated lifetimes) ---
+   * Each lifecycle test deinitializes the single-lifecycle module above and
+   * runs its own full init/stop/deinit lifetimes from a clean boundary, so it
+   * never races the state-machine tests.  They leave the module either cleanly
+   * deinitialized or stopped; the deinit test target re-establishes its own
+   * baseline. */
+  RUN_TEST( test_lifecycle_repeated_cycles );
+  RUN_TEST( test_lifecycle_event_after_deinit_is_inert );
+  RUN_TEST( test_lifecycle_registrations_do_not_survive_reinit );
+  RUN_TEST( test_lifecycle_failed_deinit_retains_objects );
+  RUN_TEST( test_lifecycle_timed_out_deinit_retains_objects );
 
   cleanup_fs();
 }

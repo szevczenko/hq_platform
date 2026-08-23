@@ -177,6 +177,15 @@ typedef struct
  * true is returned.  This API never returns the mutable global address. */
 bool wifi_hal_mock_get_lifecycle( wifi_hal_mock_lifecycle_t* out );
 
+/* Number of HAL events actually delivered through a registered callback.
+ *
+ * The counter is incremented synchronously by wifi_hal_mock_inject_event() on
+ * the caller's thread whenever a callback is present, so it is observable
+ * immediately after inject_event returns.  The TASK-135C lifecycle tests use it
+ * to prove that an event injected after a successful deinit cannot reach the
+ * management layer (the HAL callback is dropped during deinit). */
+uint32_t wifi_hal_mock_get_delivered_event_count( void );
+
 /* Get read-only pointer to internal mock state for assertions. */
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void );
 

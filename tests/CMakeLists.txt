@@ -67,7 +67,13 @@ if(NOT ESP_PLATFORM)
     )
   endif()
 
-  target_compile_definitions(wifi_tests PRIVATE OSAL_TESTS_AGGREGATE)
+  # WIFI_MGMT_TEST_OBSERVABILITY enables the test-only lifecycle snapshot API
+  # (TASK-135C) inside wifi_managment.c/h.  It is defined only for this test
+  # target; production builds and the other Wi-Fi test targets never define it.
+  target_compile_definitions(wifi_tests PRIVATE
+    OSAL_TESTS_AGGREGATE
+    WIFI_MGMT_TEST_OBSERVABILITY
+  )
 
   target_link_libraries(wifi_tests
     hq_osal

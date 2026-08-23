@@ -450,4 +450,73 @@ bool wifi_mgmt_get_ip_info( wifi_mgmt_ip_info_t* info );
  */
 bool wifi_mgmt_get_access_points( wifi_mgmt_ap_list_t* list );
 
+/* ----------------------------------------------------------------------------
+ * Test-only lifecycle observability (TASK-135C).
+ *
+ * Declared/defined exclusively behind WIFI_MGMT_TEST_OBSERVABILITY.  A normal
+ * production build never defines this macro, so none of the symbols in this
+ * section is present in it; this is not a production public diagnostic API.
+ * It exists only for the deterministic Wi-Fi lifecycle regression tests, which
+ * observe the live worker count, the lifecycle generation, and a management
+ * object mask/counters without comparing allocator handle values.
+ * ------------------------------------------------------------------------- */
+#ifdef WIFI_MGMT_TEST_OBSERVABILITY
+
+#define WIFI_MGMT_TEST_OBJ_IP_SEM      (1u << 0)
+#define WIFI_MGMT_TEST_OBJ_SCAN_SEM    (1u << 1)
+#define WIFI_MGMT_TEST_OBJ_READY_SEM   (1u << 2)
+#define WIFI_MGMT_TEST_OBJ_STOP_SEM    (1u << 3)
+#define WIFI_MGMT_TEST_OBJ_QUIT_SEM    (1u << 4)
+#define WIFI_MGMT_TEST_OBJ_EVENT_MUTEX (1u << 5)
+#define WIFI_MGMT_TEST_OBJ_STATE_MUTEX (1u << 6)
+#define WIFI_MGMT_TEST_OBJ_WORKER_TASK (1u << 7)
+
+/** Mask with every success-critical synchronization object. */
+#define WIFI_MGMT_TEST_OBJ_SYNC_MASK ( WIFI_MGMT_TEST_OBJ_IP_SEM      | \
+                                       WIFI_MGMT_TEST_OBJ_SCAN_SEM     | \
+                                       WIFI_MGMT_TEST_OBJ_READY_SEM    | \
+                                       WIFI_MGMT_TEST_OBJ_STOP_SEM     | \
+                                       WIFI_MGMT_TEST_OBJ_QUIT_SEM     | \
+                                       WIFI_MGMT_TEST_OBJ_EVENT_MUTEX  | \
+                                       WIFI_MGMT_TEST_OBJ_STATE_MUTEX )
+
+/** Mask of every live object including the worker task. */
+#define WIFI_MGMT_TEST_OBJ_ALL_MASK  ( WIFI_MGMT_TEST_OBJ_SYNC_MASK | \
+                                       WIFI_MGMT_TEST_OBJ_WORKER_TASK )
+
+/** The number of live objects reported by a fully-initialized module. */
+#define WIFI_MGMT_TEST_OBJ_ALL_COUNT 8U
+
+/**
+ * @brief   Test-only synchronized lifecycle snapshot (TASK-135C).
+ *
+ * @details Exposes the live worker count (0 or one), the lifecycle generation
+ *          (unchanged across stop/start, new after a reinit), and a management
+ *          object mask/count.  It never returns or compares allocator handle
+ *          values; a pristine (never initialized) module reports zero worker,
+ *          zero mask and zero count.
+ */
+typedef struct
+{
+  uint32_t lifecycle_generation; /**< Incremented by each successful init. */
+  uint32_t worker_live;          /**< 1 when the Wi-Fi worker task exists. */
+  uint32_t objects_mask;         /**< Bitmask of live management objects.  */
+  uint32_t object_count;         /**< Number of live management objects.   */
+} wifi_mgmt_test_snapshot_t;
+
+/**
+ * @brief   Copy a synchronized test-only lifecycle snapshot.
+ *
+ * @details The destination is zeroed first.  Lifecycle fields are read under
+ *          the state lock while the module is initialized; when the module is
+ *          uninitialized (no state mutex exists) the snapshot holds the
+ *          pristine zero/worker-less values without touching a released handle.
+ *
+ * @param   [out] out - destination for the snapshot
+ * @return  true on success, false when @p out is NULL.
+ */
+bool wifi_mgmt_test_snapshot( wifi_mgmt_test_snapshot_t* out );
+
+#endif /* WIFI_MGMT_TEST_OBSERVABILITY */
+
 #endif
