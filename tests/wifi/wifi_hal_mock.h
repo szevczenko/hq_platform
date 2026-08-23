@@ -22,7 +22,8 @@ typedef struct
   uint32_t              init_count;   /**< Number of wifi_hal_init calls.   */
   uint32_t              deinit_count; /**< Number of wifi_hal_deinit calls. */
 
-  uint32_t              scan_start_count; /**< Number of wifi_hal_start_scan calls. */
+  uint32_t              scan_start_count; /**< Number of wifi_hal_start_scan calls.        */
+  uint32_t              connect_count;     /**< Number of wifi_hal_connect calls (entered gen). */
 
   wifi_hal_sta_config_t sta_cfg;
   wifi_hal_ap_config_t  ap_cfg;
@@ -46,10 +47,11 @@ typedef struct
  *
  * This is a fixture-owner operation and must not race another mock control or
  * wait API.  It returns false, without changing state or consuming tokens,
- * while any init, stop, or deinit invocation is active or parked.  A
- * successful reset clears state and drains all existing lifecycle
+ * while any init, stop, or deinit invocation, or any held connect/mode-start
+ * round, is active or parked.  A successful reset clears state and drains all
+ * existing lifecycle, connection, mode-start, GOT_IP, and SCAN_DONE
  * notification/release tokens while holding the mock mutex, before allowing
- * any later lifecycle entry to publish a token.
+ * any later entry to publish a token.
  */
 bool wifi_hal_mock_reset( void );
 
@@ -186,7 +188,73 @@ bool wifi_hal_mock_get_lifecycle( wifi_hal_mock_lifecycle_t* out );
  * management layer (the HAL callback is dropped during deinit). */
 uint32_t wifi_hal_mock_get_delivered_event_count( void );
 
-/* Get read-only pointer to internal mock state for assertions. */
-const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void );
+/* Full synchronized state snapshot.
+ *
+ * Copies the complete mock state (@p sta_cfg, @p ap_cfg, DNS fields, scan
+ * records, IP information, power-save state, every counter, mode, connection
+ * state, configured results, and the registered callback/user-data pointers)
+ * into @p out.  For any non-NULL @p out the entire destination is zeroed before
+ * the mock mutex is taken; on lock failure the (zeroed) destination is left
+ * untouched and false is returned.  On success the fields are copied under the
+ * mock mutex, so a reader never races a worker, and true is returned.  This API
+ * never returns the mutable global address, so no caller can hold a pointer
+ * into the internal state while a worker writes it. */
+bool wifi_hal_mock_get_state( wifi_hal_mock_state_t* out );
+
+/* Connection, mode-start, GOT_IP, and SCAN_DONE notification channels.
+ *
+ * Each channel advances an attempt/delivery generation counter and publishes a
+ * binary-semaphore token as a wake hint only.  The generation-checked waits
+ * below follow the same contract as the lifecycle waits: they first inspect the
+ * counter under the mock mutex, treat every semaphore success (including a
+ * stale one from an earlier round) as a hint, re-check the counter, and charge
+ * the elapsed wall-clock time against one wrap-safe timeout budget.  A stale
+ * token can therefore never satisfy a wait for a later generation. */
+
+/* Connect-call channel: wifi_hal_connect() entry (attempt) and completion
+ * (result applied).  The entered generation is the attempt counter exposed as
+ * g_mock.connect_count / get_connect_call_count(). */
+uint32_t wifi_hal_mock_get_connect_call_count( void );
+uint32_t wifi_hal_mock_get_connect_completed_count( void );
+bool wifi_hal_mock_wait_connect_call_level( uint32_t level, uint32_t timeout_ms );
+bool wifi_hal_mock_wait_connect_completed_level( uint32_t level, uint32_t timeout_ms );
+
+/* Per-invocation connect hold, same contract as the init hold: the hold
+ * decision is captured at the invocation's entry; release_connect_hold()
+ * releases exactly one already-parked wifi_hal_connect() without touching the
+ * hold, and set_connect_hold(false) disables the hold and releases the
+ * currently parked invocation (if any). */
+void wifi_hal_mock_set_connect_hold( bool hold );
+void wifi_hal_mock_release_connect_hold( void );
+
+/* Mode-start channel: wifi_hal_start() entry (attempt) and completion (mode
+ * applied).  The entered generation is g_mock.start_count. */
+uint32_t wifi_hal_mock_get_start_entered_count( void );
+uint32_t wifi_hal_mock_get_start_completed_count( void );
+bool wifi_hal_mock_wait_start_entered_level( uint32_t level, uint32_t timeout_ms );
+bool wifi_hal_mock_wait_start_completed_level( uint32_t level, uint32_t timeout_ms );
+
+/* Per-invocation mode-start hold, same contract as the connect hold above. */
+void wifi_hal_mock_set_start_hold( bool hold );
+void wifi_hal_mock_release_start_hold( void );
+
+/* GOT_IP delivery channel: increments when WIFI_HAL_EVT_STA_GOT_IP is actually
+ * delivered through a registered callback (by inject_event). */
+uint32_t wifi_hal_mock_get_got_ip_delivered_count( void );
+bool wifi_hal_mock_wait_got_ip_delivered_level( uint32_t level, uint32_t timeout_ms );
+
+/* When @p hold is true, inject_event(WIFI_HAL_EVT_STA_GOT_IP) is withheld: the
+ * callback is not invoked and the GOT_IP delivery generation is not advanced.
+ * Clearing the hold does not retroactively deliver; the test re-injects to
+ * complete delivery.  Mirrors the scan_done hold contract. */
+void wifi_hal_mock_set_got_ip_hold( bool hold );
+
+/* SCAN_DONE delivery channel: increments whenever WIFI_HAL_EVT_SCAN_DONE is
+ * actually delivered through a registered callback — either the automatic
+ * completion fired by wifi_hal_start_scan() or an inject_event(SCAN_DONE).  The
+ * scan_done hold (wifi_hal_mock_set_scan_done_hold) suppresses the automatic
+ * completion so tests can complete the scan manually. */
+uint32_t wifi_hal_mock_get_scan_done_delivered_count( void );
+bool wifi_hal_mock_wait_scan_done_delivered_level( uint32_t level, uint32_t timeout_ms );
 
 #endif

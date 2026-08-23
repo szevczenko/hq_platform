@@ -72,6 +72,42 @@ static uint32_t g_deinit_completed_gen = 0;
  * the management layer (the callback is dropped during HAL deinit). */
 static uint32_t g_delivered_events = 0;
 
+/* Connection-call channel (wifi_hal_connect).  The entered generation is the
+ * attempt counter held in g_mock.connect_count; the completed generation is
+ * advanced once the configured result and connected state are final.  The
+ * hold/park handshake mirrors the init round so a reset can never clear or
+ * drain the round belonging to a live connect call. */
+static bool              g_hold_connect           = false;
+static bool              g_connect_active         = false;
+static bool              g_connect_parked         = false;
+static bool              g_connect_release_granted = false;
+static uint32_t          g_connect_completed_gen  = 0;
+static osal_bin_sem_id_t g_connect_call_sem       = NULL;
+static osal_bin_sem_id_t g_connect_completed_sem  = NULL;
+static osal_bin_sem_id_t g_connect_release_sem    = NULL;
+
+/* Mode-start channel (wifi_hal_start).  The entered generation is the attempt
+ * counter held in g_mock.start_count; the completed generation is advanced once
+ * the mode/result are final.  Hold/park handshake mirrors the init round. */
+static bool              g_hold_start             = false;
+static bool              g_start_active           = false;
+static bool              g_start_parked           = false;
+static bool              g_start_release_granted  = false;
+static uint32_t          g_start_completed_gen    = 0;
+static osal_bin_sem_id_t g_start_entered_sem      = NULL;
+static osal_bin_sem_id_t g_start_completed_sem    = NULL;
+static osal_bin_sem_id_t g_start_release_sem      = NULL;
+
+/* GOT_IP and SCAN_DONE delivery channels.  The generation is advanced while
+ * the delivery decision is final (under the mock mutex) whenever the event is
+ * actually delivered through a registered callback.  g_hold_got_ip withholds
+ * injected GOT_IP deliveries (mirrors the scan_done hold). */
+static uint32_t          g_got_ip_delivered_gen   = 0;
+static uint32_t          g_scan_done_delivered_gen = 0;
+static bool              g_hold_got_ip            = false;
+static osal_bin_sem_id_t g_got_ip_sem             = NULL;
+static osal_bin_sem_id_t g_scan_done_sem          = NULL;
+
 /* ---- mock control API ---------------------------------------------------- */
 
 static bool _bootstrap_sem( osal_bin_sem_id_t* sem, const char* name )
@@ -110,7 +146,15 @@ static bool _mock_bootstrap( void )
        !_bootstrap_sem( &g_stop_completed_sem,   "wifi_mock_stop_completed" ) ||
        !_bootstrap_sem( &g_deinit_entered_sem,   "wifi_mock_deinit_entered" ) ||
        !_bootstrap_sem( &g_deinit_completed_sem, "wifi_mock_deinit_completed" ) ||
-       !_bootstrap_sem( &g_deinit_release_sem,   "wifi_mock_deinit_release" ) )
+       !_bootstrap_sem( &g_deinit_release_sem,   "wifi_mock_deinit_release" ) ||
+       !_bootstrap_sem( &g_connect_call_sem,     "wifi_mock_connect_call" ) ||
+       !_bootstrap_sem( &g_connect_completed_sem, "wifi_mock_connect_completed" ) ||
+       !_bootstrap_sem( &g_connect_release_sem,  "wifi_mock_connect_release" ) ||
+       !_bootstrap_sem( &g_start_entered_sem,    "wifi_mock_start_entered" ) ||
+       !_bootstrap_sem( &g_start_completed_sem,  "wifi_mock_start_completed" ) ||
+       !_bootstrap_sem( &g_start_release_sem,    "wifi_mock_start_release" ) ||
+       !_bootstrap_sem( &g_got_ip_sem,           "wifi_mock_got_ip" ) ||
+       !_bootstrap_sem( &g_scan_done_sem,        "wifi_mock_scan_done" ) )
   {
     (void) osal_bin_sem_delete( g_init_entered_sem );
     (void) osal_bin_sem_delete( g_init_completed_sem );
@@ -120,6 +164,14 @@ static bool _mock_bootstrap( void )
     (void) osal_bin_sem_delete( g_deinit_entered_sem );
     (void) osal_bin_sem_delete( g_deinit_completed_sem );
     (void) osal_bin_sem_delete( g_deinit_release_sem );
+    (void) osal_bin_sem_delete( g_connect_call_sem );
+    (void) osal_bin_sem_delete( g_connect_completed_sem );
+    (void) osal_bin_sem_delete( g_connect_release_sem );
+    (void) osal_bin_sem_delete( g_start_entered_sem );
+    (void) osal_bin_sem_delete( g_start_completed_sem );
+    (void) osal_bin_sem_delete( g_start_release_sem );
+    (void) osal_bin_sem_delete( g_got_ip_sem );
+    (void) osal_bin_sem_delete( g_scan_done_sem );
     g_init_entered_sem = NULL;
     g_init_completed_sem = NULL;
     g_init_release_sem = NULL;
@@ -128,6 +180,14 @@ static bool _mock_bootstrap( void )
     g_deinit_entered_sem = NULL;
     g_deinit_completed_sem = NULL;
     g_deinit_release_sem = NULL;
+    g_connect_call_sem = NULL;
+    g_connect_completed_sem = NULL;
+    g_connect_release_sem = NULL;
+    g_start_entered_sem = NULL;
+    g_start_completed_sem = NULL;
+    g_start_release_sem = NULL;
+    g_got_ip_sem = NULL;
+    g_scan_done_sem = NULL;
     (void) osal_mutex_delete( g_mock_mutex );
     g_mock_mutex = NULL;
     return false;
@@ -162,9 +222,11 @@ bool wifi_hal_mock_reset( void )
     return false;
   }
 
-  /* Reset is rejected while any lifecycle invocation is active or parked,
-   * so it can never clear or drain the round belonging to a live call. */
-  if ( g_init_active || g_stop_active || g_deinit_active )
+  /* Reset is rejected while any lifecycle invocation or held connect/start
+   * round is active or parked, so it can never clear or drain the round
+   * belonging to a live call. */
+  if ( g_init_active || g_stop_active || g_deinit_active ||
+       g_connect_active || g_start_active )
   {
     _mock_unlock();
     return false;
@@ -174,6 +236,9 @@ bool wifi_hal_mock_reset( void )
   g_hold_scan_done         = false;
   g_hold_init              = false;
   g_hold_deinit            = false;
+  g_hold_connect           = false;
+  g_hold_start             = false;
+  g_hold_got_ip            = false;
   g_init_result            = OSAL_SUCCESS;
   g_stop_result            = OSAL_SUCCESS;
   g_deinit_result          = OSAL_SUCCESS;
@@ -183,10 +248,18 @@ bool wifi_hal_mock_reset( void )
   g_init_completed_gen     = 0;
   g_stop_completed_gen     = 0;
   g_deinit_completed_gen   = 0;
+  g_connect_completed_gen  = 0;
+  g_start_completed_gen    = 0;
+  g_got_ip_delivered_gen   = 0;
+  g_scan_done_delivered_gen = 0;
   g_init_parked            = false;
   g_init_release_granted   = false;
   g_deinit_parked          = false;
   g_deinit_release_granted = false;
+  g_connect_parked         = false;
+  g_connect_release_granted = false;
+  g_start_parked           = false;
+  g_start_release_granted  = false;
 
   /* Keep the mutex through all drains.  A later lifecycle invocation therefore
    * cannot publish a token until every token from this round has been removed. */
@@ -198,6 +271,14 @@ bool wifi_hal_mock_reset( void )
   _drain( g_deinit_entered_sem );
   _drain( g_deinit_completed_sem );
   _drain( g_deinit_release_sem );
+  _drain( g_connect_call_sem );
+  _drain( g_connect_completed_sem );
+  _drain( g_connect_release_sem );
+  _drain( g_start_entered_sem );
+  _drain( g_start_completed_sem );
+  _drain( g_start_release_sem );
+  _drain( g_got_ip_sem );
+  _drain( g_scan_done_sem );
   _mock_unlock();
   return true;
 }
@@ -254,44 +335,76 @@ void wifi_hal_mock_set_scan_list( const wifi_hal_ap_record_t* list, uint16_t cou
     count = WIFI_HAL_MOCK_MAX_AP;
   }
 
+  if ( !_mock_lock() )
+  {
+    return;
+  }
   g_mock.scan_count = count;
   if ( list && count > 0 )
   {
     memcpy( g_mock.scan_list, list, count * sizeof( wifi_hal_ap_record_t ) );
   }
+  _mock_unlock();
 }
 
 void wifi_hal_mock_set_ip_info( const wifi_hal_ip_info_t* info )
 {
-  if ( info )
+  if ( !info || !_mock_lock() )
   {
-    g_mock.ip_info = *info;
+    return;
   }
+  g_mock.ip_info = *info;
+  _mock_unlock();
 }
 
 void wifi_hal_mock_inject_event( wifi_hal_event_t event, const wifi_hal_event_data_t* data )
 {
   wifi_hal_event_cb_t cb;
   void*               user_data;
+  bool                deliver = false;
 
   /* Copy the callback/user data under the mock mutex, release the mutex, then
    * invoke so no mock lock is held during delivery (a re-entrant callback that
    * re-enters a mock control API therefore cannot deadlock).  The delivery
    * counter is updated under the same lock, so it is observable immediately
-   * after inject_event returns and proves whether a callback was reached. */
+   * after inject_event returns and proves whether a callback was reached.  The
+   * GOT_IP/SCAN_DONE delivery generations are advanced in the same locked
+   * transaction, so a delivery waiter can never observe a generation without
+   * the matching delivery. */
   if ( !_mock_lock() )
   {
     return;
   }
   cb        = g_mock.event_cb;
   user_data = g_mock.user_data;
-  if ( cb )
+  if ( cb != NULL )
   {
-    ++g_delivered_events;
+    /* The GOT_IP hold withholds injected GOT_IP deliveries (mirrors the scan
+     * done hold): the callback is not invoked and no delivery generation is
+     * advanced while held.  Clearing the hold does not retroactively deliver. */
+    if ( event == WIFI_HAL_EVT_STA_GOT_IP && g_hold_got_ip )
+    {
+      cb = NULL;
+    }
+    else
+    {
+      ++g_delivered_events;
+      deliver = true;
+      if ( event == WIFI_HAL_EVT_STA_GOT_IP )
+      {
+        ++g_got_ip_delivered_gen;
+        (void) osal_bin_sem_give( g_got_ip_sem );
+      }
+      else if ( event == WIFI_HAL_EVT_SCAN_DONE )
+      {
+        ++g_scan_done_delivered_gen;
+        (void) osal_bin_sem_give( g_scan_done_sem );
+      }
+    }
   }
   _mock_unlock();
 
-  if ( cb )
+  if ( deliver && cb != NULL )
   {
     cb( event, data, user_data );
   }
@@ -299,7 +412,11 @@ void wifi_hal_mock_inject_event( wifi_hal_event_t event, const wifi_hal_event_da
 
 void wifi_hal_mock_set_scan_done_hold( bool hold )
 {
-  g_hold_scan_done = hold;
+  if ( _mock_lock() )
+  {
+    g_hold_scan_done = hold;
+    _mock_unlock();
+  }
 }
 
 void wifi_hal_mock_set_init_hold( bool hold )
@@ -384,6 +501,89 @@ void wifi_hal_mock_release_deinit_hold( void )
     }
   }
   _mock_unlock();
+}
+
+void wifi_hal_mock_set_connect_hold( bool hold )
+{
+  if ( !_mock_lock() )
+  {
+    return;
+  }
+
+  g_hold_connect = hold;
+  if ( !hold && g_connect_parked && !g_connect_release_granted )
+  {
+    g_connect_release_granted = true;
+    if ( osal_bin_sem_give( g_connect_release_sem ) != OSAL_SUCCESS )
+    {
+      g_connect_release_granted = false;
+    }
+  }
+  _mock_unlock();
+}
+
+void wifi_hal_mock_release_connect_hold( void )
+{
+  if ( !_mock_lock() )
+  {
+    return;
+  }
+
+  if ( g_connect_parked && !g_connect_release_granted )
+  {
+    g_connect_release_granted = true;
+    if ( osal_bin_sem_give( g_connect_release_sem ) != OSAL_SUCCESS )
+    {
+      g_connect_release_granted = false;
+    }
+  }
+  _mock_unlock();
+}
+
+void wifi_hal_mock_set_start_hold( bool hold )
+{
+  if ( !_mock_lock() )
+  {
+    return;
+  }
+
+  g_hold_start = hold;
+  if ( !hold && g_start_parked && !g_start_release_granted )
+  {
+    g_start_release_granted = true;
+    if ( osal_bin_sem_give( g_start_release_sem ) != OSAL_SUCCESS )
+    {
+      g_start_release_granted = false;
+    }
+  }
+  _mock_unlock();
+}
+
+void wifi_hal_mock_release_start_hold( void )
+{
+  if ( !_mock_lock() )
+  {
+    return;
+  }
+
+  if ( g_start_parked && !g_start_release_granted )
+  {
+    g_start_release_granted = true;
+    if ( osal_bin_sem_give( g_start_release_sem ) != OSAL_SUCCESS )
+    {
+      g_start_release_granted = false;
+    }
+  }
+  _mock_unlock();
+}
+
+void wifi_hal_mock_set_got_ip_hold( bool hold )
+{
+  if ( _mock_lock() )
+  {
+    g_hold_got_ip = hold;
+    _mock_unlock();
+  }
 }
 
 bool wifi_hal_mock_wait_init_entered( uint32_t timeout_ms )
@@ -542,6 +742,36 @@ bool wifi_hal_mock_wait_deinit_completed_level( uint32_t level, uint32_t timeout
   return _wait_generation( &g_deinit_completed_gen, g_deinit_completed_sem, level, timeout_ms );
 }
 
+bool wifi_hal_mock_wait_connect_call_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_mock.connect_count, g_connect_call_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_connect_completed_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_connect_completed_gen, g_connect_completed_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_start_entered_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_mock.start_count, g_start_entered_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_start_completed_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_start_completed_gen, g_start_completed_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_got_ip_delivered_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_got_ip_delivered_gen, g_got_ip_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_scan_done_delivered_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_scan_done_delivered_gen, g_scan_done_sem, level, timeout_ms );
+}
+
 bool wifi_hal_mock_get_lifecycle( wifi_hal_mock_lifecycle_t* out )
 {
   if ( out != NULL )
@@ -590,9 +820,57 @@ uint32_t wifi_hal_mock_get_delivered_event_count( void )
   return count;
 }
 
-const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void )
+uint32_t wifi_hal_mock_get_connect_call_count( void )
 {
-  return &g_mock;
+  return _read_counter( &g_mock.connect_count );
+}
+
+uint32_t wifi_hal_mock_get_connect_completed_count( void )
+{
+  return _read_counter( &g_connect_completed_gen );
+}
+
+uint32_t wifi_hal_mock_get_start_entered_count( void )
+{
+  return _read_counter( &g_mock.start_count );
+}
+
+uint32_t wifi_hal_mock_get_start_completed_count( void )
+{
+  return _read_counter( &g_start_completed_gen );
+}
+
+uint32_t wifi_hal_mock_get_got_ip_delivered_count( void )
+{
+  return _read_counter( &g_got_ip_delivered_gen );
+}
+
+uint32_t wifi_hal_mock_get_scan_done_delivered_count( void )
+{
+  return _read_counter( &g_scan_done_delivered_gen );
+}
+
+bool wifi_hal_mock_get_state( wifi_hal_mock_state_t* out )
+{
+  if ( out != NULL )
+  {
+    /* Zero the whole destination before taking the lock so a failed copy is
+     * never mistaken for a valid snapshot and no stale field survives. */
+    memset( out, 0, sizeof( *out ) );
+  }
+
+  if ( !_mock_lock() )
+  {
+    return false;
+  }
+
+  if ( out != NULL )
+  {
+    *out = g_mock;
+  }
+
+  _mock_unlock();
+  return true;
 }
 
 /* ---- HAL implementation -------------------------------------------------- */
@@ -796,16 +1074,51 @@ osal_status_t wifi_hal_deinit( void )
 
 osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
 {
+  bool          hold;
   osal_status_t result;
 
   if ( !g_mock_ready || !_mock_lock() )
   {
     return OSAL_ERROR;
   }
+
+  /* Entry, active state, visible mode/attempt counter, and entered
+   * acknowledgement are one transaction, exactly like the lifecycle rounds. */
+  g_start_active = true;
   g_mock.mode       = mode;
   g_mock.start_count++;
-  result            = g_mock.start_result;
-  g_mock.started    = ( result == OSAL_SUCCESS );
+  hold = g_hold_start;
+  if ( hold )
+  {
+    g_start_parked          = true;
+    g_start_release_granted = false;
+  }
+  (void) osal_bin_sem_give( g_start_entered_sem );
+  _mock_unlock();
+
+  if ( hold )
+  {
+    /* The mutex is deliberately not held while the invocation blocks. */
+    (void) osal_bin_sem_take( g_start_release_sem );
+
+    if ( !_mock_lock() )
+    {
+      return OSAL_ERROR;
+    }
+    g_start_parked          = false;
+    g_start_release_granted = false;
+    _mock_unlock();
+  }
+
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
+  result         = g_mock.start_result;
+  g_mock.started = ( result == OSAL_SUCCESS );
+  g_start_completed_gen++;
+  (void) osal_bin_sem_give( g_start_completed_sem );
+  g_start_active = false;
   _mock_unlock();
   return result;
 }
@@ -853,7 +1166,12 @@ osal_status_t wifi_hal_set_sta_config( const wifi_hal_sta_config_t* config )
     return OSAL_INVALID_POINTER;
   }
 
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
   g_mock.sta_cfg = *config;
+  _mock_unlock();
   return OSAL_SUCCESS;
 }
 
@@ -864,14 +1182,54 @@ osal_status_t wifi_hal_set_ap_config( const wifi_hal_ap_config_t* config )
     return OSAL_INVALID_POINTER;
   }
 
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
   g_mock.ap_cfg = *config;
+  _mock_unlock();
   return OSAL_SUCCESS;
 }
 
 osal_status_t wifi_hal_connect( void )
 {
+  bool          hold;
   osal_status_t result;
 
+  if ( !g_mock_ready || !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
+
+  /* Entry, active state, visible attempt counter, and the entered
+   * acknowledgement are one transaction (mirrors the lifecycle rounds). */
+  g_connect_active = true;
+  g_mock.connect_count++;
+  hold = g_hold_connect;
+  if ( hold )
+  {
+    g_connect_parked          = true;
+    g_connect_release_granted = false;
+  }
+  (void) osal_bin_sem_give( g_connect_call_sem );
+  _mock_unlock();
+
+  if ( hold )
+  {
+    /* The mutex is deliberately not held while the invocation blocks. */
+    (void) osal_bin_sem_take( g_connect_release_sem );
+
+    if ( !_mock_lock() )
+    {
+      return OSAL_ERROR;
+    }
+    g_connect_parked          = false;
+    g_connect_release_granted = false;
+    _mock_unlock();
+  }
+
+  /* Apply the configured result and publish the completed generation while
+   * still marked active so a waiter can never observe a partial generation. */
   if ( !_mock_lock() )
   {
     return OSAL_ERROR;
@@ -881,6 +1239,9 @@ osal_status_t wifi_hal_connect( void )
   {
     g_mock.connected = true;
   }
+  g_connect_completed_gen++;
+  (void) osal_bin_sem_give( g_connect_completed_sem );
+  g_connect_active = false;
   _mock_unlock();
   return result;
 }
@@ -900,6 +1261,7 @@ osal_status_t wifi_hal_start_scan( bool block )
 {
   wifi_hal_event_cb_t cb;
   void*               user_data;
+  bool                fire_scan_done = false;
 
   (void) block;
 
@@ -912,7 +1274,12 @@ osal_status_t wifi_hal_start_scan( bool block )
      delivering so no mock lock is held during invocation. */
   cb                 = g_mock.event_cb;
   user_data          = g_mock.user_data;
-  bool fire_scan_done = ( cb != NULL ) && !g_hold_scan_done;
+  if ( cb != NULL && !g_hold_scan_done )
+  {
+    fire_scan_done = true;
+    ++g_scan_done_delivered_gen;
+    (void) osal_bin_sem_give( g_scan_done_sem );
+  }
   _mock_unlock();
 
   if ( fire_scan_done )
@@ -930,6 +1297,11 @@ osal_status_t wifi_hal_get_scanned_ap( wifi_hal_ap_record_t* records, uint16_t* 
     return OSAL_INVALID_POINTER;
   }
 
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
+
   uint16_t to_copy = g_mock.scan_count;
   if ( to_copy > *in_out_count )
   {
@@ -938,6 +1310,7 @@ osal_status_t wifi_hal_get_scanned_ap( wifi_hal_ap_record_t* records, uint16_t* 
 
   memcpy( records, g_mock.scan_list, to_copy * sizeof( wifi_hal_ap_record_t ) );
   *in_out_count = to_copy;
+  _mock_unlock();
   return OSAL_SUCCESS;
 }
 
@@ -948,7 +1321,12 @@ osal_status_t wifi_hal_get_sta_ip_info( wifi_hal_ip_info_t* out_info )
     return OSAL_INVALID_POINTER;
   }
 
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
   *out_info = g_mock.ip_info;
+  _mock_unlock();
   return OSAL_SUCCESS;
 }
 
@@ -965,7 +1343,12 @@ osal_status_t wifi_hal_get_sta_rssi( int* out_rssi )
 
 osal_status_t wifi_hal_set_power_save( bool enabled )
 {
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
   g_mock.power_save = enabled;
+  _mock_unlock();
   return OSAL_SUCCESS;
 }
 

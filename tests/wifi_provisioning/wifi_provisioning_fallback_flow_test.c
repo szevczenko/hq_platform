@@ -412,8 +412,10 @@ static void run_fallback_flow( void )
     ok = false;
     while ( elapsed < 5000 )
     {
+      wifi_hal_mock_state_t mock = { 0 };
+      ( void ) wifi_hal_mock_get_state( &mock );
       if ( wifi_http_provisioning_get_state() == WIFI_PROVISIONING_STOPPED &&
-           wifi_hal_mock_get_state()->mode == WIFI_HAL_MODE_STA )
+           mock.mode == WIFI_HAL_MODE_STA )
       {
         ok = true;
         break;

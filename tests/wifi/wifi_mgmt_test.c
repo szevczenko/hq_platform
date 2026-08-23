@@ -238,6 +238,16 @@ static bool _wait_idle( uint32_t timeout_ms )
   return wifi_mgmt_is_idle();
 }
 
+/* Copy a full synchronized mock state snapshot for assertions.  The TASK-139
+ * snapshot API never returns the mutable global address: it copies the complete
+ * state under the mock mutex, so a tester never holds or retains a pointer into
+ * g_mock while the Wi-Fi worker writes it. */
+static void _snap_mock( wifi_hal_mock_state_t* out )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_state( out ),
+                            "mock state snapshot readable" );
+}
+
 /* ============================================================================
  * TASK-135D  Serialized owner helper
  *
@@ -325,10 +335,11 @@ static void test_wait_ready_held_at_callback_barrier( void )
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
                             "ready once HAL init completes" );
 
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_TRUE_MESSAGE( ms->initialized, "HAL initialized" );
-  TEST_ASSERT_TRUE_MESSAGE( ms->started, "HAL started" );
-  TEST_ASSERT_NOT_NULL_MESSAGE( (void*) ms->event_cb, "HAL callback installed" );
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_TRUE_MESSAGE( ms.initialized, "HAL initialized" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL started" );
+  TEST_ASSERT_NOT_NULL_MESSAGE( (void*) ms.event_cb, "HAL callback installed" );
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(), "running after startup" );
 
   /* Post-ready GOT_IP cannot be lost: the HAL callback is present now. */
@@ -362,9 +373,11 @@ static void test_startup_failure_is_deterministic( void )
                              "not ready after stop" );
 
   /* Sabotage the HAL mode start and trigger a fresh init round. */
-  const uint32_t start_before   = wifi_hal_mock_get_state()->start_count;
-  const uint32_t init_before    = wifi_hal_mock_get_state()->init_count;
-  const uint32_t deinit_before  = wifi_hal_mock_get_state()->deinit_count;
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  const uint32_t start_before  = ms.start_count;
+  const uint32_t init_before   = ms.init_count;
+  const uint32_t deinit_before = ms.deinit_count;
   wifi_hal_mock_set_start_result( OSAL_ERROR );
   wifi_mgmt_start();
 
@@ -372,15 +385,16 @@ static void test_startup_failure_is_deterministic( void )
                              "startup failure reported by wait_ready" );
   TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
                              "not running after failed startup" );
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms->start_count,
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms.start_count,
                              "HAL start attempted exactly once" );
-  TEST_ASSERT_EQUAL_MESSAGE( init_before + 1, ms->init_count,
+  TEST_ASSERT_EQUAL_MESSAGE( init_before + 1, ms.init_count,
                              "HAL init attempted exactly once" );
-  TEST_ASSERT_EQUAL_MESSAGE( deinit_before + 1, ms->deinit_count,
+  TEST_ASSERT_EQUAL_MESSAGE( deinit_before + 1, ms.deinit_count,
                              "HAL deinitialized on the mode-start failure path" );
-  TEST_ASSERT_FALSE_MESSAGE( ms->started, "HAL left stopped after failure" );
-  TEST_ASSERT_FALSE_MESSAGE( ms->initialized,
+  TEST_ASSERT_FALSE_MESSAGE( ms.started, "HAL left stopped after failure" );
+  TEST_ASSERT_FALSE_MESSAGE( ms.initialized,
                              "HAL left deinitialized after failure" );
 
   /* Retry with a healthy HAL: startup completes. */
@@ -407,7 +421,9 @@ static void test_startup_init_failure_is_deterministic( void )
   TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "not running after stop" );
 
   /* Sabotage HAL initialization and trigger a fresh init round. */
-  const uint32_t init_before = wifi_hal_mock_get_state()->init_count;
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  const uint32_t init_before = ms.init_count;
   wifi_hal_mock_set_init_result( OSAL_ERROR );
   wifi_mgmt_start();
 
@@ -415,10 +431,11 @@ static void test_startup_init_failure_is_deterministic( void )
                              "init failure reported by wait_ready" );
   TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
                              "not running after failed init" );
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_EQUAL_MESSAGE( init_before + 1, ms->init_count,
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( init_before + 1, ms.init_count,
                              "HAL init attempted exactly once" );
-  TEST_ASSERT_FALSE_MESSAGE( ms->initialized,
+  TEST_ASSERT_FALSE_MESSAGE( ms.initialized,
                              "HAL left deinitialized after init failure" );
 
   /* Retry with a healthy HAL: startup completes. */
@@ -439,9 +456,10 @@ static void test_init_reaches_idle( void )
   TEST_ASSERT_TRUE_MESSAGE( idle, "state is IDLE after init+start" );
   TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_connected(), "not connected initially" );
 
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_TRUE_MESSAGE( ms->initialized, "HAL was initialized" );
-  TEST_ASSERT_TRUE_MESSAGE( ms->started, "HAL was started" );
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_TRUE_MESSAGE( ms.initialized, "HAL was initialized" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL was started" );
 }
 
 /* ============================================================================
@@ -650,11 +668,14 @@ static void test_power_save( void )
 {
   wifi_mgmt_power_save( true );
 
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_TRUE_MESSAGE( ms->power_save, "power save enabled in HAL" );
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_TRUE_MESSAGE( ms.power_save, "power save enabled in HAL" );
 
   wifi_mgmt_power_save( false );
-  TEST_ASSERT_FALSE_MESSAGE( ms->power_save, "power save disabled in HAL" );
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_FALSE_MESSAGE( ms.power_save, "power save disabled in HAL" );
 }
 
 /* ============================================================================
@@ -1044,8 +1065,10 @@ static void test_request_mode_sta_to_apsta( void )
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLIENT ), "ensure STA mode" );
   TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle in STA mode" );
 
-  const uint32_t start_before = wifi_hal_mock_get_state()->start_count;
-  const uint32_t stop_before  = wifi_hal_mock_get_state()->stop_count;
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  const uint32_t start_before = ms.start_count;
+  const uint32_t stop_before  = ms.stop_count;
 
   _reset_event( &g_ev_mode );
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
@@ -1055,24 +1078,29 @@ static void test_request_mode_sta_to_apsta( void )
   TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_MODE_CHANGED, g_ev_mode.evt,
                                  "mode event type correct" );
 
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_APSTA, (int) ms->mode,
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_APSTA, (int) ms.mode,
                              "HAL in APSTA after transition" );
-  TEST_ASSERT_TRUE_MESSAGE( ms->started, "HAL restarted in APSTA" );
-  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms->start_count,
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL restarted in APSTA" );
+  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms.start_count,
                              "HAL started exactly once for the transition" );
-  TEST_ASSERT_EQUAL_MESSAGE( stop_before + 1, ms->stop_count,
+  TEST_ASSERT_EQUAL_MESSAGE( stop_before + 1, ms.stop_count,
                              "HAL stopped exactly once for the transition" );
 
   /* Repeated request for the current mode is a harmless no-op. */
   _reset_event( &g_ev_mode );
-  const uint32_t start_now = wifi_hal_mock_get_state()->start_count;
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  const uint32_t start_now = ms.start_count;
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
                             "repeat current-mode request accepted" );
   osal_task_delay_ms( 200 );
   TEST_ASSERT_EQUAL_MESSAGE( 0, (int) g_ev_mode.count,
                              "no MODE_CHANGED on repeated current mode" );
-  TEST_ASSERT_EQUAL_MESSAGE( start_now, wifi_hal_mock_get_state()->start_count,
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( start_now, ms.start_count,
                              "no HAL restart on repeated current mode" );
 }
 
@@ -1096,13 +1124,14 @@ static void test_request_mode_apsta_to_sta( void )
   TEST_ASSERT_TRUE_MESSAGE( _wait_mode_for_count( 1, 3000 ),
                             "MODE_CHANGED fired for STA transition" );
 
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_STA, (int) ms->mode,
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_STA, (int) ms.mode,
                              "HAL in STA after transition" );
-  TEST_ASSERT_TRUE_MESSAGE( ms->started, "HAL started in STA" );
-  TEST_ASSERT_EQUAL_STRING_MESSAGE( "KeepAP", ms->sta_cfg.ssid,
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL started in STA" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "KeepAP", ms.sta_cfg.ssid,
                                     "station SSID preserved through mode change" );
-  TEST_ASSERT_EQUAL_STRING_MESSAGE( "KeepPass", ms->sta_cfg.password,
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "KeepPass", ms.sta_cfg.password,
                                     "station password preserved through mode change" );
 }
 
@@ -1118,19 +1147,25 @@ static void test_request_mode_failure_recovery( void )
   TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before failure-recovery test" );
 
   /* Sabotage the HAL start while requesting a mode transition. */
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  const uint32_t start_before = ms.start_count;
   wifi_hal_mock_set_start_result( OSAL_ERROR );
-  const uint32_t start_before = wifi_hal_mock_get_state()->start_count;
 
   _reset_event( &g_ev_mode );
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
                             "request accepted despite failing HAL" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_start_entered_level( start_before + 1, 3000 ),
+                            "worker reached the failing HAL start" );
   osal_task_delay_ms( 300 ); /* give the worker time to attempt + fail */
 
   TEST_ASSERT_EQUAL_MESSAGE( 0, (int) g_ev_mode.count,
                              "no MODE_CHANGED emitted on failed start" );
-  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, wifi_hal_mock_get_state()->start_count,
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms.start_count,
                              "HAL start attempted exactly once" );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_hal_mock_get_state()->started,
+  TEST_ASSERT_FALSE_MESSAGE( ms.started,
                              "HAL left stopped after failed start" );
 
   /* Defined recoverable state: worker alive, machine idle, retry possible. */
@@ -1143,9 +1178,11 @@ static void test_request_mode_failure_recovery( void )
                             "retry request accepted" );
   TEST_ASSERT_TRUE_MESSAGE( _wait_mode_for_count( 1, 3000 ),
                             "MODE_CHANGED fired on successful retry" );
-  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_APSTA, (int) wifi_hal_mock_get_state()->mode,
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_APSTA, (int) ms.mode,
                              "HAL in APSTA after retry" );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_state()->started,
+  TEST_ASSERT_TRUE_MESSAGE( ms.started,
                             "HAL started after retry" );
 
   /* Restore station-only mode so the shutdown path is symmetric. */

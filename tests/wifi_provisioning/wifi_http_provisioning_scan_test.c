@@ -237,7 +237,7 @@ static void run_scan_tests( void )
   char  dns_url[64];
   char  resp[4096];
   const char * body;
-  const wifi_hal_mock_state_t * mock;
+  wifi_hal_mock_state_t   mock    = { 0 };
   wifi_hal_ap_record_t mock_aps[2];
 
   TEST_ASSERT_TRUE( http_port > 0 );
@@ -287,8 +287,10 @@ static void run_scan_tests( void )
   assert_json_has( body, "state", "scanning" );
   assert_json_has_num( body, "generation", 0 );
 
-  mock = wifi_hal_mock_get_state();
-  TEST_ASSERT_EQUAL_MESSAGE( 1u, mock->scan_start_count,
+  memset( &mock, 0, sizeof( mock ) );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_state( &mock ),
+                            "mock state snapshot readable" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, mock.scan_start_count,
                              "the first scan request starts one HAL scan" );
 
   /* While scanning: networks report scanning with the same generation. */
@@ -309,8 +311,10 @@ static void run_scan_tests( void )
   assert_api_headers( resp );
   body = body_of( resp );
   assert_json_has( body, "state", "scanning" );
-  mock = wifi_hal_mock_get_state();
-  TEST_ASSERT_EQUAL_MESSAGE( 1u, mock->scan_start_count,
+  memset( &mock, 0, sizeof( mock ) );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_state( &mock ),
+                            "mock state snapshot readable" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, mock.scan_start_count,
                              "repeated scan requests must not start duplicate HAL scans" );
 
   /* --- complete the scan with a known AP snapshot -------------------- */
