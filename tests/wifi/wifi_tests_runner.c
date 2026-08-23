@@ -11,6 +11,7 @@
 void wifi_config_tests_run( void );
 void wifi_utils_tests_run( void );
 void wifi_mgmt_tests_run( void );
+void wifi_mgmt_deinit_tests_run( void );
 void wifi_hal_mock_tests_run( void );
 
 void setUp( void )
@@ -28,6 +29,7 @@ int main( void )
   wifi_config_tests_run();
   wifi_utils_tests_run();
   wifi_mgmt_tests_run();
+  wifi_mgmt_deinit_tests_run();
   wifi_hal_mock_tests_run();
 
   return UNITY_END();

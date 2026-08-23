@@ -24,6 +24,11 @@
 /* One acknowledged stop round must finish within this wall-clock budget. */
 #define WIFI_MGMT_STOP_TIMEOUT_MS 3000U
 
+/* After a terminate request the worker must report quiescence within this
+ * wall-clock budget; otherwise the owner abandons this teardown round and
+ * retains every object for a retry. */
+#define WIFI_MGMT_QUIESCE_TIMEOUT_MS 3000U
+
 typedef enum
 {
   WIFI_APP_DISABLE = 0,
@@ -118,6 +123,18 @@ typedef struct
   bool              stop_restart_blocked;
   bool              stop_wait_timed_out;
 
+  /* Final-deinit (terminate) protocol objects and state.  The terminate
+   * request is independent of the stop request and of the state machine.  Once
+   * the worker observes a quit_pending flag it publishes the captured
+   * quiesced generation, signals quit_sem, and parks forever (only the
+   * owner-side osal_task_delete() ends it). */
+  osal_bin_sem_id_t quit_sem;
+  uint32_t          quit_alloc_counter;
+  uint32_t          quit_request_gen;
+  bool              quit_pending;
+  uint32_t          quit_completed_gen;
+  bool              quit_quiesced;
+
   callback_list_t on_connect_cb;
   callback_list_t on_disconnect_cb;
   event_sub_list_t event_subs;
@@ -169,6 +186,13 @@ static void _init_list( callback_list_t* list )
  * ------------------------------------------------------------------------- */
 static void _clear_initialized_state( void )
 {
+  /* Reverse creation order: quit_sem is the last synchronization object
+   * created, so it is released first. */
+  if ( g_ctx.quit_sem != NULL )
+  {
+    (void) osal_bin_sem_delete( g_ctx.quit_sem );
+    g_ctx.quit_sem = NULL;
+  }
   if ( g_ctx.stop_sem != NULL )
   {
     (void) osal_bin_sem_delete( g_ctx.stop_sem );
@@ -209,6 +233,8 @@ static void _clear_initialized_state( void )
   g_ctx.read_wifi_data = false;
   g_ctx.startup_done   = false;
   g_ctx.startup_ok     = false;
+  g_ctx.quit_pending   = false;
+  g_ctx.quit_quiesced  = false;
   g_ctx.initialized    = false;
 }
 
@@ -1047,6 +1073,27 @@ static void _service_stop_request( void )
   (void) osal_bin_sem_give( g_ctx.stop_sem );
 }
 
+/* Service one final-deinit terminate request in the Wi-Fi worker.
+ *
+ * The captured generation is published as "quiesced" while holding no
+ * management mutex, then the worker parks forever.  It never returns from this
+ * function and never deletes itself (especially on ESP); only the owner-side
+ * osal_task_delete() may end the task.  quit_sem merely wakes a waiting owner;
+ * generation and quit_quiesced under state_mutex are authoritative. */
+static void _service_quit_request( uint32_t generation )
+{
+  _lock_state();
+  g_ctx.quit_completed_gen = generation;
+  g_ctx.quit_pending       = false;
+  g_ctx.quit_quiesced      = true;
+  _unlock_state();
+  (void) osal_bin_sem_give( g_ctx.quit_sem );
+  for ( ;; )
+  {
+    (void) osal_task_delay_ms( 100 );
+  }
+}
+
 static void _wifi_event_task( void* arg )
 {
   (void) arg;
@@ -1054,12 +1101,20 @@ static void _wifi_event_task( void* arg )
 
   while ( true )
   {
-    /* A stop request has priority over every state handler.  State handlers may
-     * transition g_ctx.state, but they never consume stop_pending. */
+    /* A terminate request has priority over every other request and state
+     * handler.  State handlers never consume quit_pending. */
     _lock_state();
+    const bool              quit_pending = g_ctx.quit_pending;
+    const uint32_t          quit_gen     = g_ctx.quit_request_gen;
     const bool              stop_pending = g_ctx.stop_pending;
     const wifi_app_status_t state        = g_ctx.state;
     _unlock_state();
+
+    if ( quit_pending )
+    {
+      _service_quit_request( quit_gen );
+      continue;
+    }
 
     if ( stop_pending )
     {
@@ -1155,9 +1210,16 @@ void wifi_mgmt_init( void )
   {
     goto init_failed;
   }
+  st = osal_bin_sem_create( &g_ctx.quit_sem, "wifi_quit", OSAL_SEM_EMPTY );
+  if ( st != OSAL_SUCCESS )
+  {
+    goto init_failed;
+  }
 
   g_ctx.startup_done = false;
   g_ctx.startup_ok   = false;
+  g_ctx.quit_pending  = false;
+  g_ctx.quit_quiesced = false;
 
   _load_saved_config();
   _update_ip_info( UPDATE_LOST_CONNECTION );
@@ -1333,6 +1395,229 @@ bool wifi_mgmt_stop( void )
     const uint32_t remain = WIFI_MGMT_STOP_TIMEOUT_MS - elapsed;
     (void) osal_bin_sem_timed_wait( g_ctx.stop_sem, remain );
   }
+}
+/* ---------------------------------------------------------------------------
+ * TASK-135B  Owner-driven final deinitialization.
+ *
+ * This is the bounded, retryable teardown that removes the Wi-Fi worker and
+ * releases every management synchronization object.  It builds exclusively on
+ * the TASK-135 worker-owned stop protocol and the TASK-135A transactional
+ * init; an owner thread never performs a HAL fallback.
+ *
+ * Failure modes that must retain state for a safe serialized retry:
+ *   - wifi_mgmt_stop() timing out or reporting a HAL error,
+ *   - the worker not reporting quiescence within the bounded budget,
+ *   - osal_task_delete() failing (the parked worker stays live and retryable).
+ * In every such case no object is released and the initialized flag stays set.
+ * ------------------------------------------------------------------------- */
+
+/* Allocate a fresh, nonzero terminate-request generation.  Caller is the
+ * owner (single lifecycle) so no lock is required to increment. */
+static uint32_t _next_quit_generation( void )
+{
+  ++g_ctx.quit_alloc_counter;
+  if ( g_ctx.quit_alloc_counter == 0U )
+  {
+    ++g_ctx.quit_alloc_counter;
+  }
+  return g_ctx.quit_alloc_counter;
+}
+
+/* Wait (bounded) for the worker to quiesce after the terminate request with
+ * generation @p generation.  A stale quit_sem token is only a wake hint and
+ * can never satisfy a later terminate attempt: the authoritative outcome is
+ * the quiesced-generation match under state_mutex. */
+static bool _wait_quiesced( uint32_t generation )
+{
+  const uint32_t started_ms = osal_task_get_time_ms();
+
+  for ( ;; )
+  {
+    _lock_state();
+    const bool quiesced = g_ctx.quit_quiesced &&
+                          g_ctx.quit_completed_gen == generation &&
+                          !g_ctx.quit_pending;
+    _unlock_state();
+    if ( quiesced )
+    {
+      return true;
+    }
+
+    const uint32_t elapsed = osal_task_get_time_ms() - started_ms;
+    if ( elapsed >= WIFI_MGMT_QUIESCE_TIMEOUT_MS )
+    {
+      return false;
+    }
+
+    /* Drain any stale token as a wake hint, charged to the same budget. */
+    if ( osal_bin_sem_timed_wait( g_ctx.quit_sem, 0 ) == OSAL_SUCCESS )
+    {
+      continue;
+    }
+
+    const uint32_t remain = WIFI_MGMT_QUIESCE_TIMEOUT_MS - elapsed;
+    (void) osal_bin_sem_timed_wait( g_ctx.quit_sem, remain );
+  }
+}
+
+/* Release every management synchronization object in the documented
+ * reverse-reachability order, checking each OSAL result and nulling each
+ * handle only on success.  This runs only after the worker is gone and the HAL
+ * callback is quiescent, so no worker or HAL callback can access an object
+ * being released.  Returns false if any release fails (the corresponding
+ * handle keeps its value, the module stays "initialized", and a later deinit
+ * can resume teardown). */
+static bool _release_management_objects( void )
+{
+  osal_status_t st;
+
+  /* Clear typed subscriptions and legacy callback lists first; no event_mutex
+   * or state_mutex is used after this point. */
+  _init_list( &g_ctx.on_connect_cb );
+  _init_list( &g_ctx.on_disconnect_cb );
+  memset( &g_ctx.event_subs, 0, sizeof( g_ctx.event_subs ) );
+
+  /* Documented reverse-reachability order: ip_sem, scan_sem, ready/stop/quit
+   * semaphores, event_mutex, state_mutex. */
+  if ( g_ctx.ip_sem != NULL )
+  {
+    st = osal_bin_sem_delete( g_ctx.ip_sem );
+    if ( st != OSAL_SUCCESS )
+    {
+      return false;
+    }
+    g_ctx.ip_sem = NULL;
+  }
+  if ( g_ctx.scan_sem != NULL )
+  {
+    st = osal_bin_sem_delete( g_ctx.scan_sem );
+    if ( st != OSAL_SUCCESS )
+    {
+      return false;
+    }
+    g_ctx.scan_sem = NULL;
+  }
+  if ( g_ctx.ready_sem != NULL )
+  {
+    st = osal_bin_sem_delete( g_ctx.ready_sem );
+    if ( st != OSAL_SUCCESS )
+    {
+      return false;
+    }
+    g_ctx.ready_sem = NULL;
+  }
+  if ( g_ctx.stop_sem != NULL )
+  {
+    st = osal_bin_sem_delete( g_ctx.stop_sem );
+    if ( st != OSAL_SUCCESS )
+    {
+      return false;
+    }
+    g_ctx.stop_sem = NULL;
+  }
+  if ( g_ctx.quit_sem != NULL )
+  {
+    st = osal_bin_sem_delete( g_ctx.quit_sem );
+    if ( st != OSAL_SUCCESS )
+    {
+      return false;
+    }
+    g_ctx.quit_sem = NULL;
+  }
+  if ( g_ctx.event_mutex != NULL )
+  {
+    st = osal_mutex_delete( g_ctx.event_mutex );
+    if ( st != OSAL_SUCCESS )
+    {
+      return false;
+    }
+    g_ctx.event_mutex = NULL;
+  }
+  if ( g_ctx.state_mutex != NULL )
+  {
+    st = osal_mutex_delete( g_ctx.state_mutex );
+    if ( st != OSAL_SUCCESS )
+    {
+      return false;
+    }
+    g_ctx.state_mutex = NULL;
+  }
+  return true;
+}
+
+bool wifi_mgmt_deinit( void )
+{
+  /* Deinit-before-init and deinit-after-deinit are idempotent no-ops. */
+  if ( !g_ctx.initialized )
+  {
+    return true;
+  }
+
+  /* Dependents must unsubscribe and cease all Wi-Fi calls before this; the
+   * owner serializes deinit against init/start/stop. */
+
+  /* 1. Acknowledge the worker-owned HAL teardown.  wifi_mgmt_stop() is a fast
+   *    no-op when a clean stop is already acknowledged, so this is only ever a
+   *    full round when HAL teardown was not yet performed.  An owner-thread HAL
+   *    fallback is never used. */
+  if ( !wifi_mgmt_stop() )
+  {
+    /* Stop timeout or HAL error: retain every object for a retry. */
+    return false;
+  }
+
+  /* 2. Terminate request and quiescence.  Only arm a fresh terminate if the
+   *    worker is not already parked from an earlier attempt. */
+  if ( !g_ctx.quit_quiesced )
+  {
+    const uint32_t quit_gen = _next_quit_generation();
+    _lock_state();
+    g_ctx.quit_request_gen = quit_gen;
+    g_ctx.quit_pending     = true;
+    _unlock_state();
+    if ( !_wait_quiesced( quit_gen ) )
+    {
+      /* Quiescence timed out: worker is still live and state is retained. */
+      return false;
+    }
+  }
+
+  /* 3. Delete the parked worker.  On failure the worker stays live and every
+   *    object and flag needed for a retry is retained. */
+  if ( osal_task_delete( g_wifi_task_id ) != OSAL_SUCCESS )
+  {
+    return false;
+  }
+  /* Clear the task handle; the task id type is an integer on POSIX and a
+   * pointer on ESP, so platform-neutral zero marks the released handle. */
+#ifdef ESP_PLATFORM
+  g_wifi_task_id = (osal_task_id_t) NULL;
+#else
+  g_wifi_task_id = (osal_task_id_t) 0;
+#endif
+
+  /* 4. Clear callbacks/subscriptions and release every synchronization object
+   *    in the documented reverse-reachability order.  The task is already gone
+   *    and the HAL callback is quiescent, so nothing can race this release. */
+  if ( !_release_management_objects() )
+  {
+    return false;
+  }
+
+  /* 5. Reset remaining lifecycle state and only then publish the module as
+   *    never initialized; no management object or worker remains. */
+  g_ctx.config_loaded  = false;
+  g_ctx.read_wifi_data = false;
+  g_ctx.startup_done   = false;
+  g_ctx.startup_ok     = false;
+  g_ctx.quit_pending   = false;
+  g_ctx.quit_quiesced  = false;
+  g_ctx.stop_pending   = false;
+  g_ctx.stop_clean           = true;
+  g_ctx.restart_authorized   = true;
+  g_ctx.stop_restart_blocked = false;
+  g_ctx.initialized    = false;
+  return true;
 }
 
 void wifi_mgmt_start( void )

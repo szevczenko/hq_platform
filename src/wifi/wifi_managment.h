@@ -185,6 +185,38 @@ void wifi_mgmt_init( void );
 bool wifi_mgmt_stop( void );
 
 /**
+ * @brief   Final deinitialization: join the Wi-Fi worker and release every
+ *          management synchronization object.
+ *
+ * @details Bounded, owner-driven teardown that builds on the restartable
+ *          @c wifi_mgmt_stop() protocol and the transactional init from
+ *          TASK-135A.  Dependents must unsubscribe and cease all Wi-Fi
+ *          management calls before calling this; deinit does not race
+ *          arbitrary published entry points.
+ *
+ *          If the worker-owned HAL teardown is not already acknowledged
+ *          successful, @c wifi_mgmt_stop() is first invoked and joined (an
+ *          owner-thread HAL fallback is never used).  A separate terminate
+ *          request is then queued for the worker.  On observing it the worker
+ *          leaves its state loop holding no management mutex, publishes the
+ *          captured quiesced generation, signals quiescence, and parks until
+ *          the owner calls osal_task_delete().  Only after the task is deleted
+ *          and the HAL callback is quiescent are typed subscriptions and
+ *          legacy callback lists cleared and ip_sem, scan_sem, ready/stop/quit
+ *          semaphores, event_mutex, and state_mutex released in one documented
+ *          reverse-reachability order.  The module is only published as
+ *          uninitialized after every release.
+ *
+ * @return  true when called before init or after a successful deinit (a
+ *          deinit-before-init is a no-op).  Returns false on stop
+ *          timeout/HAL error, quiescence timeout, or task deletion failure.
+ * @note    On failure every live object and state needed for a safe serialized
+ *          retry is retained; a parked worker after a failed task deletion
+ *          remains represented as live and retryable.
+ */
+bool wifi_mgmt_deinit( void );
+
+/**
  * @brief   Start the Wi-Fi management state machine.
  * @note    Has no effect if already started.
  */

@@ -46,6 +46,7 @@ if(NOT ESP_PLATFORM)
     ${WIFI_TEST_DIR}/wifi_config_test.c
     ${WIFI_TEST_DIR}/wifi_utils_test.c
     ${WIFI_TEST_DIR}/wifi_mgmt_test.c
+    ${WIFI_TEST_DIR}/wifi_mgmt_deinit_test.c
     # Wi-Fi module sources (without platform HAL — mock replaces it)
     ${WIFI_SRC_DIR}/wifi_managment.c
     ${WIFI_SRC_DIR}/wifi_config.c
