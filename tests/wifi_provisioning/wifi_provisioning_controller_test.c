@@ -2,7 +2,8 @@
  * Wi-Fi provisioning automatic fallback controller unit tests (POSIX).
  *
  * Exercises the policy layer against lightweight mocks of the Wi-Fi
- * management event API and the provisioning application lifecycle API:
+ * management event API, the provisioning application lifecycle API and the
+ * OSAL mutex/timer API:
  *  - no saved credential               -> provisioning starts on init,
  *  - successful saved credential       -> no portal; goes ONLINE,
  *  - exhausted saved credentials       -> provisioning starts once,
@@ -11,13 +12,20 @@
  *  - failure inside the grace window   -> portal kept, timer cancelled,
  *  - zero grace period                 -> immediate STA-only transition,
  *  - explicit stop                     -> overrides the pending timer,
+ *  - pre-init grace override           -> the configured value is armed,
+ *  - stale expiry                      -> ignored after cancel and deinit,
+ *  - disconnect-versus-expiry          -> the cancelled window is a no-op,
+ *  - deinit-versus-expiry              -> the timer is joined/safe,
+ *  - stale expiry vs a new session     -> never stops a new portal,
+ *  - stop failure / mode failure       -> recoverable, never ONLINE,
+ *  - mode acknowledgement              -> ONLINE only after MODE_CHANGED,
  *  - init/deinit are idempotent,
  *  - deinit unsubscribes every callback.
  *
  * The controller source is compiled against mock implementations of
- * wifi_mgmt_is_read_data/subscribe/unsubscribe, wifi_http_provisioning_start,
- * wifi_http_provisioning_stop, wifi_mgmt_request_mode and the osal_timer_*
- * API so the policy can be driven deterministically by injecting typed events
+ * wifi_mgmt_is_read_data/subscribe/unsubscribe/request_mode,
+ * wifi_http_provisioning_start/stop, and the osal_timer_* and osal_mutex_*
+ * APIs so the policy can be driven deterministically by firing typed events
  * and by firing the grace timeout on demand.
  */
 
@@ -27,6 +35,7 @@
 #include <string.h>
 
 #include "unity.h"
+#include "osal_mutex.h"
 #include "osal_timer.h"
 #include "wifi_http_provisioning.h"
 #include "wifi_managment.h"
@@ -52,6 +61,10 @@ static int       s_sub_count             = 0;
 /* Mock of the runtime mode-transition request. */
 static wifi_type_t s_last_mode          = T_WIFI_TYPE_SERVER;
 static int         s_request_mode_count = 0;
+static bool        s_request_mode_succeeds = true;
+
+/* Mock of the provisioning listener stop; a test may force a stop failure. */
+static bool s_stop_succeeds = true;
 
 /* Mock grace timer bookkeeping. */
 static void (*s_timer_cb)(osal_timer_id_t) = NULL;
@@ -75,7 +88,36 @@ static void log_action( const char *action )
   }
 }
 
-/* Mock of the Wi-Fi persistence query used during init. */
+/* --- OSAL mutex mocks (single-threaded controller test) ------------------ */
+static pthread_mutex_t s_mock_mutex;
+
+osal_status_t osal_mutex_create( osal_mutex_id_t *mutex_id, const char *name )
+{
+  (void) name;
+  if ( mutex_id == NULL ) return OSAL_INVALID_POINTER;
+  *mutex_id = &s_mock_mutex;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_mutex_take( osal_mutex_id_t mutex_id )
+{
+  (void) mutex_id;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_mutex_give( osal_mutex_id_t mutex_id )
+{
+  (void) mutex_id;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_mutex_delete( osal_mutex_id_t mutex_id )
+{
+  (void) mutex_id;
+  return OSAL_SUCCESS;
+}
+
+/* --- Mock of the Wi-Fi persistence query used during init. -------------------- */
 bool wifi_mgmt_is_read_data( void )
 {
   return s_has_saved_credentials;
@@ -120,14 +162,14 @@ bool wifi_mgmt_unsubscribe( wifi_mgmt_event_t event, wifi_mgmt_event_cb_t cb, vo
   return false;
 }
 
-/* Mock of the runtime STA-only transition request. Logs before/after the
- * listener stop only so the ordering assertion is deterministic. */
+/* Mock of the runtime STA-only transition request. Logs after the listener stop
+ * only so the ordering assertion is deterministic. */
 bool wifi_mgmt_request_mode( wifi_type_t type )
 {
   ++s_request_mode_count;
   s_last_mode = type;
   log_action( "M" );
-  return true;
+  return s_request_mode_succeeds;
 }
 
 /* Mock of the explicit provisioning lifecycle API. */
@@ -141,7 +183,7 @@ bool wifi_http_provisioning_stop( void )
 {
   ++s_provision_stop_count;
   log_action( "S" );
-  return true;
+  return s_stop_succeeds;
 }
 
 /* Mock of the grace timer. The controller creates one timer at init and arms
@@ -227,7 +269,7 @@ static void fire( wifi_mgmt_event_t event )
   for ( i = 0; i < n; ++i ) snapshot[ i ].cb( event, snapshot[ i ].user_data );
 }
 
-/* Simulate the one-shot grace timer expiring. As with the real timer, expiry
+/* Simulate the one-shot grace timer expiring. As with a real timer, expiry
  * first makes the timer dormant, then the expiry callback runs. */
 static void fire_grace_expiry( void )
 {
@@ -237,16 +279,18 @@ static void fire_grace_expiry( void )
 
 static void reset_mocks( void )
 {
-  /* Deinitialise the controller first so its internal static state does not
-   * leak across tests (this also cancels/deletes the grace timer and
-   * unsubscribes from the current table). It is a safe no-op when the
-   * controller is already disabled. */
+  /* Deinitialize the controller first so its internal static state does not
+   * leak across tests (this also cancels/deletes the grace timer, invalidates
+   * the session and unsubscribes the delegates). No direct portal stop is
+   * issued, matching the controller contract. */
   wifi_provisioning_controller_deinit();
   s_has_saved_credentials = false;
   s_provision_start_count = 0;
   s_provision_stop_count  = 0;
   s_sub_count             = 0;
   s_request_mode_count    = 0;
+  s_request_mode_succeeds = true;
+  s_stop_succeeds          = true;
   s_last_mode             = T_WIFI_TYPE_SERVER;
   s_timer_cb              = NULL;
   s_timer_active          = false;
@@ -275,7 +319,7 @@ static void assert_stop_precedes_mode( void )
 /* Test cases ------------------------------------------------------------- */
 
 /* No saved credential: init must start provisioning exactly once and reach
- * PROVISIONING. A later CONNECT_FAILED must not open it a second time. */
+ * PROVISIONING. A later CONNECT_FAILED must not open it again. */
 static void test_no_saved_credentials_starts_once( void )
 {
   reset_mocks();
@@ -284,7 +328,7 @@ static void test_no_saved_credentials_starts_once( void )
                      wifi_provisioning_controller_get_state() );
   TEST_ASSERT_TRUE( wifi_provisioning_controller_is_provisioning() );
   TEST_ASSERT_EQUAL_INT( 1, s_provision_start_count );
-  TEST_ASSERT_EQUAL_INT( 3, s_sub_count );
+  TEST_ASSERT_EQUAL_INT( 4, s_sub_count );
   TEST_ASSERT_FALSE( osal_timer_is_active( NULL ) );
 
   /* A qualifying fallback is started exactly once even with more traffic. */
@@ -373,11 +417,11 @@ static void test_init_deinit_idempotent_unsubscribes_all( void )
   reset_mocks();
   s_has_saved_credentials = true;
   TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
-  TEST_ASSERT_EQUAL_INT( 3, s_sub_count );
+  TEST_ASSERT_EQUAL_INT( 4, s_sub_count );
 
   /* Repeated init does not re-subscribe. */
   TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
-  TEST_ASSERT_EQUAL_INT( 3, s_sub_count );
+  TEST_ASSERT_EQUAL_INT( 4, s_sub_count );
 
   wifi_provisioning_controller_deinit();
   TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED,
@@ -386,6 +430,7 @@ static void test_init_deinit_idempotent_unsubscribes_all( void )
   TEST_ASSERT_EQUAL_INT( 0, sub_count_for( WIFI_MGMT_EVENT_CONNECTED ) );
   TEST_ASSERT_EQUAL_INT( 0, sub_count_for( WIFI_MGMT_EVENT_DISCONNECTED ) );
   TEST_ASSERT_EQUAL_INT( 0, sub_count_for( WIFI_MGMT_EVENT_CONNECT_FAILED ) );
+  TEST_ASSERT_EQUAL_INT( 0, sub_count_for( WIFI_MGMT_EVENT_MODE_CHANGED ) );
 
   /* Deinit while disabled is a safe no-op. */
   wifi_provisioning_controller_deinit();
@@ -393,7 +438,8 @@ static void test_init_deinit_idempotent_unsubscribes_all( void )
 }
 
 /* Success during the grace period: the portal stays up until the timer fires,
- * then the listeners shut down and the mode transitions to STA-only. */
+ * then the listeners shut down and only after the STA-only confirmation does
+ * the controller report ONLINE. */
 static void test_grace_success_stops_after_expiry( void )
 {
   reset_mocks();
@@ -412,9 +458,10 @@ static void test_grace_success_stops_after_expiry( void )
   TEST_ASSERT_EQUAL_INT( 0, s_provision_stop_count );
   TEST_ASSERT_EQUAL_INT( 0, s_request_mode_count );
 
-  /* Expiry shuts the listeners down before requesting a STA-only transition. */
+  /* Expiry stops the listeners, requests STA-only but must NOT report ONLINE
+   * until the mode change is confirmed. */
   fire_grace_expiry();
-  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
                      wifi_provisioning_controller_get_state() );
   TEST_ASSERT_FALSE( wifi_provisioning_controller_is_provisioning() );
   TEST_ASSERT_EQUAL_INT( 1, s_provision_stop_count );
@@ -422,9 +469,16 @@ static void test_grace_success_stops_after_expiry( void )
   TEST_ASSERT_EQUAL( T_WIFI_TYPE_CLIENT, s_last_mode );
   TEST_ASSERT_FALSE( osal_timer_is_active( NULL ) );
   assert_stop_precedes_mode();
+
+  /* The requested STA-only mode is confirmed : ONLINE at last. */
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_FALSE( wifi_provisioning_controller_is_provisioning() );
 }
 
-/* Zero grace period: the portal is retired immediately on station IP. */
+/* Zero grace period: the portal is retired on the station IP and ONLINE only
+ * after the STA-only mode is confirmed. */
 static void test_zero_grace_shuts_down_immediately( void )
 {
   reset_mocks();
@@ -432,7 +486,7 @@ static void test_zero_grace_shuts_down_immediately( void )
   wifi_provisioning_controller_set_success_grace_ms( 0 );
 
   fire( WIFI_MGMT_EVENT_CONNECTED );
-  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
                      wifi_provisioning_controller_get_state() );
   TEST_ASSERT_FALSE( wifi_provisioning_controller_is_provisioning() );
   TEST_ASSERT_EQUAL_INT( 1, s_provision_stop_count );
@@ -441,9 +495,27 @@ static void test_zero_grace_shuts_down_immediately( void )
   TEST_ASSERT_FALSE( osal_timer_is_active( NULL ) );
   TEST_ASSERT_EQUAL_UINT32( 0u, s_timer_change_count );
   assert_stop_precedes_mode();
+
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_FALSE( wifi_provisioning_controller_is_provisioning() );
 }
 
-/* Failure during the grace period cancels the timer and keeps the portal. */
+/* A grace value configured before init is the one that is actually armed
+ * (the build default is never applied once an override exists). */
+static void test_pre_override_is_armed( void )
+{
+  reset_mocks();
+  wifi_provisioning_controller_set_success_grace_ms( 333 );
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_GRACE,
+                     wifi_provisioning_controller_get_state() );
+  assert_timer_armed( 333 );
+}
+
+/* A failure inside the grace window cancels the timer and keeps the portal. */
 static void test_failure_during_grace_keeps_portal( void )
 {
   reset_mocks();
@@ -483,7 +555,30 @@ static void test_disconnect_during_grace_keeps_portal( void )
   TEST_ASSERT_EQUAL_INT( 0, s_provision_stop_count );
 }
 
-/* Explicit stop overrides a pending grace timer and transitions to DISABLED. */
+/* An expiry racing a disconnect (disconnect-versus-expiry) is a stale no-op:
+ * after the window is aborted the late expiry must do nothing. */
+static void test_disconnect_then_stale_expiry_is_ignored( void )
+{
+  reset_mocks();
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+  assert_timer_armed( 200 );
+
+  fire( WIFI_MGMT_EVENT_DISCONNECTED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+
+  fire_grace_expiry();
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_stop_count );
+  TEST_ASSERT_FALSE( osal_timer_is_active( NULL ) );
+}
+
+/* Explicit stop overrides a pending grace timer; the controller only reaches
+ * DISABLED once the STA-only transition is confirmed, and a stale expiry after
+ * the stop must not reopen the portal. */
 static void test_explicit_stop_overrides_grace_timer( void )
 {
   reset_mocks();
@@ -493,7 +588,7 @@ static void test_explicit_stop_overrides_grace_timer( void )
   assert_timer_armed( 200 );
 
   TEST_ASSERT_TRUE( wifi_provisioning_controller_stop() );
-  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED,
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
                      wifi_provisioning_controller_get_state() );
   TEST_ASSERT_FALSE( wifi_provisioning_controller_is_provisioning() );
   TEST_ASSERT_EQUAL_INT( 1, s_provision_stop_count );
@@ -502,11 +597,113 @@ static void test_explicit_stop_overrides_grace_timer( void )
   TEST_ASSERT_FALSE( osal_timer_is_active( NULL ) );
   assert_stop_precedes_mode();
 
+  /* The mode confirm completes the stop to DISABLED. */
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED,
+                     wifi_provisioning_controller_get_state() );
+
   /* A stale expiry after the explicit stop must not reopen the portal. */
   fire_grace_expiry();
   TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED,
                      wifi_provisioning_controller_get_state() );
   TEST_ASSERT_EQUAL_INT( 1, s_provision_stop_count );
+}
+
+/* A listener shutdown failure leaves the controller recoverable (never
+ * ONLINE): the portal stays available for another attempt. */
+static void test_stop_failure_keeps_provisioning( void )
+{
+  reset_mocks();
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+
+  s_stop_succeeds = false;
+  TEST_ASSERT_FALSE( wifi_provisioning_controller_stop() );
+
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_is_provisioning() );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_stop_count );
+  /* The mode request is not even issued if the listener could not stop. */
+  TEST_ASSERT_EQUAL_INT( 0, s_request_mode_count );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+}
+
+/* A mode-transition failure is recoverable: the listeners are stopped but the
+ * portal is reopened and the controller never reports ONLINE. */
+static void test_mode_failure_keeps_provisioning( void )
+{
+  reset_mocks();
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+  assert_timer_armed( 200 );
+
+  s_request_mode_succeeds = false;
+  const int start_after_connect = s_provision_start_count;
+
+  fire_grace_expiry();
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_is_provisioning() );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_stop_count );
+  TEST_ASSERT_EQUAL( T_WIFI_TYPE_CLIENT, s_last_mode );
+  /* The rejected transition reopened the portal so it stays recoverable. */
+  TEST_ASSERT_EQUAL_INT( start_after_connect + 1, s_provision_start_count );
+
+  /* No MODE_CHANGED applied -> must never be ONLINE. */
+  TEST_ASSERT( wifi_provisioning_controller_get_state() !=
+               WIFI_PROVISIONING_CONTROLLER_ONLINE );
+}
+
+/* Deinit versus a pending expiry: deinit cancel/deletes the timer and joins a
+ * late expiry; a queued stale expiry afterwards must not alter disabled state. */
+static void test_deinit_then_stale_expiry_is_ignored( void )
+{
+  reset_mocks();
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+  assert_timer_armed( 200 );
+
+  wifi_provisioning_controller_deinit();
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED,
+                     wifi_provisioning_controller_get_state() );
+
+  /* The timer was deleted, so the expiry no-op is safe. */
+  fire_grace_expiry();
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_stop_count );
+}
+
+/* A stale expiry from a cancelled/prior session cannot stop a new provisioning
+ * session started after a fresh init. */
+static void test_stale_expiry_cannot_stop_new_session( void )
+{
+  reset_mocks();
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  wifi_provisioning_controller_set_success_grace_ms( 100 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+  assert_timer_armed( 100 );
+
+  /* End the first session: the timer is cancelled/joined and fresh session. */
+  wifi_provisioning_controller_deinit();
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );   /* session #2 */
+
+  /* A stale grace expiry (queued from the old session, now delivered) must
+   * not stop the new session's portal. */
+  TEST_ASSERT_EQUAL_INT( 2, s_provision_start_count );   /* 1 from each init */
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+
+  fire_grace_expiry();
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_stop_count );
+  TEST_ASSERT_EQUAL_INT( 2, s_provision_start_count );
 }
 
 /* Runner ------------------------------------------------------------------- */
@@ -523,7 +720,13 @@ static void run_controller_tests( void )
   RUN_TEST( test_zero_grace_shuts_down_immediately );
   RUN_TEST( test_failure_during_grace_keeps_portal );
   RUN_TEST( test_disconnect_during_grace_keeps_portal );
+  RUN_TEST( test_disconnect_then_stale_expiry_is_ignored );
   RUN_TEST( test_explicit_stop_overrides_grace_timer );
+  RUN_TEST( test_pre_override_is_armed );
+  RUN_TEST( test_stop_failure_keeps_provisioning );
+  RUN_TEST( test_mode_failure_keeps_provisioning );
+  RUN_TEST( test_deinit_then_stale_expiry_is_ignored );
+  RUN_TEST( test_stale_expiry_cannot_stop_new_session );
 }
 
 /* setUp/tearDown are intentionally empty (each test resets its own state). */

@@ -17,11 +17,25 @@
  * fails before the grace expires, the timer is cancelled and the portal stays
  * open for another credential attempt.
  *
+ * The STA-only retirement is acknowledged asynchronously. After the listeners
+ * are confirmed stopped the controller enters RETIRING_AP and only reports
+ * ONLINE once WIFI_MGMT_EVENT_MODE_CHANGED confirms the requested STA-only
+ * mode. A listener-stop failure or a mode-transition failure leaves the
+ * controller in an explicit recoverable state instead of reporting ONLINE.
+ *
+ * All controller state is guarded by an internal OSAL mutex shared by the API,
+ * the Wi-Fi callback and the timer callback paths; blocking calls (provisioning
+ * lifecycle, Wi-Fi mode requests, OSAL timer control) are always issued after
+ * the lock has been released. A session/generation token makes a stale grace
+ * expiry from a cancelled or prior grace window a no-op.
+ *
  * The controller subscribes once per lifetime and starts provisioning at most
  * once per qualifying fallback (guarded by a per-session flag). An explicit
- * @c wifi_provisioning_controller_stop() overrides the pending grace timer and
+ * wifi_provisioning_controller_stop() overrides the pending grace timer and
  * shuts the portal down immediately. Init and deinit are idempotent; deinit
- * unsubscribes every callback the controller registered.
+ * unsubscribes every callback the controller registered, cancels/deletes the
+ * grace timer synchronously and waits out any active expiry callback before
+ * clearing controller state.
  */
 
 #ifndef WIFI_PROVISIONING_CONTROLLER_H
@@ -36,21 +50,26 @@
  * @brief Controller policy states.
  *
  * @c DISABLED is reported before init, after deinit, and after an explicit
- * @c stop(). With saved credentials present the controller waits in
+ * @c stop() completes. With saved credentials present the controller waits in
  * @c AWAITING_CONNECT for the manager to complete its auto-connect; a
  * successful connect moves it to @c ONLINE. @c PROVISIONING is entered when
  * the controller decided to start the provisioning application (no
  * credentials, or the saved credentials failed). @c GRACE is entered when the
  * station obtains an IP while the portal is active: the portal remains
- * available until the success grace period expires.
+ * available until the success grace period expires. Addressing the grace
+ * transition and shutdown is explicit: @c RETIRING_AP is entered while the
+ * listeners are shut down and the requested STA-only mode has been issued but
+ * not yet confirmed; @c ONLINE is reached only after
+ * @c WIFI_MGMT_EVENT_MODE_CHANGED confirms the STA-only transition.
  */
 typedef enum
 {
   WIFI_PROVISIONING_CONTROLLER_DISABLED         = 0,
   WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT = 1,
-  WIFI_PROVISIONING_CONTROLLER_ONLINE            = 2,
-  WIFI_PROVISIONING_CONTROLLER_PROVISIONING      = 3,
-  WIFI_PROVISIONING_CONTROLLER_GRACE             = 4,
+  WIFI_PROVISIONING_CONTROLLER_ONLINE           = 2,
+  WIFI_PROVISIONING_CONTROLLER_PROVISIONING     = 3,
+  WIFI_PROVISIONING_CONTROLLER_GRACE            = 4,
+  WIFI_PROVISIONING_CONTROLLER_RETIRING_AP      = 5,
 } wifi_provisioning_controller_state_t;
 
 /* Public functions --------------------------------------------------------- */
@@ -58,28 +77,31 @@ typedef enum
 /**
  * @brief Initialize the automatic fallback controller (idempotent).
  *
- * Subscribes to @c WIFI_MGMT_EVENT_CONNECTED, @c WIFI_MGMT_EVENT_DISCONNECTED
- * and @c WIFI_MGMT_EVENT_CONNECT_FAILED. If no saved credential exists the
- * provisioning application is started immediately and the controller enters
- * @c PROVISIONING.
+ * Subscribes to @c WIFI_MGMT_EVENT_CONNECTED, @c WIFI_MGMT_EVENT_DISCONNECTED,
+ * @c WIFI_MGMT_EVENT_CONNECT_FAILED and @c WIFI_MGMT_EVENT_MODE_CHANGED. If no
+ * saved credential exists the provisioning application is started immediately
+ * and the controller enters @c PROVISIONING. A success-grace override applied
+ * before init is preserved.
  *
  * @return true always; repeated calls while already initialized are safe
- *         no-ops that do not re-subscribe.
+ *         no-ops that do not re-subscribe or restart the provisioning
+ *         application.
  */
 bool wifi_provisioning_controller_init( void );
 
 /**
  * @brief Deinitialize the automatic fallback controller (idempotent).
  *
- * Unsubscribes all typed Wi-Fi event callbacks the controller registered and
- * returns to @c DISABLED. Calling while already deinitialized is a safe
- * no-op.
+ * Unsubscribes every typed Wi-Fi event callback the controller registered,
+ * cancels and deletes the grace timer synchronously (waiting out any active
+ * timer callback), invalidates the controller session and returns to
+ * @c DISABLED. Calling while already deinitialized is a safe no-op.
  */
 void wifi_provisioning_controller_deinit( void );
 
 /**
- * @brief Whether the controller has started (or will keep) the provisioning
- *        application running.
+ * @brief Whether the controller has started (or is about to keep) the
+ *        provisioning application running.
  * @return true when in @c PROVISIONING or @c GRACE.
  */
 bool wifi_provisioning_controller_is_provisioning( void );
@@ -88,15 +110,15 @@ bool wifi_provisioning_controller_is_provisioning( void );
  * @brief Explicitly stop automatic provisioning (idempotent).
  *
  * Cancels any pending success grace timer, stops the provisioning HTTP and
- * DNS listeners, and requests a STA-only transition so the temporary access
- * point is retired immediately. The controller returns to @c DISABLED and
- * automatic fallback will not reopen the portal until the controller is
- * reinitialized.
+ * DNS listeners and requests a STA-only transition so the temporary access
+ * point is retired. The controller transitions through @c RETIRING_AP and
+ * reaches @c DISABLED only when the STA-only mode is confirmed.
  *
- * @return true when the provisioning application is (now or already) stopped,
- *         false when the listener shutdown failed.
- * @note  Calling while the controller is disabled is a safe no-op returning
- *        false.
+ * @return true when the provisioning application is (now or already) stopped
+ *         and the retire was requested, false when the listener shutdown
+ *         failed or the mode transition was rejected (the controller then
+ *         stays recoverable without falsely reporting ONLINE).
+ * @note  Calling while disabled is a safe no-op returning false.
  */
 bool wifi_provisioning_controller_stop( void );
 
