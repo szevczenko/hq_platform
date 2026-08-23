@@ -68,6 +68,9 @@ typedef struct
 typedef struct
 {
   wifi_app_status_t state;
+  /* Set only after a transactional init has created the worker and every
+   * management object; cleared on a partially-completed init rollback. */
+  bool              initialized;
   bool              is_started;
   /* Startup lifecycle: armed by wifi_mgmt_start()/wifi_mgmt_stop(), completed
    * by _state_init().  Both flags are written and read under state_mutex. */
@@ -149,6 +152,64 @@ static osal_task_id_t g_wifi_task_id;
 static void _init_list( callback_list_t* list )
 {
   memset( list, 0, sizeof( *list ) );
+}
+/* ---------------------------------------------------------------- Lifecycle --
+ * Transactional init rollback.
+ *
+ * Deletes only the management objects that were successfully created during a
+ * partially-completed init round, in exact reverse creation order, then nulls
+ * each handle and clears the callback/subscription storage so the module is
+ * indistinguishable from never initialized.  The worker is always created last
+ * and never exists at this point, so no task can concurrently consume the
+ * objects being torn down.
+ *
+ * Every failure branch in wifi_mgmt_init() funnels through this single helper:
+ * there is one cleanup order for the whole module, and future lifecycle objects
+ * can be added here once without revisiting each error path.
+ * ------------------------------------------------------------------------- */
+static void _clear_initialized_state( void )
+{
+  if ( g_ctx.stop_sem != NULL )
+  {
+    (void) osal_bin_sem_delete( g_ctx.stop_sem );
+    g_ctx.stop_sem = NULL;
+  }
+  if ( g_ctx.ready_sem != NULL )
+  {
+    (void) osal_bin_sem_delete( g_ctx.ready_sem );
+    g_ctx.ready_sem = NULL;
+  }
+  if ( g_ctx.scan_sem != NULL )
+  {
+    (void) osal_bin_sem_delete( g_ctx.scan_sem );
+    g_ctx.scan_sem = NULL;
+  }
+  if ( g_ctx.ip_sem != NULL )
+  {
+    (void) osal_bin_sem_delete( g_ctx.ip_sem );
+    g_ctx.ip_sem = NULL;
+  }
+  if ( g_ctx.state_mutex != NULL )
+  {
+    (void) osal_mutex_delete( g_ctx.state_mutex );
+    g_ctx.state_mutex = NULL;
+  }
+  if ( g_ctx.event_mutex != NULL )
+  {
+    (void) osal_mutex_delete( g_ctx.event_mutex );
+    g_ctx.event_mutex = NULL;
+  }
+
+  /* Pristine "never initialized" state: no callbacks, no subscriptions, no
+   * loaded credentials, no startup round and no published initialized flag. */
+  _init_list( &g_ctx.on_connect_cb );
+  _init_list( &g_ctx.on_disconnect_cb );
+  memset( &g_ctx.event_subs, 0, sizeof( g_ctx.event_subs ) );
+  g_ctx.config_loaded  = false;
+  g_ctx.read_wifi_data = false;
+  g_ctx.startup_done   = false;
+  g_ctx.startup_ok     = false;
+  g_ctx.initialized    = false;
 }
 
 static void _add_to_list( callback_list_t* list, wifi_mgmt_callback_t cb )
@@ -1046,16 +1107,54 @@ static void _wifi_event_task( void* arg )
 
 void wifi_mgmt_init( void )
 {
+  osal_status_t st;
+
+  /* A single lifecycle owner may call init more than once; a repeat of an
+   * already-successful init is a no-op so no worker or object is leaked. */
+  if ( g_ctx.initialized )
+  {
+    return;
+  }
+
   _init_list( &g_ctx.on_connect_cb );
   _init_list( &g_ctx.on_disconnect_cb );
   memset( &g_ctx.event_subs, 0, sizeof( g_ctx.event_subs ) );
-  (void) osal_mutex_create( &g_ctx.event_mutex, "wifi_evt" );
-  (void) osal_mutex_create( &g_ctx.state_mutex, "wifi_state" );
 
-  (void) osal_bin_sem_create( &g_ctx.ip_sem, "wifi_ip", OSAL_SEM_FULL );
-  (void) osal_bin_sem_create( &g_ctx.scan_sem, "wifi_scan", OSAL_SEM_EMPTY );
-  (void) osal_bin_sem_create( &g_ctx.ready_sem, "wifi_ready", OSAL_SEM_EMPTY );
-  (void) osal_bin_sem_create( &g_ctx.stop_sem, "wifi_stop", OSAL_SEM_EMPTY );
+  /* Harden object creation: every mutex, semaphore, task attribute and the
+   * worker itself must be created before the module publishes itself as
+   * initialized.  The worker is created last so a partially-failed init never
+   * runs a task that could consume not-yet-valid objects.  Any failure falls
+   * through to the single centralized rollback path. */
+  st = osal_mutex_create( &g_ctx.event_mutex, "wifi_evt" );
+  if ( st != OSAL_SUCCESS )
+  {
+    goto init_failed;
+  }
+  st = osal_mutex_create( &g_ctx.state_mutex, "wifi_state" );
+  if ( st != OSAL_SUCCESS )
+  {
+    goto init_failed;
+  }
+  st = osal_bin_sem_create( &g_ctx.ip_sem, "wifi_ip", OSAL_SEM_FULL );
+  if ( st != OSAL_SUCCESS )
+  {
+    goto init_failed;
+  }
+  st = osal_bin_sem_create( &g_ctx.scan_sem, "wifi_scan", OSAL_SEM_EMPTY );
+  if ( st != OSAL_SUCCESS )
+  {
+    goto init_failed;
+  }
+  st = osal_bin_sem_create( &g_ctx.ready_sem, "wifi_ready", OSAL_SEM_EMPTY );
+  if ( st != OSAL_SUCCESS )
+  {
+    goto init_failed;
+  }
+  st = osal_bin_sem_create( &g_ctx.stop_sem, "wifi_stop", OSAL_SEM_EMPTY );
+  if ( st != OSAL_SUCCESS )
+  {
+    goto init_failed;
+  }
 
   g_ctx.startup_done = false;
   g_ctx.startup_ok   = false;
@@ -1070,23 +1169,41 @@ void wifi_mgmt_init( void )
     g_ctx.connect_req = true;
   }
 
-  osal_task_attr_t attr;
-  (void) osal_task_attributes_init( &attr );
-  size_t stack_size = OSAL_TASK_MIN_STACK_SIZE * 4;
-  osal_status_t task_rc = osal_task_create( &g_wifi_task_id,
+  {
+    /* Initialize the task attributes and create the worker last. */
+    osal_task_attr_t attr;
+    st = osal_task_attributes_init( &attr );
+    if ( st != OSAL_SUCCESS )
+    {
+      goto init_failed;
+    }
+
+    st = osal_task_create( &g_wifi_task_id,
                            "wifi_task",
                            _wifi_event_task,
                            NULL,
                            NULL,
-                           stack_size,
+                           OSAL_TASK_MIN_STACK_SIZE * 4,
                            NORMALPRIO,
                            &attr );
-  osal_log_info( "[wifi] task create rc=%d, stack=%zu, prio=%u",
-                 (int) task_rc, stack_size, (unsigned) NORMALPRIO );
-  if ( task_rc != OSAL_SUCCESS )
-  {
-    osal_log_error( "[wifi] FAILED to create wifi_task (rc=%d)", (int) task_rc );
+    osal_log_info( "[wifi] task create rc=%d, stack=%zu, prio=%u",
+                   (int) st, (size_t) OSAL_TASK_MIN_STACK_SIZE * 4,
+                   (unsigned) NORMALPRIO );
+    if ( st != OSAL_SUCCESS )
+    {
+      goto init_failed;
+    }
   }
+
+  /* The worker and every management object now exist.  Publish the initialized
+   * state only after the whole object graph is valid — never before the task
+   * creation succeeds. */
+  g_ctx.initialized = true;
+  return;
+
+init_failed:
+  osal_log_error( "[wifi] init failed, rolling back partial initialization" );
+  _clear_initialized_state();
 }
 
 void wifi_mgmt_set_wifi_type( wifi_type_t type )
@@ -1135,9 +1252,9 @@ bool wifi_mgmt_request_mode( wifi_type_t type )
 
 bool wifi_mgmt_stop( void )
 {
-  /* The null state mutex is the narrow stop-before-init guard.  No management
+  /* The cleared initialized flag is the stop-before-init guard.  No management
    * object exists yet, so there is no worker or HAL round to acknowledge. */
-  if ( g_ctx.state_mutex == NULL )
+  if ( !g_ctx.initialized )
   {
     return true;
   }

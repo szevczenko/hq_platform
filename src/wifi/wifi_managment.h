@@ -146,7 +146,18 @@ bool wifi_mgmt_request_mode( wifi_type_t type );
 
 /**
  * @brief   Initialize the Wi-Fi management module and spawn the worker task.
- * @note    Call @c wifi_mgmt_set_wifi_type before this function.
+ *
+ * @details Initialization is transactional: every mutex, semaphore, task
+ *          attribute and the single worker task must be created successfully
+ *          before the module is published as initialized. The worker is created
+ *          last so a failed init can never run a task against a partially built
+ *          module. On any creation failure, partially created objects are
+ *          deleted in exact reverse order and the module is left
+ *          indistinguishable from never initialized.
+ *
+ * @note    A single lifecycle owner must serialize init/start/stop calls.
+ *          Calling this function again after a successful init is a no-op.
+ *          Call @c wifi_mgmt_set_wifi_type before this function.
  */
 void wifi_mgmt_init( void );
 

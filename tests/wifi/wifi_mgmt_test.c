@@ -83,6 +83,7 @@ static event_rec_t g_ev_failed;
 static event_rec_t g_ev_scan;
 static event_rec_t g_ev_mode;
 static event_rec_t g_ev_unsub;
+static event_rec_t g_ev_repeat_init;
 
 static void _record_event( wifi_mgmt_event_t event, void* user_data )
 {
@@ -1423,6 +1424,40 @@ static void test_stale_token_stop_regression( void )
   (void) osal_bin_sem_delete( ctx.accept_sem );
   (void) osal_bin_sem_delete( ctx.done_sem );
 }
+/* ============================================================================
+ * TASK-135A  Repeated successful init is a no-op
+ *
+ * Calling wifi_mgmt_init() again after a successful init must be idempotent:
+ * it must neither spawn a second worker nor tear down (and then rebuild) the
+ * live module.  Worker-count observability is intentionally deferred to
+ * TASK-135C, so this regression observes the no-op contract through the
+ * management subscription storage: a temporary typed subscription registered
+ * before the repeated init must survive it. A naive re-init would wipe that
+ * storage (and clear any callbacks), so the duplicate-rejection and
+ * unsubscribe checks below prove the no-op path was taken.
+ * ========================================================================== */
+static void test_repeated_init_is_noop( void )
+{
+  const wifi_mgmt_event_t evt = WIFI_MGMT_EVENT_MODE_CHANGED;
+
+  _reset_event( &g_ev_repeat_init );
+
+  /* Establish the temporary subscription before the repeated init. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( evt, _record_event, &g_ev_repeat_init ),
+                            "temp subscription registered before repeat init" );
+
+  /* Repeat successful init: idempotent, must not clear subscription storage. */
+  wifi_mgmt_init();
+
+  /* The temp entry must still occupy its slot (duplicate rejected) and remain
+   * removable, proving the init was a genuine no-op over the live module. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_subscribe( evt, _record_event, &g_ev_repeat_init ),
+                             "duplicate subscription still rejected after repeat init" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_unsubscribe( evt, _record_event, &g_ev_repeat_init ),
+                            "subscription survived the repeated init" );
+
+  _reset_event( &g_ev_repeat_init );
+}
 
 /* ============================================================================
  * Runner
@@ -1455,6 +1490,9 @@ void wifi_mgmt_tests_run( void )
    * test_wait_ready_held_at_callback_barrier, which parks the HAL init at the
    * mock barrier and proves readiness is not reported before the callback is
    * installed. */
+
+  /* TASK-135A: a repeat of a successful init must be an idempotent no-op. */
+  RUN_TEST( test_repeated_init_is_noop );
 
   /* --- Run all tests sequentially (single lifecycle) --- */
   RUN_TEST( test_wait_ready_held_at_callback_barrier );
