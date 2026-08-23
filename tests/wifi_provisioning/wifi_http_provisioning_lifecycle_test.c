@@ -20,6 +20,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -354,6 +355,159 @@ static void test_stop_does_not_stop_mongoose_or_mqtt( void )
 }
 
 /* ------------------------------------------------------------------ */
+/* Concurrent and repeated stop scenarios.                             */
+/* ------------------------------------------------------------------ */
+
+/* After a stop, repeated stops must be safe no-ops that return the same
+ * completed result (WIFI_PROVISIONING_STOPPED) without touching listeners. */
+static void test_repeated_stop_is_safe_and_idempotent( void )
+{
+	char http_url[64], dns_url[64];
+
+	configure_fresh_listeners( http_url, sizeof( http_url ),
+	                           dns_url, sizeof( dns_url ) );
+	TEST_ASSERT_TRUE( wifi_http_provisioning_start() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
+	                       wifi_http_provisioning_get_state() );
+
+	TEST_ASSERT_TRUE( wifi_http_provisioning_stop() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_FALSE( captive_dns_server_is_running() );
+
+	/* Repeated stops join/observe the completed STOPPED result. */
+	TEST_ASSERT_TRUE( wifi_http_provisioning_stop() );
+	TEST_ASSERT_TRUE( wifi_http_provisioning_stop() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_FALSE( captive_dns_server_is_running() );
+	TEST_ASSERT_TRUE( MongooseProcess_IsRunning() );
+}
+
+#define PROV_STOP_THREADS 8
+static pthread_t g_prov_stop_threads[PROV_STOP_THREADS];
+static bool      g_prov_stop_results[PROV_STOP_THREADS];
+
+static void *prov_stop_runner( void * arg )
+{
+	size_t idx = ( size_t ) arg;
+
+	g_prov_stop_results[idx] = wifi_http_provisioning_stop();
+	return NULL;
+}
+
+/* Start the provisioning application, then stop it from many threads at once.
+ * stop() holds the dedicated lifecycle mutex for the whole operation, so each
+ * caller either performs the cleanup or joins the in-flight stop; every one
+ * must receive the same completed result and the listeners must be fully
+ * released (the same ports can be re-bound right away). */
+static void test_concurrent_stop_callers( void )
+{
+	char   http_url[64], dns_url[64];
+	size_t i;
+
+	configure_fresh_listeners( http_url, sizeof( http_url ),
+	                           dns_url, sizeof( dns_url ) );
+	TEST_ASSERT_TRUE( wifi_http_provisioning_start() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_TRUE( captive_dns_server_is_running() );
+
+	for ( i = 0; i < PROV_STOP_THREADS; ++i )
+	{
+		TEST_ASSERT_EQUAL_INT( 0,
+			pthread_create( &g_prov_stop_threads[i], NULL,
+			                prov_stop_runner, ( void * ) i ) );
+	}
+
+	for ( i = 0; i < PROV_STOP_THREADS; ++i )
+	{
+		TEST_ASSERT_EQUAL_INT( 0,
+		                      pthread_join( g_prov_stop_threads[i], NULL ) );
+		TEST_ASSERT_TRUE_MESSAGE( g_prov_stop_results[i],
+			"every concurrent stop caller must receive the completed result" );
+	}
+
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_FALSE( captive_dns_server_is_running() );
+	TEST_ASSERT_TRUE( MongooseProcess_IsRunning() );
+
+	/* The same configured listeners can be re-bound: their poll-thread close
+	 * operations completed before the concurrent stops returned. */
+	TEST_ASSERT_TRUE( wifi_http_provisioning_start() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_TRUE( wifi_http_provisioning_stop() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
+	                       wifi_http_provisioning_get_state() );
+}
+
+#define PROV_HAMMER_THREADS 4
+static pthread_t g_prov_hammer_threads[PROV_HAMMER_THREADS];
+static bool      g_prov_hammer_failed[PROV_HAMMER_THREADS];
+
+/* Repeatedly cycles start()/stop() on the same configured ports. All calls
+ * must succeed: start is a no-op when already running and stop either runs or
+ * joins another stop, so no interleaving may fail or leak a listener. */
+static void *prov_hammer_runner( void * arg )
+{
+	size_t idx = ( size_t ) arg;
+	int    i;
+
+	g_prov_hammer_failed[idx] = false;
+	for ( i = 0; i < 10; ++i )
+	{
+		if ( !wifi_http_provisioning_start() ) g_prov_hammer_failed[idx] = true;
+		if ( !wifi_http_provisioning_stop() )  g_prov_hammer_failed[idx] = true;
+	}
+	return NULL;
+}
+
+static void test_concurrent_start_stop_hammer( void )
+{
+	char   http_url[64], dns_url[64];
+	size_t i;
+	int    j;
+
+	configure_fresh_listeners( http_url, sizeof( http_url ),
+	                           dns_url, sizeof( dns_url ) );
+
+	for ( i = 0; i < PROV_HAMMER_THREADS; ++i )
+	{
+		TEST_ASSERT_EQUAL_INT( 0,
+			pthread_create( &g_prov_hammer_threads[i], NULL,
+			                prov_hammer_runner, ( void * ) i ) );
+	}
+
+	for ( i = 0; i < PROV_HAMMER_THREADS; ++i )
+	{
+		TEST_ASSERT_EQUAL_INT( 0,
+		                      pthread_join( g_prov_hammer_threads[i], NULL ) );
+		TEST_ASSERT_FALSE_MESSAGE( g_prov_hammer_failed[i],
+			"hammered start/stop must never report a lifecycle failure" );
+	}
+
+	/* All threads unwound to STOPPED; settle and verify full cleanup. */
+	(void) wifi_http_provisioning_stop();
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_FALSE( captive_dns_server_is_running() );
+	TEST_ASSERT_TRUE( MongooseProcess_IsRunning() );
+
+	/* The same ports still rebind cleanly after the contention. */
+	for ( j = 0; j < 3; ++j )
+	{
+		TEST_ASSERT_TRUE( wifi_http_provisioning_start() );
+		TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
+		                       wifi_http_provisioning_get_state() );
+		TEST_ASSERT_TRUE( wifi_http_provisioning_stop() );
+		TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
+		                       wifi_http_provisioning_get_state() );
+	}
+}
+
+/* ------------------------------------------------------------------ */
 /* Test runner.                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -391,6 +545,9 @@ int main( void )
 	RUN_TEST( test_dns_bind_failure_roll_back );
 	RUN_TEST( test_recovery_after_failure );
 	RUN_TEST( test_stop_does_not_stop_mongoose_or_mqtt );
+	RUN_TEST( test_repeated_stop_is_safe_and_idempotent );
+	RUN_TEST( test_concurrent_stop_callers );
+	RUN_TEST( test_concurrent_start_stop_hammer );
 
 	/* --- teardown -------------------------------------------------- */
 	wifi_http_provisioning_stop();

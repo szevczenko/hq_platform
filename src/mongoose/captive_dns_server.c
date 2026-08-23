@@ -136,26 +136,44 @@ size_t CaptiveDns_BuildResponse(const uint8_t *query, size_t len,
 
 typedef struct {
   char bind_url[CAPTIVE_DNS_URL_MAX_LEN]; /* Configured UDP listen URL */
-  bool bound;                             /* A bind URL has been configured */
-  bool running;                          /* Service is currently listening */
-  uint8_t ip4[4];                        /* Captive A answer IPv4 address */
-  struct mg_connection *nc;             /* Owned DNS listener (poll thread) */
+  bool bind_url_set;                      /* A bind URL has been configured */
+  bool running;                           /* Service is currently listening */
+  uint8_t ip4[4];                         /* Captive A answer IPv4 address */
+  struct mg_connection *nc;              /* Owned DNS listener (poll thread) */
 } captive_dns_service_t;
 
 static captive_dns_service_t s_svc;
 static uint8_t s_resp[CAPTIVE_DNS_MAX_PACKET];
 static osal_mutex_id_t s_mutex;
 static bool s_mutex_ready;
+/* Dedicated lifecycle mutex. Serializes the whole start()/stop() operations so
+ * concurrent callers cannot both operate on the owned listener state, and a
+ * stop caller arriving during another stop waits for it to finish and then
+ * observes the completed result (running == false). */
+static osal_mutex_id_t s_lifecycle_mutex;
+static bool s_lifecycle_ready;
 
-/* Lazily create the state mutex.  Idempotent; safe if recreated after the
- * service is stopped.  Returns false only if the OSAL call fails. */
+/* Lazily create the state and lifecycle mutexes.  Idempotent; safe if
+ * recreated after the service is stopped.  Returns false only if an OSAL call
+ * fails. */
 static bool dns_ensure_mutex(void)
 {
-  if (s_mutex_ready) return true;
-  osal_mutex_id_t mtx;
-  if (osal_mutex_create(&mtx, "captive_dns") != OSAL_SUCCESS) return false;
-  s_mutex = mtx;
-  s_mutex_ready = true;
+  if (s_mutex_ready && s_lifecycle_ready) return true;
+
+  if (!s_mutex_ready) {
+    osal_mutex_id_t mtx;
+    if (osal_mutex_create(&mtx, "captive_dns") != OSAL_SUCCESS) return false;
+    s_mutex = mtx;
+    s_mutex_ready = true;
+  }
+
+  if (!s_lifecycle_ready) {
+    osal_mutex_id_t mtx;
+    if (osal_mutex_create(&mtx, "captive_dns_lc") != OSAL_SUCCESS) return false;
+    s_lifecycle_mutex = mtx;
+    s_lifecycle_ready = true;
+  }
+
   return true;
 }
 
@@ -177,16 +195,35 @@ static void dns_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
   nc->recv.len = 0;
 }
 
-/* Creates the DNS listener.  Runs on the Mongoose poll thread. */
+/* Result of a DNS listener bind carried out on the Mongoose poll thread. The
+ * poll thread writes the boolean; the caller reads it only after
+ * MongooseProcess_Invoke() returns, so the owned listener pointer itself is
+ * never shared across threads. */
+typedef struct {
+  bool bound;
+} dns_listener_bind_result_t;
+
+/* Creates the DNS listener.  Runs exclusively on the Mongoose poll thread, so
+ * it is the only place (besides dns_listener_stop_cb) that may read or write
+ * the owned s_svc.nc pointer. */
 static void dns_listener_start_cb(struct mg_mgr *mgr, void *user)
 {
-  (void)user;
-  if (s_svc.nc != NULL) return;  /* Already listening; keep the existing one. */
+  dns_listener_bind_result_t *result = (dns_listener_bind_result_t *) user;
+
+  if (result != NULL) result->bound = false;
+  if (s_svc.nc != NULL) {
+    /* Already listening; keep the existing one. */
+    if (result != NULL) result->bound = true;
+    return;
+  }
   s_svc.nc = mg_listen(mgr, s_svc.bind_url, dns_ev_handler, NULL);
+  if (result != NULL) result->bound = (s_svc.nc != NULL);
 }
 
 /* Closes only the DNS listener owned by this service.  Runs on the Mongoose
- * poll thread.  Leaves the shared process (and all other listeners) intact. */
+ * poll thread and completes before captive_dns_server_stop() returns (the
+ * invocation is per-request synchronous).  Leaves the shared process (and all
+ * other listeners) intact. */
 static void dns_listener_stop_cb(struct mg_mgr *mgr, void *user)
 {
   (void)mgr;
@@ -229,7 +266,7 @@ bool captive_dns_server_set_bind_url(const char *url)
   } else {
     memcpy(s_svc.bind_url, url, len);
     s_svc.bind_url[len] = '\0';
-    s_svc.bound = true;
+    s_svc.bind_url_set = true;
     ok = true;
   }
   (void)osal_mutex_give(s_mutex);
@@ -249,49 +286,81 @@ bool captive_dns_server_is_running(void)
 
 bool captive_dns_server_start(void)
 {
-  bool bound;
+  bool url_set;
 
   if (!dns_ensure_mutex()) return false;
+
+  /* Serialize the entire start() with stop(): single-owner lifecycle. */
+  (void)osal_mutex_take(s_lifecycle_mutex);
 
   (void)osal_mutex_take(s_mutex);
   if (s_svc.running) {
     (void)osal_mutex_give(s_mutex);
+    (void)osal_mutex_give(s_lifecycle_mutex);
     return true;  /* Idempotent: already running. */
   }
-  bound = s_svc.bound;
+  url_set = s_svc.bind_url_set;
   (void)osal_mutex_give(s_mutex);
 
-  if (!bound) return false;  /* No bind URL configured yet. */
+  if (!url_set) {
+    (void)osal_mutex_give(s_lifecycle_mutex);
+    return false;  /* No bind URL configured yet. */
+  }
 
   /* The DNS service rides the shared Mongoose process. */
   MongooseProcess_Init();
-  if (!MongooseProcess_IsRunning()) return false;
-
-  if (!MongooseProcess_Invoke(dns_listener_start_cb, NULL,
-                              CAPTIVE_DNS_INVOKE_TIMEOUT_MS))
+  if (!MongooseProcess_IsRunning()) {
+    (void)osal_mutex_give(s_lifecycle_mutex);
     return false;
+  }
+
+  /* Bind on the poll thread. The callback reports the outcome through the
+   * caller-local result, so start() never reads the owned listener pointer. */
+  {
+    dns_listener_bind_result_t bind_result;
+
+    if (!MongooseProcess_Invoke(dns_listener_start_cb, &bind_result,
+                                CAPTIVE_DNS_INVOKE_TIMEOUT_MS) ||
+        !bind_result.bound) {
+      (void)osal_mutex_give(s_lifecycle_mutex);
+      return false;  /* Invocation failed or the UDP bind was refused. */
+    }
+  }
 
   (void)osal_mutex_take(s_mutex);
-  bound = (s_svc.nc != NULL);
-  if (bound) s_svc.running = true;
+  s_svc.running = true;
   (void)osal_mutex_give(s_mutex);
-  return bound;  /* false reports a bind failure to the caller */
+  (void)osal_mutex_give(s_lifecycle_mutex);
+  return true;
 }
 
-void captive_dns_server_stop(void)
+bool captive_dns_server_stop(void)
 {
   bool was_running;
+  bool ok = true;
 
-  if (!dns_ensure_mutex()) return;
+  if (!dns_ensure_mutex()) return false;
+
+  /* Serialize the whole stop() with start(). A caller arriving while another
+   * stop is in flight waits here and then observes running == false below,
+   * receiving the same completed result. */
+  (void)osal_mutex_take(s_lifecycle_mutex);
 
   (void)osal_mutex_take(s_mutex);
   was_running = s_svc.running;
   s_svc.running = false;
   (void)osal_mutex_give(s_mutex);
 
-  if (!was_running) return;  /* Idempotent: nothing to close. */
-  if (!MongooseProcess_IsRunning()) return;  /* Process already gone. */
-
-  MongooseProcess_Invoke(dns_listener_stop_cb, NULL,
-                         CAPTIVE_DNS_INVOKE_TIMEOUT_MS);
+  if (was_running && MongooseProcess_IsRunning()) {
+    /* Close on the poll thread and confirm the close callback completed. If
+     * the owned listener cannot be closed while Mongoose is still running,
+     * the caller is told so it can report a lifecycle error. */
+    ok = MongooseProcess_Invoke(dns_listener_stop_cb, NULL,
+                                CAPTIVE_DNS_INVOKE_TIMEOUT_MS);
+  }
+  /* was_running == false: nothing to close (idempotent stop).  Mongoose not
+   * running: its teardown has already released every listener.  Both are
+   * successful stops. */
+  (void)osal_mutex_give(s_lifecycle_mutex);
+  return ok;
 }

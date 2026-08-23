@@ -131,13 +131,20 @@ void captive_dns_server_set_ip4(const uint8_t ip4[4]);
 bool captive_dns_server_start(void);
 
 /**
- * @brief Stop the captive DNS service (idempotent).
+ * @brief Stop the captive DNS service (idempotent, single-owner).
  *
- * Closes only the DNS listener owned by this service.  The shared Mongoose
- * process and any other listeners are left running.  Safe to call when the
- * service is not running.
+ * Closes only the DNS listener owned by this service.  The listener close
+ * callback runs on the Mongoose poll thread and completes before this function
+ * returns.  The shared Mongoose process and any other listeners are left
+ * running.  Safe to call when the service is not running.  Concurrent stop
+ * callers are serialized: a caller arriving while another stop is in flight
+ * waits for it to finish and then receives the same completed result.
+ *
+ * @return true when the listener is stopped (now, already, or released by a
+ *         Mongoose teardown), false when the owned listener could not be
+ *         closed while the shared Mongoose process is still running.
  */
-void captive_dns_server_stop(void);
+bool captive_dns_server_stop(void);
 
 /**
  * @brief Return whether the captive DNS service is currently running.

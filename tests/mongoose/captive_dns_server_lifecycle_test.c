@@ -11,6 +11,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -178,10 +179,12 @@ static void test_start_stop_are_idempotent_and_process_stays_alive(void)
 	TEST_ASSERT_TRUE_MESSAGE(MongooseProcess_IsRunning(),
 				 "DNS start() must not tear down the process");
 
-	/* Stop releases the listener; a second stop is also safe. */
-	captive_dns_server_stop();
+	/* Stop releases the listener; further stops are also safe and confirm. */
+	TEST_ASSERT_TRUE_MESSAGE(captive_dns_server_stop(),
+				 "stop must confirm the listener closed");
 	TEST_ASSERT_FALSE(captive_dns_server_is_running());
-	captive_dns_server_stop();  /* must not crash */
+	TEST_ASSERT_TRUE_MESSAGE(captive_dns_server_stop(),
+				 "stopping an already-stopped service must be safe");
 
 	/* Stopping DNS does NOT stop the shared Mongoose process. */
 	TEST_ASSERT_TRUE_MESSAGE(MongooseProcess_IsRunning(),
@@ -284,12 +287,93 @@ static void test_answers_dns_query(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Concurrent and repeated stop scenarios.                             */
+/* ------------------------------------------------------------------ */
+
+/* Repeatedly start and stop on the SAME bind URL. A successful restart on the
+ * very port that was just closed proves the poll-thread close operation
+ * completed before the stop returned. */
+static void test_repeated_start_stop_on_same_url(void)
+{
+	char url[64];
+	int  port = free_port();
+	int  i;
+
+	TEST_ASSERT_TRUE(port > 0);
+	build_url(url, sizeof(url), port);
+	TEST_ASSERT_TRUE(captive_dns_server_set_bind_url(url));
+	captive_dns_server_set_ip4(g_ip4);
+
+	for (i = 0; i < 25; ++i) {
+		TEST_ASSERT_TRUE_MESSAGE(captive_dns_server_start(),
+					 "start must bind the listener every cycle");
+		TEST_ASSERT_TRUE(captive_dns_server_is_running());
+		TEST_ASSERT_TRUE_MESSAGE(captive_dns_server_stop(),
+					 "stop must confirm the listener closed");
+		TEST_ASSERT_FALSE(captive_dns_server_is_running());
+		TEST_ASSERT_TRUE(MongooseProcess_IsRunning());
+	}
+}
+
+#define DNS_STOP_THREADS 8
+static pthread_t g_dns_stop_threads[DNS_STOP_THREADS];
+static bool      g_dns_stop_results[DNS_STOP_THREADS];
+
+static void *dns_stop_runner(void *arg)
+{
+	size_t idx = (size_t)arg;
+
+	g_dns_stop_results[idx] = captive_dns_server_stop();
+	return NULL;
+}
+
+/* Many threads stop the service at once. The lifecycle mutex serializes the
+ * single-owner stop, so every caller receives the same completed result and
+ * the listener is fully released before any of them returns. */
+static void test_concurrent_stop_callers(void)
+{
+	char url[64];
+	int  port = free_port();
+	size_t i;
+
+	TEST_ASSERT_TRUE(port > 0);
+	build_url(url, sizeof(url), port);
+	TEST_ASSERT_TRUE(captive_dns_server_set_bind_url(url));
+	captive_dns_server_set_ip4(g_ip4);
+	TEST_ASSERT_TRUE(captive_dns_server_start());
+	TEST_ASSERT_TRUE(captive_dns_server_is_running());
+
+	for (i = 0; i < DNS_STOP_THREADS; i++) {
+		TEST_ASSERT_EQUAL_INT(0,
+			pthread_create(&g_dns_stop_threads[i], NULL,
+				       dns_stop_runner, (void *)i));
+	}
+	for (i = 0; i < DNS_STOP_THREADS; i++) {
+		TEST_ASSERT_EQUAL_INT(0, pthread_join(g_dns_stop_threads[i], NULL));
+		TEST_ASSERT_TRUE_MESSAGE(g_dns_stop_results[i],
+			"every concurrent stop caller must see the completed result");
+	}
+
+	TEST_ASSERT_FALSE(captive_dns_server_is_running());
+	TEST_ASSERT_TRUE(MongooseProcess_IsRunning());
+
+	/* The closed port is free again: a fresh start rebinds the same URL. */
+	TEST_ASSERT_TRUE_MESSAGE(captive_dns_server_start(),
+				 "restart after concurrent stops must rebind");
+	TEST_ASSERT_TRUE(captive_dns_server_is_running());
+	TEST_ASSERT_TRUE(captive_dns_server_stop());
+	TEST_ASSERT_FALSE(captive_dns_server_is_running());
+}
+
+/* ------------------------------------------------------------------ */
 
 static void captive_dns_server_lifecycle_tests_run(void)
 {
 	RUN_TEST(test_start_stop_are_idempotent_and_process_stays_alive);
 	RUN_TEST(test_bind_failure_is_reported);
 	RUN_TEST(test_answers_dns_query);
+	RUN_TEST(test_repeated_start_stop_on_same_url);
+	RUN_TEST(test_concurrent_stop_callers);
 }
 
 #ifdef ESP_PLATFORM

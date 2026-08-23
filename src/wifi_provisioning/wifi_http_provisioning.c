@@ -74,8 +74,23 @@
 /* Reference AP address used as the default captive DNS A-record answer. */
 #define WIFI_PROVISIONING_DEFAULT_AP_IP "10.10.0.1"
 
-/* Owned HTTP listener (poll thread) and serialized provisioning state. */
-static struct mg_connection  *s_http_nc;
+/* Owned HTTP listener and serialized provisioning lifecycle state.
+ *
+ * s_http_nc holds the owned HTTP listener and is read and written ONLY inside
+ * the Mongoose poll-thread callbacks (http_listener_start_cb /
+ * http_listener_stop_cb), so no listener pointer is ever read or modified from
+ * another thread.  Other threads observe only locked boolean lifecycle
+ * snapshots (s_http_bound, s_dns_started, s_state) and never the pointer.
+ *
+ * start() and stop() are single-owner operations: each takes
+ * s_lifecycle_mutex for the entire operation, so concurrent start/stop calls
+ * are fully serialized and can never interleave on s_http_bound,
+ * s_dns_started, the Wi-Fi event subscriptions, or the lifecycle state.  A
+ * stop caller arriving during WIFI_PROVISIONING_STOPPING simply waits on
+ * s_lifecycle_mutex and joins the in-flight stop, observing its completed
+ * result. */
+static struct mg_connection  *s_http_nc;      /* Poll thread only. */
+static bool   s_http_bound;                   /* Lifecycle snapshot.         */
 static wifi_http_provisioning_state_t s_state;
 static char   s_http_url[WIFI_PROVISIONING_URL_MAX_LEN];
 static bool   s_http_configured;
@@ -83,9 +98,15 @@ static char   s_dns_url[WIFI_PROVISIONING_URL_MAX_LEN];
 static bool   s_dns_configured;
 static uint8_t s_ap_ip[4];
 static bool   s_ap_ip_set;
-static bool   s_dns_started;
+static bool   s_dns_started;                  /* Lifecycle snapshot.         */
 static osal_mutex_id_t s_mutex;
 static bool   s_mutex_ready;
+/* Dedicated lifecycle mutex. Serializes the whole start()/stop() operations so
+ * concurrent callers cannot both operate on owned listeners and lifecycle
+ * state, and a stop caller arriving during WIFI_PROVISIONING_STOPPING waits
+ * for the in-flight stop instead of returning success before cleanup. */
+static osal_mutex_id_t s_lifecycle_mutex;
+static bool   s_lifecycle_ready;
 
 /* Wi-Fi link failure tracking for the status route. s_wifi_failed latches the
  * most recent CONNECT_FAILED event so the reported "failed" state is stable
@@ -95,16 +116,28 @@ static bool   s_mutex_ready;
 static bool  s_wifi_failed;
 static char  s_last_failure[32];
 
-/* Lazily create the state mutex. Idempotent; safe if the module is reused
- * after a reset. Returns false only if the OSAL call fails. */
+/* Lazily create the state and lifecycle mutexes. Idempotent; safe if the
+ * module is reused after a reset. Returns false only if an OSAL call fails. */
 static bool prov_ensure_mutex( void )
 {
-  if ( s_mutex_ready ) return true;
+  if ( s_mutex_ready && s_lifecycle_ready ) return true;
 
-  osal_mutex_id_t mtx;
-  if ( osal_mutex_create( &mtx, "wifi_prov" ) != OSAL_SUCCESS ) return false;
-  s_mutex       = mtx;
-  s_mutex_ready = true;
+  if ( !s_mutex_ready )
+  {
+    osal_mutex_id_t mtx;
+    if ( osal_mutex_create( &mtx, "wifi_prov" ) != OSAL_SUCCESS ) return false;
+    s_mutex       = mtx;
+    s_mutex_ready = true;
+  }
+
+  if ( !s_lifecycle_ready )
+  {
+    osal_mutex_id_t mtx;
+    if ( osal_mutex_create( &mtx, "wifi_prov_lc" ) != OSAL_SUCCESS ) return false;
+    s_lifecycle_mutex = mtx;
+    s_lifecycle_ready = true;
+  }
+
   return true;
 }
 
@@ -833,16 +866,36 @@ static void http_ev_handler( struct mg_connection * nc, int ev, void * ev_data )
   nc->is_draining = 1;
 }
 
-/* Creates the HTTP listener on the Mongoose poll thread. */
+/* Result of an HTTP listener bind carried out on the Mongoose poll thread. The
+ * poll thread writes the boolean; the caller reads it only after
+ * MongooseProcess_Invoke() returns, so the owned connection pointer itself is
+ * never shared across threads. */
+typedef struct
+{
+  bool bound;
+} http_listener_bind_result_t;
+
+/* Creates the HTTP listener on the Mongoose poll thread. Runs exclusively on
+ * the poll thread, so it is the only place (besides http_listener_stop_cb)
+ * that may read or write the owned s_http_nc pointer. */
 static void http_listener_start_cb( struct mg_mgr * mgr, void * user )
 {
-  ( void ) user;
-  if ( s_http_nc != NULL ) return;   /* Already listening. */
+  http_listener_bind_result_t * result = ( http_listener_bind_result_t * ) user;
+
+  if ( result != NULL ) result->bound = false;
+  if ( s_http_nc != NULL )
+  {
+    if ( result != NULL ) result->bound = true;  /* Already listening. */
+    return;
+  }
   s_http_nc = mg_http_listen( mgr, s_http_url, http_ev_handler, NULL );
+  if ( result != NULL ) result->bound = ( s_http_nc != NULL );
 }
 
 /* Closes only the HTTP listener owned by this module. Leaves the shared
- * process (and any other listeners) intact. */
+ * process (and any other listeners) intact. Runs on the Mongoose poll thread
+ * and completes before wifi_http_provisioning_stop() returns (the invocation
+ * is per-request synchronous). */
 static void http_listener_stop_cb( struct mg_mgr * mgr, void * user )
 {
   ( void ) mgr;
@@ -868,9 +921,12 @@ static void prov_set_error( void )
 
 bool wifi_http_provisioning_start( void )
 {
-  bool bound;
+  bool started = false;
 
   if ( !prov_ensure_mutex() ) return false;
+
+  /* Serialize the entire start() with stop(): single-owner lifecycle. */
+  ( void ) osal_mutex_take( s_lifecycle_mutex );
 
   /* Idempotent: already running or starting is a safe no-op. */
   ( void ) osal_mutex_take( s_mutex );
@@ -878,14 +934,11 @@ bool wifi_http_provisioning_start( void )
        s_state == WIFI_PROVISIONING_STARTING )
   {
     ( void ) osal_mutex_give( s_mutex );
+    ( void ) osal_mutex_give( s_lifecycle_mutex );
     return true;
   }
-  /* Do not race an in-flight stop; the caller must wait for STOPPED first. */
-  if ( s_state == WIFI_PROVISIONING_STOPPING )
-  {
-    ( void ) osal_mutex_give( s_mutex );
-    return false;
-  }
+  /* A stop cannot be in flight while we hold s_lifecycle_mutex, so the state
+   * is STOPPED or ERROR here; both are valid start points. */
   s_state = WIFI_PROVISIONING_STARTING;
   ( void ) osal_mutex_give( s_mutex );
 
@@ -893,14 +946,14 @@ bool wifi_http_provisioning_start( void )
   if ( !MongooseProcess_IsRunning() )
   {
     prov_set_error();
-    return false;
+    goto out;
   }
 
   /* Require Wi-Fi management to be initialized/started. */
   if ( !wifi_mgmt_is_running() )
   {
     prov_set_error();
-    return false;
+    goto out;
   }
 
   /* Apply Kconfig defaults when no runtime override was provided. */
@@ -927,45 +980,42 @@ bool wifi_http_provisioning_start( void )
   if ( !wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ) )
   {
     prov_set_error();
-    return false;
+    goto out;
   }
 
   /* Start the captive DNS listener first. */
   if ( !captive_dns_server_set_bind_url( s_dns_url ) )
   {
     prov_set_error();
-    return false;
+    goto out;
   }
   captive_dns_server_set_ip4( s_ap_ip );
   if ( !captive_dns_server_start() )
   {
     prov_set_error();
-    return false;
+    goto out;
   }
   s_dns_started = true;
 
-  /* Start the provisioning HTTP listener on the Mongoose thread. */
-  if ( !MongooseProcess_Invoke( http_listener_start_cb, NULL,
-                                WIFI_PROVISIONING_INVOKE_TIMEOUT_MS ) )
+  /* Start the provisioning HTTP listener on the poll thread. The callback
+   * reports the bind outcome through the caller-local result, so start() never
+   * reads the owned s_http_nc pointer itself. */
   {
-    captive_dns_server_stop();
-    s_dns_started = false;
-    prov_set_error();
-    return false;
-  }
+    http_listener_bind_result_t bind_result;
 
-  ( void ) osal_mutex_take( s_mutex );
-  bound = ( s_http_nc != NULL );
-  ( void ) osal_mutex_give( s_mutex );
-
-  if ( !bound )
-  {
-    /* HTTP bind failed: roll back the DNS listener. */
-    captive_dns_server_stop();
-    s_dns_started = false;
-    prov_set_error();
-    return false;
+    if ( !MongooseProcess_Invoke( http_listener_start_cb, &bind_result,
+                                  WIFI_PROVISIONING_INVOKE_TIMEOUT_MS ) ||
+         !bind_result.bound )
+    {
+      /* Invocation failed or the HTTP bind was refused: roll back the DNS
+       * listener that was already started. */
+      ( void ) captive_dns_server_stop();
+      s_dns_started = false;
+      prov_set_error();
+      goto out;
+    }
   }
+  s_http_bound = true;
 
   /* Track Wi-Fi link state while the portal is active so the status route can
    * report the current link state and the last failure category. */
@@ -980,41 +1030,65 @@ bool wifi_http_provisioning_start( void )
   ( void ) osal_mutex_take( s_mutex );
   s_state = WIFI_PROVISIONING_RUNNING;
   ( void ) osal_mutex_give( s_mutex );
-  return true;
+  started = true;
+
+out:
+  ( void ) osal_mutex_give( s_lifecycle_mutex );
+  return started;
 }
 
 bool wifi_http_provisioning_stop( void )
 {
+  bool ok = true;
+
   if ( !prov_ensure_mutex() ) return false;
 
+  /* Serialize the whole stop() with start() (single-owner lifecycle). A caller
+   * arriving while another stop is in flight (WIFI_PROVISIONING_STOPPING)
+   * blocks here, joins the in-flight stop, and then observes STOPPED below and
+   * returns the same completed result. */
+  ( void ) osal_mutex_take( s_lifecycle_mutex );
+
   ( void ) osal_mutex_take( s_mutex );
-  if ( s_state == WIFI_PROVISIONING_STOPPED ||
-       s_state == WIFI_PROVISIONING_STOPPING )
+  if ( s_state == WIFI_PROVISIONING_STOPPED )
   {
     ( void ) osal_mutex_give( s_mutex );
-    return true;  /* Idempotent. */
+    ( void ) osal_mutex_give( s_lifecycle_mutex );
+    return true;  /* Already stopped. */
   }
   s_state = WIFI_PROVISIONING_STOPPING;
-  (void) osal_mutex_give( s_mutex );
+  ( void ) osal_mutex_give( s_mutex );
 
-  /* Drop Wi-Fi event subscriptions owned by the status route. */
+  /* Stop ordering: drop the Wi-Fi event subscriptions first, then close the
+   * HTTP listener, then the DNS listener, confirm both closures completed on
+   * the poll thread, and only then report STOPPED. */
   prov_unsubscribe_wifi_events();
 
-  /* Close only listeners owned by this application. The shared Mongoose
-   * process is never deinitialized here. */
-  if ( s_http_nc != NULL && MongooseProcess_IsRunning() )
+  /* HTTP listener: close on the poll thread and confirm that the close
+   * callback completed. If the owned listener cannot be closed while Mongoose
+   * is still running, the stop fails and the module reports ERROR. */
+  if ( s_http_bound && MongooseProcess_IsRunning() )
   {
-    MongooseProcess_Invoke( http_listener_stop_cb, NULL,
-                           WIFI_PROVISIONING_INVOKE_TIMEOUT_MS );
+    if ( !MongooseProcess_Invoke( http_listener_stop_cb, NULL,
+                                  WIFI_PROVISIONING_INVOKE_TIMEOUT_MS ) )
+      ok = false;
   }
-  captive_dns_server_stop();
-  s_dns_started     = false;
+  s_http_bound = false;
 
-  /* Clear temporary provisioning state. */
+  /* DNS listener: close through the captive DNS service (its stop runs the
+   * close callback on the poll thread and reports whether it completed). */
+  if ( s_dns_started )
+  {
+    if ( !captive_dns_server_stop() ) ok = false;
+    s_dns_started = false;
+  }
+
+  /* Confirm closure succeeded before reporting STOPPED; otherwise ERROR. */
   ( void ) osal_mutex_take( s_mutex );
-  s_state = WIFI_PROVISIONING_STOPPED;
+  s_state = ok ? WIFI_PROVISIONING_STOPPED : WIFI_PROVISIONING_ERROR;
   ( void ) osal_mutex_give( s_mutex );
-  return true;
+  ( void ) osal_mutex_give( s_lifecycle_mutex );
+  return ok;
 }
 
 wifi_http_provisioning_state_t wifi_http_provisioning_get_state( void )
@@ -1040,7 +1114,8 @@ bool wifi_http_provisioning_set_http_url( const char * url )
 
   ( void ) osal_mutex_take( s_mutex );
   if ( s_state == WIFI_PROVISIONING_RUNNING ||
-       s_state == WIFI_PROVISIONING_STARTING )
+       s_state == WIFI_PROVISIONING_STARTING ||
+       s_state == WIFI_PROVISIONING_STOPPING )
   {
     ( void ) osal_mutex_give( s_mutex );
     return false;
@@ -1062,7 +1137,8 @@ bool wifi_http_provisioning_set_dns_url( const char * url )
 
   ( void ) osal_mutex_take( s_mutex );
   if ( s_state == WIFI_PROVISIONING_RUNNING ||
-       s_state == WIFI_PROVISIONING_STARTING )
+       s_state == WIFI_PROVISIONING_STARTING ||
+       s_state == WIFI_PROVISIONING_STOPPING )
   {
     ( void ) osal_mutex_give( s_mutex );
     return false;

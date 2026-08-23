@@ -55,13 +55,25 @@ typedef enum {
 bool wifi_http_provisioning_start( void );
 
 /**
- * @brief Stop the provisioning application (idempotent).
+ * @brief Stop the provisioning application (idempotent, single-owner).
  *
  * Closes only the HTTP and DNS listeners owned by the provisioning
- * application and clears temporary runtime state. The shared Mongoose process
- * (and any other listeners, such as MQTT) are left untouched.
+ * application and clears temporary runtime state. Stop ordering is preserved:
+ * Wi-Fi callbacks are unsubscribed first, then the HTTP and DNS listeners are
+ * closed on the shared Mongoose poll thread, their closures are confirmed to
+ * have completed, and only then is @c WIFI_PROVISIONING_STOPPED reported. The
+ * shared Mongoose process (and any other listeners, such as MQTT) are left
+ * untouched.
  *
- * @return true when stopped (now or already).
+ * start() and stop() are serialized by a dedicated lifecycle mutex, so
+ * concurrent calls are single-owner. A caller arriving during
+ * @c WIFI_PROVISIONING_STOPPING waits for (joins) the in-flight stop and
+ * returns the same completed result.
+ *
+ * @return true when the listeners are confirmed closed and the application is
+ *         stopped (now or already), false when an owned listener could not be
+ *         closed while the shared Mongoose process is still running (the state
+ *         is then @c WIFI_PROVISIONING_ERROR).
  */
 bool wifi_http_provisioning_stop( void );
 
