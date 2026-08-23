@@ -26,8 +26,10 @@
 #include "esp_wifi_default.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
+#include "freertos/task.h"
 #include "osal_bin_sem.h"
-#include "osal_count_sem.h"
 #include "osal_log.h"
 #include "osal_mutex.h"
 #include <string.h>
@@ -86,6 +88,11 @@ typedef struct
   uint32_t           cb_in_flight;
   wifi_hal_event_cb_t cb;
   void*              cb_user_data;
+  /* The task that is currently executing a user callback, or NULL.  Set in
+   * _emit_event() just before the callback is invoked and cleared when the
+   * callback returns.  A lifecycle call made from this task can never observe
+   * itself as an in-flight callback it is draining, so init/deinit reject it. */
+  TaskHandle_t       cb_task;
   osal_bin_sem_id_t  cb_lock;
   osal_bin_sem_id_t  cb_done;
 
@@ -100,21 +107,37 @@ typedef struct
 /* --------------------------------------------------------------------------- */
 
 /**
- * The lifecycle mutex/state/signal pair is process-lifetime so init and deinit
- * stay serialized even across a failed teardown (a later deinit must own the
- * cleanup).  It is created once on the first lifecycle call and never deleted.
- * g_waiters counts threads blocked in cond_wait so a broadcast can release
- * exactly the threads waiting (FreeRTOS has no native condition variable).
+ * The lifecycle mutex/state pair is process-lifetime so init and deinit stay
+ * serialized even across a failed teardown (a later deinit must own the
+ * cleanup).  The mutex is a single FreeRTOS mutex created exactly once and
+ * never deleted.  One-time creation is guarded by a statically-initialized
+ * portMUX critical section so every concurrent first-use caller observes and
+ * shares the same fully-created serializer instead of each creating a private
+ * one (FreeRTOS has no native one-time initializer).
+ *
+ * The condition variable is replaced by FreeRTOS task notifications: each
+ * waiter holds its own per-task notification slot (an unbounded 32-bit token),
+ * so a broadcast can never silently overflow a shared capacity the way a
+ * counting semaphore with a hard-coded maximum could.  The broker only tracks
+ * the tasks currently blocked in _cond_wait() in a process-lifetime registry.
  */
-static wifi_hal_ctx_t     g_wifi_hal_ctx       = { 0 };
-static wifi_ap_record_t    scan_ap_records[64] = { 0 };
+#define WIFI_HAL_MAX_LC_WAITERS 32u
 
-static hal_state_t        g_lifecycle_state    = HAL_STATE_UNINITIALIZED;
-static osal_mutex_id_t    g_lifecycle_mutex    = 0;
-static osal_count_sem_id_t g_lifecycle_signal  = 0;
-static uint32_t           g_waiters            = 0;
-static uint32_t           g_admitted_ops       = 0;
-static bool               g_lifecycle_ready    = false;
+typedef struct
+{
+  TaskHandle_t handle[ WIFI_HAL_MAX_LC_WAITERS ];
+  uint32_t     n;
+} lc_waiter_reg_t;
+
+static wifi_hal_ctx_t          g_wifi_hal_ctx       = { 0 };
+static wifi_ap_record_t        scan_ap_records[64]  = { 0 };
+
+static hal_state_t             g_lifecycle_state    = HAL_STATE_UNINITIALIZED;
+static osal_mutex_id_t         g_lifecycle_mutex    = 0;
+static bool                    g_lifecycle_ready    = false;
+static portMUX_TYPE            g_lifecycle_once_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t                g_admitted_ops       = 0;
+static lc_waiter_reg_t         g_cond_waiters       = { 0 };
 
 /* --------------------------------------------------------------------------- */
 /* Small helpers                                                                */
@@ -129,51 +152,67 @@ static osal_status_t _esp_to_status( esp_err_t err )
 /* Process-lifetime lifecycle serializer                                       */
 /* --------------------------------------------------------------------------- */
 
-/* Create the process-lifetime lifecycle mutex and wake signal once.  The Wi-Fi
- * management bootstrap is single-threaded so the first caller owns creation. */
+/* Create the process-lifetime lifecycle mutex exactly once.  A static
+ * portMUX critical section serializes first-use creation so concurrent
+ * init/deinit callers all observe and share the same fully-created mutex. */
 static bool _ensure_lifecycle( void )
 {
   if ( g_lifecycle_ready )
   {
     return true;
   }
-  if ( !g_lifecycle_mutex )
+  portENTER_CRITICAL( &g_lifecycle_once_mux );
+  if ( !g_lifecycle_ready )
   {
-    (void) osal_mutex_create( &g_lifecycle_mutex, "wifi_hal_lc" );
+    if ( !g_lifecycle_mutex )
+    {
+      (void) osal_mutex_create( &g_lifecycle_mutex, "wifi_hal_lc" );
+    }
+    g_lifecycle_ready = ( g_lifecycle_mutex != 0 );
   }
-  if ( !g_lifecycle_signal )
-  {
-    (void) osal_count_sem_create( &g_lifecycle_signal, "wifi_hal_lc", 0, 16u );
-  }
-  if ( g_lifecycle_mutex && g_lifecycle_signal )
-  {
-    g_lifecycle_ready = true;
-  }
+  portEXIT_CRITICAL( &g_lifecycle_once_mux );
   return g_lifecycle_ready;
 }
 
-/* Wake every thread currently blocked in cond_wait.  The broadcaster owns the
- * lifecycle mutex; each registered waiter consumes exactly one token. */
+/* Wake every task currently blocked in _cond_wait().  The broadcaster owns
+ * the lifecycle mutex, so it holds the exact set of waiters that released the
+ * mutex and entered ulTaskNotifyTake(); each is woken with its own per-task
+ * notification token, which a 32-bit slot cannot overflow under this one-token
+ * per-wait protocol.  The registry is drained on the same serializer. */
 static void _cond_broadcast( void )
 {
-  uint32_t n = g_waiters;
-  g_waiters  = 0;
+  const uint32_t n = g_cond_waiters.n;
   for ( uint32_t i = 0; i < n; ++i )
   {
-    (void) osal_count_sem_give( g_lifecycle_signal );
+    if ( g_cond_waiters.handle[ i ] )
+    {
+      (void) xTaskNotifyGive( g_cond_waiters.handle[ i ] );
+    }
   }
+  g_cond_waiters.n = 0;
+  memset( g_cond_waiters.handle, 0, sizeof( g_cond_waiters.handle ) );
 }
 
 /* Wait while holding the lifecycle mutex.  The caller must hold
- * g_lifecycle_mutex; this registers as a waiter then releases the mutex,
- * blocks for the wake signal and finally re-acquires the mutex.  Because both
- * the register and the release happen under the mutex a broadcast cannot be
- * missed, and the caller re-checks its predicate after waking. */
+ * g_lifecycle_mutex; this registers its task then releases the mutex, blocks
+ * for its own wake notification and finally re-acquires the mutex.  Because
+ * both the register and the release happen under the mutex a broadcast cannot
+ * be missed, and the caller re-checks its predicate after waking. */
 static void _cond_wait( void )
 {
-  g_waiters++;
+  TaskHandle_t me = xTaskGetCurrentTaskHandle();
+  if ( me == NULL )
+  {
+    return;
+  }
+  if ( g_cond_waiters.n >= WIFI_HAL_MAX_LC_WAITERS )
+  {
+    osal_log_error( "[wifi-hal] lifecycle waiter registry full" );
+    return;
+  }
+  g_cond_waiters.handle[ g_cond_waiters.n++ ] = me;
   (void) osal_mutex_give( g_lifecycle_mutex );
-  (void) osal_count_sem_take( g_lifecycle_signal );
+  (void) ulTaskNotifyTake( pdTRUE, portMAX_DELAY );
   (void) osal_mutex_take( g_lifecycle_mutex );
 }
 
@@ -210,6 +249,19 @@ static void _release_operation( void )
     }
   }
   (void) osal_mutex_give( g_lifecycle_mutex );
+}
+
+/* Detect a lifecycle call (init/deinit) made from inside an in-flight user
+ * callback on the callback's own task.  Such a call must be rejected without
+ * touching the lifecycle serializer: the teardown that would satisfy its wait
+ * is the very teardown that is draining this callback, so waiting on it here
+ * would self-deadlock (the callback cannot return while blocked).  The check
+ * only compares the current task against the task known to be executing a user
+ * callback, so an ordinary non-callback lifecycle call is never misrejected. */
+static bool _lifecycle_call_from_callback( void )
+{
+  TaskHandle_t me = xTaskGetCurrentTaskHandle();
+  return ( me != NULL ) && ( me == g_wifi_hal_ctx.cb_task );
 }
 
 /* --------------------------------------------------------------------------- */
@@ -280,6 +332,7 @@ static void _emit_event( wifi_hal_event_t event, const wifi_hal_event_data_t* da
     return;
   }
 
+  TaskHandle_t        my_task = xTaskGetCurrentTaskHandle();
   wifi_hal_event_cb_t cb;
   void*               user_data;
 
@@ -294,6 +347,9 @@ static void _emit_event( wifi_hal_event_t event, const wifi_hal_event_data_t* da
   cb        = g_wifi_hal_ctx.cb;
   user_data = g_wifi_hal_ctx.cb_user_data;
   g_wifi_hal_ctx.cb_in_flight++;
+  /* Record the task executing this callback so a lifecycle re-entry from it is
+   * detectable and rejectable before it blocks on the drain awaiting itself. */
+  g_wifi_hal_ctx.cb_task = my_task;
   (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
 
   cb( event, data, user_data );
@@ -302,6 +358,12 @@ static void _emit_event( wifi_hal_event_t event, const wifi_hal_event_data_t* da
   if ( g_wifi_hal_ctx.cb_in_flight > 0 )
   {
     g_wifi_hal_ctx.cb_in_flight--;
+  }
+  /* Only clear the callback-task marker if this delivery (still) owns it; a
+   * nested delivery retains its own marker until its own callback returns. */
+  if ( g_wifi_hal_ctx.cb_task == my_task )
+  {
+    g_wifi_hal_ctx.cb_task = NULL;
   }
   if ( g_wifi_hal_ctx.cb_in_flight == 0 && g_wifi_hal_ctx.cb_done )
   {
@@ -324,11 +386,16 @@ static void _quiesce_gate( void )
      * stored pointers and return. */
     g_wifi_hal_ctx.cb           = NULL;
     g_wifi_hal_ctx.cb_user_data = NULL;
+    g_wifi_hal_ctx.cb_task      = NULL;
     return;
   }
 
   (void) osal_bin_sem_take( g_wifi_hal_ctx.cb_lock );
   g_wifi_hal_ctx.cb_delivery_disabled = true;
+  /* Do NOT clear cb_task here: teardown may still be draining an in-flight
+   * callback, and that callback must still be able to detect (and reject) a
+   * lifecycle re-entry that would otherwise wait on this very drain.  cb_task
+   * is cleared only once the drain below observes cb_in_flight == 0. */
   (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
 
   /* Discard any stale completion token left by an earlier normal event so the
@@ -349,6 +416,7 @@ static void _quiesce_gate( void )
 
   g_wifi_hal_ctx.cb           = NULL;
   g_wifi_hal_ctx.cb_user_data = NULL;
+  g_wifi_hal_ctx.cb_task      = NULL;
   (void) osal_bin_sem_give( g_wifi_hal_ctx.cb_lock );
 }
 
@@ -654,6 +722,11 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
   {
     return OSAL_INVALID_POINTER;
   }
+  if ( _lifecycle_call_from_callback() )
+  {
+    osal_log_error( "[wifi-hal] init rejected from event callback" );
+    return OSAL_ERROR;
+  }
   if ( !_ensure_lifecycle() )
   {
     return OSAL_ERROR;
@@ -854,6 +927,14 @@ unwind:
 
 osal_status_t wifi_hal_deinit( void )
 {
+  /* A deinit issued from inside an in-flight user callback can never observe
+   * itself draining itself: reject it before it can wait on (or become the
+   * owner of) the teardown that is awaiting this callback's return. */
+  if ( _lifecycle_call_from_callback() )
+  {
+    osal_log_error( "[wifi-hal] deinit rejected from event callback" );
+    return OSAL_ERROR;
+  }
   if ( !_ensure_lifecycle() )
   {
     return OSAL_ERROR;
