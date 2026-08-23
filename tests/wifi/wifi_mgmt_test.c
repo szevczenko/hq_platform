@@ -28,6 +28,7 @@
 
 #include "wifi_managment.h"
 #include "wifi_hal_mock.h"
+#include "osal_bin_sem.h"
 #include "osal_task.h"
 #include "osal_mount.h"
 #include "osal_file.h"
@@ -234,6 +235,49 @@ static bool _wait_idle( uint32_t timeout_ms )
     elapsed += 50;
   }
   return wifi_mgmt_is_idle();
+}
+
+/* ============================================================================
+ * TASK-135D  Serialized owner helper
+ *
+ * A single dedicated owner task executes exactly one wifi_mgmt_stop() per
+ * command.  It is controlled entirely by OSAL binary semaphores:
+ *   - cmd_sem     (fixture -> helper)  orders one wifi_mgmt_stop()
+ *   - accept_sem  (helper -> fixture)  acknowledges the command was accepted
+ *   - done_sem    (helper -> fixture)  reports the command's result
+ * The order of the handoff is cmd -> accept -> stop -> publish -> done, so
+ * the fixture and this helper never overlap two wifi_mgmt_stop() calls.  The
+ * stop result is written before done is given and read by the fixture only
+ * after a bounded done wait; the semaphore handoff, not a volatile flag,
+ * establishes result visibility.
+ * ========================================================================== */
+typedef struct
+{
+  osal_bin_sem_id_t cmd_sem;    /**< Fixture -> helper: execute next command.  */
+  osal_bin_sem_id_t accept_sem; /**< Helper -> fixture: command accepted.      */
+  osal_bin_sem_id_t done_sem;   /**< Helper -> fixture: command completed.     */
+  bool*              result;    /**< Last command result, published pre-done.  */
+} stop_owner_ctx_t;
+
+static void _stop_owner_task( void* arg )
+{
+  stop_owner_ctx_t* ctx = (stop_owner_ctx_t*) arg;
+
+  for ( ;; )
+  {
+    /* Block for the next command; the fixture post command previous done. */
+    (void) osal_bin_sem_take( ctx->cmd_sem );
+
+    /* Publish acceptance before starting so the fixture never releases the
+     * parked round of command N-1 until command N has begun. */
+    (void) osal_bin_sem_give( ctx->accept_sem );
+
+    const bool r = wifi_mgmt_stop();
+
+    /* Publish the exact result of this command before signalling done. */
+    *ctx->result = r;
+    (void) osal_bin_sem_give( ctx->done_sem );
+  }
 }
 
 /* ============================================================================
@@ -1200,6 +1244,187 @@ static void test_stop_deinit_failure_retry( void )
 }
 
 /* ============================================================================
+ * TASK-135D  Deterministic stop budget expiry while _state_init() is parked
+ *
+ * Holds a fresh wifi_hal_init() round so the worker is parked inside
+ * _state_init().  A single serialized stop must then exhaust its wall-clock
+ * budget without any HAL stop/deinit being reached.  Once the parked init is
+ * released, the persistent request must reach worker-owned stop/deinit, but
+ * restart must stay blocked because this caller timed out.  Only a fresh stop
+ * generation, performing a further worker teardown round and returning true,
+ * authorizes restart.
+ * ========================================================================== */
+static void test_stop_timeout_with_init_parked( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+  wifi_hal_mock_lifecycle_t after;
+
+  /* Bring the module to a clean DISABLE boundary before the fresh round. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop to a clean DISABLE boundary" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module disabled before fresh round" );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+
+  /* Park a fresh wifi_hal_init() round inside _state_init(). */
+  wifi_hal_mock_set_init_hold( true );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_init_entered_level( before.init_count + 1, 3000 ),
+    "worker entered and parked inside a fresh wifi_hal_init" );
+
+  /* Issue the single stop from the serialized lifecycle owner; it must exhaust
+   * its single bounded budget while _state_init() remains parked. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_stop(),
+                             "single stop budget expires while _state_init is parked" );
+
+  /* Prove the budget expired without the worker reaching stop/deinit. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "still INIT (not running) while _state_init parked" );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count, after.deinit_count );
+
+  /* Release the parked init; the persistent request must reach the worker. */
+  wifi_hal_mock_set_init_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_entered_level( before.stop_count + 1, 5000 ),
+    "persistent stop reaches worker stop after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_completed_level( before.stop_count + 1, 5000 ),
+    "worker stop completed after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_entered_level( before.deinit_count + 1, 5000 ),
+    "persistent stop reaches worker deinit after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 1, 5000 ),
+    "worker deinit completed after init release" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "module DISABLE after the timed-out stop completes" );
+
+  /* The timed-out caller must not authorize restart. */
+  wifi_mgmt_start();
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 200 ),
+                             "restart blocked because the caller timed out" );
+
+  /* A fresh, successful stop generation is required before restart. */
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "fresh stop generation succeeds" );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 1, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 1, after.deinit_count );
+
+  /* With restart authorized, a real restart completes. */
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "restart completes after the fresh stop generation" );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+/* ============================================================================
+ * TASK-135D  Stale-token stop regression
+ *
+ * A dedicated owner helper (stop_owner_ctx_t) executes one stop command at a
+ * time.  Round-1 deinit is held; stop 1 (accepted, mock round-1 entered) times
+ * out and returns false by its real bounded timeout.  Only then is stop 2
+ * commanded; once accepted, exactly the parked round-1 deinit is released.
+ * The worker picks up the still-pending stop 2 and parks at round-2 deinit.
+ * While round-2 is held, round-1's late completion must NOT realize a
+ * command-done for stop 2 (a stale token can never satisfy a fresh serialized
+ * stop).  Releasing round-2 lets stop 2 succeed only after its own held HAL
+ * teardown round completes.
+ * ========================================================================== */
+static void test_stale_token_stop_regression( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+
+  /* One dedicated owner helper, semaphore-controlled. */
+  stop_owner_ctx_t ctx;
+  bool             owner_result = false;
+  ctx.cmd_sem    = NULL;
+  ctx.accept_sem = NULL;
+  ctx.done_sem   = NULL;
+  ctx.result     = &owner_result;
+
+  TEST_ASSERT_TRUE_MESSAGE(
+    osal_bin_sem_create( &ctx.cmd_sem, "owner_cmd", OSAL_SEM_EMPTY ) == OSAL_SUCCESS &&
+    osal_bin_sem_create( &ctx.accept_sem, "owner_accept", OSAL_SEM_EMPTY ) == OSAL_SUCCESS &&
+    osal_bin_sem_create( &ctx.done_sem, "owner_done", OSAL_SEM_EMPTY ) == OSAL_SUCCESS,
+    "owner helper semaphores created" );
+
+  osal_task_id_t owner_id = 0;
+  TEST_ASSERT_TRUE_MESSAGE(
+    osal_task_create( &owner_id, "stop_owner", _stop_owner_task, &ctx, NULL,
+                      OSAL_TASK_MIN_STACK_SIZE * 4, 10, NULL ) == OSAL_SUCCESS,
+    "owner helper task created" );
+
+  /* Hold the round-1 deinit so the worker parks before completing stop 1. */
+  wifi_hal_mock_set_deinit_hold( true );
+
+  /* ---- command stop 1 ---- */
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_give( ctx.cmd_sem ) == OSAL_SUCCESS,
+                            "command stop 1 posted" );
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.accept_sem, 2000 ) == OSAL_SUCCESS,
+                            "stop 1 accepted by the owner helper" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_entered_level( before.stop_count + 1, 5000 ),
+    "mock round-1 stop entered" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_entered_level( before.deinit_count + 1, 5000 ),
+    "mock round-1 deinit entered and parked" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 1, 0 ),
+    "round-1 deinit still held" );
+
+  /* Stop 1 returns false by its real bounded timeout while round-1 is parked. */
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.done_sem, 6000 ) == OSAL_SUCCESS,
+                            "stop 1 completed by its bounded timeout" );
+  TEST_ASSERT_FALSE_MESSAGE( owner_result, "stop 1 timed out (false)" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 1, 0 ),
+    "round-1 deinit still parked after stop 1 timed out" );
+
+  /* ---- Command stop 2 ---- */
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_give( ctx.cmd_sem ) == OSAL_SUCCESS,
+                            "command stop 2 posted" );
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.accept_sem, 2000 ) == OSAL_SUCCESS,
+                            "stop 2 accepted by the owner helper" );
+
+  /* Release exactly the parked round-1 deinit; the still-pending stop 2 then
+   * drives the worker into a fresh round-2 stop/deinit (which re-parks). */
+  wifi_hal_mock_release_deinit_hold();
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_entered_level( before.stop_count + 2, 5000 ),
+    "mock round-2 stop entered" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_entered_level( before.deinit_count + 2, 5000 ),
+    "mock round-2 deinit entered and parked" );
+
+  /* Round-1's late completion must NOT satisfy the fresh stop while round-2 is
+   * still held: no command-done may be produced and round-2 deinit has not
+   * completed. */
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.done_sem, 0 ) != OSAL_SUCCESS,
+                            "stale round-1 completion does not satisfy stop 2" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 2, 0 ),
+    "round-2 deinit still held" );
+
+  /* Release round-2; only then does stop 2 succeed on its own generation. */
+  wifi_hal_mock_release_deinit_hold();
+  wifi_hal_mock_set_deinit_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.done_sem, 6000 ) == OSAL_SUCCESS,
+                            "stop 2 completed after its own teardown round" );
+  TEST_ASSERT_TRUE_MESSAGE( owner_result, "stop 2 succeeded (true)" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module DISABLE after stop 2" );
+
+  /* Clean up local helper synchronization; never touch the persistent worker. */
+  (void) osal_task_delete( owner_id );
+  (void) osal_bin_sem_delete( ctx.cmd_sem );
+  (void) osal_bin_sem_delete( ctx.accept_sem );
+  (void) osal_bin_sem_delete( ctx.done_sem );
+}
+
+/* ============================================================================
  * Runner
  * ========================================================================== */
 
@@ -1257,6 +1482,8 @@ void wifi_mgmt_tests_run( void )
   RUN_TEST( test_repeated_clean_stop );
   RUN_TEST( test_stop_hal_failure_retry );
   RUN_TEST( test_stop_deinit_failure_retry );
+  RUN_TEST( test_stop_timeout_with_init_parked );
+  RUN_TEST( test_stale_token_stop_regression );
 
   /* --- One-time stop --- */
   wifi_mgmt_stop();
