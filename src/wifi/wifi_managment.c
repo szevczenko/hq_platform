@@ -17,12 +17,12 @@
 /* Maximum number of typed event subscriptions held at once. */
 #define EVENT_SUBSCRIPTIONS_SIZE 32
 
-/* Maximum wall-clock budget of a single wifi_mgmt_stop() wait, in ms. */
-#define WIFI_MGMT_STOP_TIMEOUT_MS 3000
-
 #ifndef NORMALPRIO
 #define NORMALPRIO 1u
 #endif
+
+/* One acknowledged stop round must finish within this wall-clock budget. */
+#define WIFI_MGMT_STOP_TIMEOUT_MS 3000U
 
 typedef enum
 {
@@ -101,6 +101,20 @@ typedef struct
    * startup_ok flags remain the authoritative outcome). */
   osal_bin_sem_id_t ready_sem;
 
+  /* Stop protocol objects and state persist for the lifetime of the worker.
+   * Lifecycle requests are independent of the state-machine state. */
+  osal_bin_sem_id_t stop_sem;
+  uint32_t          stop_alloc_counter;
+  uint32_t          stop_request_gen;
+  bool              stop_pending;
+  uint32_t          stop_completed_gen;
+  osal_status_t     stop_result;
+  osal_status_t     deinit_result;
+  bool              stop_clean;
+  bool              restart_authorized;
+  bool              stop_restart_blocked;
+  bool              stop_wait_timed_out;
+
   callback_list_t on_connect_cb;
   callback_list_t on_disconnect_cb;
   event_sub_list_t event_subs;
@@ -109,24 +123,6 @@ typedef struct
   /* Guards scan records, scan state, IP info and connection state. Callers
    * must not hold this mutex while dispatching events or running callbacks. */
   osal_mutex_id_t  state_mutex;
-
-  /* Set once wifi_mgmt_init() creates the synchronization objects.  Guarding
-   * wifi_mgmt_stop() with this flag keeps a stop-before-init call a clean
-   * idempotent no-op that never touches the still-NULL state mutex. */
-  bool              sync_initialized;
-
-  /* Restartable stop protocol (TASK-135).  All fields below are written and
-   * read under state_mutex, with the same serialization contract as the
-   * startup lifecycle flags. */
-  uint32_t         stop_alloc_counter;      /**< Monotonic nonzero generation allocator. */
-  uint32_t         stop_request_gen;        /**< Latest pending stop request generation.  */
-  bool             stop_pending;            /**< A stop has been requested but its round
-                                                 has not yet fully handled it.            */
-  uint32_t         stop_completed_gen;      /**< Generation completed by the last round.  */
-  osal_status_t    stop_result;             /**< Result of the last HAL stop call.       */
-  osal_status_t    deinit_result;           /**< Result of the last HAL deinit call.    */
-  bool             stop_ok;                 /**< Whether that last round fully succeeded.  */
-  osal_bin_sem_id_t stop_sem;               /**< Wake hint posted after a teardown round. */
 
   /* Multi-credential support */
   wifi_config_list_t  config_list;
@@ -141,9 +137,10 @@ static wifi_ctx_t g_ctx = {
     .max_connection = 2,
     .authmode       = 4,
   },
-  /* A never-started module has nothing to tear down, so a pre-init stop is a
-   * clean idempotent success. */
-  .stop_ok = true,
+  /* No lifecycle has started before init; this is a clean stop boundary. */
+  .stop_clean           = true,
+  .restart_authorized   = true,
+  .stop_restart_blocked = false,
 };
 
 static uint8_t       g_wifi_type  = T_WIFI_TYPE_CLIENT;
@@ -273,6 +270,39 @@ static bool _lock_ip( uint32_t timeout_ms )
   return osal_bin_sem_timed_wait( g_ctx.ip_sem, timeout_ms ) == OSAL_SUCCESS;
 }
 
+static void _lock_state( void );
+static void _unlock_state( void );
+
+/* Unsigned subtraction and comparison make this deadline wrap-safe. */
+static bool _stop_budget_expired( uint32_t started_ms, uint32_t budget_ms )
+{
+  return ( uint32_t ) ( osal_task_get_time_ms() - started_ms ) >= budget_ms;
+}
+
+/* Allocate a nonzero request generation while holding state_mutex. */
+static uint32_t _next_stop_generation_locked( void )
+{
+  ++g_ctx.stop_alloc_counter;
+  if ( g_ctx.stop_alloc_counter == 0U )
+  {
+    ++g_ctx.stop_alloc_counter;
+  }
+  return g_ctx.stop_alloc_counter;
+}
+
+static void _record_stop_timeout( uint32_t generation )
+{
+  _lock_state();
+  if ( g_ctx.stop_request_gen == generation )
+  {
+    g_ctx.stop_wait_timed_out  = true;
+    g_ctx.stop_clean           = false;
+    g_ctx.restart_authorized   = false;
+    g_ctx.stop_restart_blocked = true;
+  }
+  _unlock_state();
+}
+
 static void _unlock_ip( void )
 {
   (void) osal_bin_sem_give( g_ctx.ip_sem );
@@ -286,17 +316,6 @@ static void _lock_state( void )
 static void _unlock_state( void )
 {
   (void) osal_mutex_give( g_ctx.state_mutex );
-}
-
-/* Wrap-safe wall-clock delta in milliseconds.  Assumes the interval is shorter
- * than half of the 32-bit timer range (~24.8 days). */
-static uint32_t _wrap_delta( uint32_t start_ms, uint32_t now_ms )
-{
-  if ( now_ms >= start_ms )
-  {
-    return now_ms - start_ms;
-  }
-  return ( UINT32_MAX - start_ms ) + now_ms + 1U;
 }
 
 static void _safe_update_sta_ip_string( const char* ip )
@@ -377,23 +396,17 @@ static void _notify_startup_result( bool ok )
  * reporting the failed outcome within a single critical section, then waking
  * anyone blocked in wifi_mgmt_wait_ready().
  *
- * Because the DISABLE state, startup flags and cleanup outcome are published
- * atomically before the wake-up token is released, a caller returning from the
- * failed wait always observes a settled state.  It may start a new round only
- * when cleanup succeeded; a failed cleanup remains retryable through stop(). */
-static void _fail_startup( osal_status_t stop_rc, osal_status_t deinit_rc )
+ * Because the DISABLE state and the failure flags are published atomically
+ * before the wake-up token is released, a caller returning from the failed
+ * wait always observes a settled DISABLE state and can immediately start a new
+ * startup round — it can never act on a stale failure while the worker is still
+ * completing the old init transition. */
+static void _fail_startup( void )
 {
   _lock_state();
-  g_ctx.startup_done  = true;
-  g_ctx.startup_ok    = false;
-  /* Startup may have entered the HAL far enough to require cleanup.  Keep the
-   * cleanup outcome authoritative: a failed cleanup makes DISABLE dirty, so a
-   * later stop() queues a worker-owned retry instead of taking the idempotent
-   * disabled fast path. */
-  g_ctx.stop_result   = stop_rc;
-  g_ctx.deinit_result = deinit_rc;
-  g_ctx.stop_ok       = ( stop_rc == OSAL_SUCCESS ) && ( deinit_rc == OSAL_SUCCESS );
-  g_ctx.state         = WIFI_APP_DISABLE;
+  g_ctx.startup_done = true;
+  g_ctx.startup_ok   = false;
+  g_ctx.state        = WIFI_APP_DISABLE;
   _unlock_state();
   (void) osal_bin_sem_give( g_ctx.ready_sem );
 }
@@ -582,17 +595,17 @@ static void _state_init( void )
     .user_data  = NULL,
   };
 
-  const osal_status_t init_rc = wifi_hal_init( &init );
-  if ( init_rc != OSAL_SUCCESS )
+  if ( wifi_hal_init( &init ) != OSAL_SUCCESS )
   {
     osal_log_error( "[wifi] _state_init: HAL init failed" );
-    /* Release any partially-initialized HAL resources on the worker.  Preserve
-     * the result so a failed deinit leaves DISABLE dirty and a later stop()
-     * can request a fresh worker-owned teardown round. */
-    const osal_status_t deinit_rc = wifi_hal_deinit();
-    /* Publish DISABLE and the cleanup outcome atomically before waking
-     * wait_ready(). */
-    _fail_startup( OSAL_SUCCESS, deinit_rc );
+    /* Release any partially-initialized HAL resources before leaving the
+     * module disabled; a later wifi_mgmt_stop() will not reach DEINIT because
+     * the machine is already in DISABLE. */
+    (void) wifi_hal_deinit();
+    /* Publish DISABLE and the failure outcome atomically before waking
+     * wait_ready(), so a caller returning from the failed wait is always in a
+     * settled DISABLE state and can immediately start a new round. */
+    _fail_startup();
     return;
   }
 
@@ -617,11 +630,11 @@ static void _state_init( void )
     osal_log_error( "[wifi] _state_init: HAL mode start failed (rc=%d)", (int) st );
     /* Stop and deinitialize the HAL so a retry never re-initializes an already
      * initialized HAL (which would reset/destroy/recreate synchronization
-     * objects on some platforms).  Keep both results authoritative for a
-     * later worker-owned stop retry if cleanup fails. */
-    const osal_status_t stop_rc   = wifi_hal_stop();
-    const osal_status_t deinit_rc = wifi_hal_deinit();
-    _fail_startup( stop_rc, deinit_rc );
+     * objects on some platforms) and no HAL resources are leaked while the
+     * module sits in DISABLE. */
+    (void) wifi_hal_stop();
+    (void) wifi_hal_deinit();
+    _fail_startup();
     return;
   }
 
@@ -920,104 +933,56 @@ static void _state_ready( void )
   (void) osal_task_delay_ms( 200 );
 }
 
-static void _state_deinit( void )
+/* Service one persistent stop request in the Wi-Fi worker.  The generation is
+ * captured before either HAL call and is never replaced with the latest request
+ * after a call returns. */
+static void _service_stop_request( void )
 {
   _lock_state();
-  g_ctx.is_started        = false;
-  g_ctx.is_power_save     = false;
-  g_ctx.connected         = false;
-  g_ctx.disconnect_req    = false;
-  g_ctx.connect_req       = false;
-  g_ctx.mode_req          = (wifi_type_t) 0;
-  g_ctx.connect_attempts  = 0;
-  g_ctx.reason_disconnect = 0;
-  g_ctx.client_cnt        = 0;
-  g_ctx.scanned_ap_num    = 0;
-  g_ctx.scan_in_progress  = false;
-  /* A stopped module is no longer ready; reset the startup outcome so a later
-   * wifi_mgmt_wait_ready() blocks until the next startup round completes. */
-  g_ctx.startup_done      = false;
-  g_ctx.startup_ok        = false;
+  const uint32_t generation = g_ctx.stop_request_gen;
   _unlock_state();
 
-  /* Drop any leftover readiness token from a previous startup round. */
-  while ( osal_bin_sem_timed_wait( g_ctx.ready_sem, 0 ) == OSAL_SUCCESS )
-  {
-  }
+  const osal_status_t stop_result   = wifi_hal_stop();
+  const osal_status_t deinit_result = wifi_hal_deinit();
 
-  _update_ip_info( UPDATE_LOST_CONNECTION );
-
-  (void) wifi_hal_stop();
-  (void) wifi_hal_deinit();
-  _change_state( WIFI_APP_DISABLE );
-}
-
-/* Worker-owned teardown round for a pending restartable stop.
- *
- * Runs exclusively in the Wi-Fi worker task.  The generation is captured when
- * the round begins (not re-read on completion), so the caller's `true` result
- * is always tied to its exact request.  HAL stop/deinit are performed here,
- * and the completed generation, HAL outcomes and WIFI_APP_DISABLE are
- * published under state_mutex before the wake hint is posted with no
- * management mutex held. */
-static void _do_stop_round( void )
-{
+  /* Publish the complete round atomically.  A newer request, if any, remains
+   * pending and will be serviced by a subsequent worker iteration. */
   _lock_state();
-  const uint32_t round_gen = g_ctx.stop_request_gen;
-  _unlock_state();
-
-  const osal_status_t stop_rc   = wifi_hal_stop();
-  const osal_status_t deinit_rc = wifi_hal_deinit();
-  const bool          ok = (stop_rc == OSAL_SUCCESS) && (deinit_rc == OSAL_SUCCESS);
-
-  _lock_state();
-  /* A teardown round fully resets the operational snapshot so a later
-   * wifi_mgmt_start()/stop() cycle reinitiates the HAL from a clean session. */
-  g_ctx.is_started        = false;
-  g_ctx.is_power_save     = false;
-  g_ctx.connected         = false;
-  g_ctx.disconnect_req    = false;
-  g_ctx.connect_req       = false;
-  g_ctx.mode_req          = (wifi_type_t) 0;
-  g_ctx.connect_attempts  = 0;
-  g_ctx.reason_disconnect = 0;
-  g_ctx.client_cnt        = 0;
-  g_ctx.scanned_ap_num    = 0;
-  g_ctx.scan_in_progress  = false;
-  /* A stopped module is no longer ready; block wait_ready() until the next
-   * startup round (a handler may have left a stale snapshot otherwise). */
-  g_ctx.startup_done      = false;
-  g_ctx.startup_ok        = false;
-
-  /* Invalidate the IP management snapshot exactly as _state_deinit() does
-   * (UPDATE_LOST_CONNECTION), but inline under this same critical section so
-   * the published state, HAL outcomes and disabled flag are atomically
-   * consistent — no reader can observe a teardown with a stale IP/connect
-   * snapshot.  The SSID used by _update_ip_info() is the configured one. */
+  const bool caller_timed_out = g_ctx.stop_wait_timed_out &&
+                                g_ctx.stop_request_gen == generation;
+  g_ctx.stop_completed_gen = generation;
+  g_ctx.stop_result        = stop_result;
+  g_ctx.deinit_result      = deinit_result;
+  g_ctx.is_started         = false;
+  g_ctx.is_power_save      = false;
+  g_ctx.connected          = false;
+  g_ctx.disconnect_req     = false;
+  g_ctx.connect_req        = false;
+  g_ctx.mode_req           = (wifi_type_t) 0;
+  g_ctx.connect_attempts   = 0;
+  g_ctx.reason_disconnect  = 0;
+  g_ctx.client_cnt         = 0;
+  g_ctx.scanned_ap_num     = 0;
+  g_ctx.scan_in_progress   = false;
+  g_ctx.rssi               = 0;
   memset( &g_ctx.ip_info, 0, sizeof( g_ctx.ip_info ) );
   strncpy( g_ctx.ip_info.ssid, g_ctx.sta_cfg.ssid, sizeof( g_ctx.ip_info.ssid ) - 1 );
-  g_ctx.ip_info.urc = (int) UPDATE_LOST_CONNECTION;
-
-  g_ctx.stop_completed_gen = round_gen;
-  g_ctx.stop_result        = stop_rc;
-  g_ctx.deinit_result      = deinit_rc;
-  g_ctx.stop_ok            = ok;
-  /* A round that resolves the round generation clears the pending flag; a
-   * superseded round (a newer stop requested while this round was in flight)
-   * leaves the newer request pending for the next round.  A handler publishing
-   * another state can never erase the pending request. */
-  if ( round_gen == g_ctx.stop_request_gen )
+  g_ctx.ip_info.urc        = UPDATE_LOST_CONNECTION;
+  g_ctx.startup_done       = false;
+  g_ctx.startup_ok         = false;
+  g_ctx.state              = WIFI_APP_DISABLE;
+  if ( g_ctx.stop_request_gen == generation )
   {
     g_ctx.stop_pending = false;
+    g_ctx.stop_clean = ( stop_result == OSAL_SUCCESS &&
+                         deinit_result == OSAL_SUCCESS && !caller_timed_out );
+    /* The worker completion is only an observation.  The caller that owns this
+     * generation must observe success before restart becomes authorized. */
+    g_ctx.restart_authorized = false;
+    g_ctx.stop_wait_timed_out = false;
   }
-  g_ctx.state = WIFI_APP_DISABLE;
   _unlock_state();
-
-  /* Drop any leftover readiness token from a previous startup round, then post
-   * the wake hint only after the outcome is visible under the mutex. */
-  while ( osal_bin_sem_timed_wait( g_ctx.ready_sem, 0 ) == OSAL_SUCCESS )
-  {
-  }
+  _safe_update_sta_ip_string( "0.0.0.0" );
   (void) osal_bin_sem_give( g_ctx.stop_sem );
 }
 
@@ -1028,19 +993,16 @@ static void _wifi_event_task( void* arg )
 
   while ( true )
   {
-    /* Snapshot state and the pending-stop flag under the state mutex.  A stop
-     * requested while any handler (e.g. _state_init()) is running stays
-     * pending until this loop checks it, so a handler publishing another state
-     * can never erase it.  Once pending, the worker-owned teardown round runs
-     * ahead of every state handler. */
+    /* A stop request has priority over every state handler.  State handlers may
+     * transition g_ctx.state, but they never consume stop_pending. */
     _lock_state();
-    const bool                stop_pending = g_ctx.stop_pending;
-    const wifi_app_status_t   state        = g_ctx.state;
+    const bool              stop_pending = g_ctx.stop_pending;
+    const wifi_app_status_t state        = g_ctx.state;
     _unlock_state();
 
     if ( stop_pending )
     {
-      _do_stop_round();
+      _service_stop_request();
       continue;
     }
 
@@ -1074,10 +1036,6 @@ static void _wifi_event_task( void* arg )
         _state_ready();
         break;
 
-      case WIFI_APP_DEINIT:
-        _state_deinit();
-        break;
-
       case WIFI_APP_DISABLE:
       default:
         (void) osal_task_delay_ms( 100 );
@@ -1098,11 +1056,6 @@ void wifi_mgmt_init( void )
   (void) osal_bin_sem_create( &g_ctx.scan_sem, "wifi_scan", OSAL_SEM_EMPTY );
   (void) osal_bin_sem_create( &g_ctx.ready_sem, "wifi_ready", OSAL_SEM_EMPTY );
   (void) osal_bin_sem_create( &g_ctx.stop_sem, "wifi_stop", OSAL_SEM_EMPTY );
-
-  /* Only once every synchronization object has been created may lifecycle
-   * entry points that lock state_mutex be called safely; a stop-before-init
-   * call therefore returns cleanly without touching the mutex (see stop). */
-  g_ctx.sync_initialized = true;
 
   g_ctx.startup_done = false;
   g_ctx.startup_ok   = false;
@@ -1182,112 +1135,108 @@ bool wifi_mgmt_request_mode( wifi_type_t type )
 
 bool wifi_mgmt_stop( void )
 {
-  /* A never-initialized module (wifi_mgmt_init() not yet called) has neither the
-   * synchronization objects nor any HAL session to tear down: a stop-before-init
-   * call is a clean idempotent no-op that must not take the still-NULL state
-   * mutex. */
-  if ( !g_ctx.sync_initialized )
+  /* The null state mutex is the narrow stop-before-init guard.  No management
+   * object exists yet, so there is no worker or HAL round to acknowledge. */
+  if ( g_ctx.state_mutex == NULL )
   {
     return true;
   }
 
-  /* Idempotent when already cleanly disabled: stop-before-init (never started)
-   * and repeated stop after a successful teardown both return true without
-   * waiting. */
   _lock_state();
-  const bool clean_disabled = ( g_ctx.state == WIFI_APP_DISABLE ) &&
-                                 !g_ctx.stop_pending &&
-                                 g_ctx.stop_ok;
-  _unlock_state();
-  if ( clean_disabled )
+  if ( g_ctx.stop_clean && g_ctx.restart_authorized &&
+       !g_ctx.stop_restart_blocked && !g_ctx.stop_pending )
   {
+    _unlock_state();
     return true;
   }
 
-  /* Allocate a fresh monotonic nonzero generation and keep the request pending
-   * until a worker teardown round resolves it.  The generation the worker
-   * captures when that round begins anchors this caller's completion. */
-  _lock_state();
-  uint32_t my_gen = ++g_ctx.stop_alloc_counter;
-  if ( my_gen == 0U )
-  {
-    /* Skip the zero sentinel on 32-bit wrap so a zero generation is never
-       indistinguishable from an uninitialized generation. */
-    my_gen = 1U;
-    g_ctx.stop_alloc_counter = my_gen;
-  }
-  g_ctx.stop_request_gen = my_gen;
-  g_ctx.stop_pending     = true;
+  const uint32_t generation = _next_stop_generation_locked();
+  g_ctx.stop_request_gen   = generation;
+  g_ctx.stop_pending       = true;
+  g_ctx.stop_result        = OSAL_ERROR;
+  g_ctx.deinit_result      = OSAL_ERROR;
+  g_ctx.stop_clean           = false;
+  g_ctx.restart_authorized   = false;
+  g_ctx.stop_restart_blocked = true;
+  g_ctx.stop_wait_timed_out  = false;
   _unlock_state();
 
-  /* The stop wait has one finite wall-clock budget for this call. */
-  const uint32_t budget = WIFI_MGMT_STOP_TIMEOUT_MS;
-  const uint32_t start  = osal_task_get_time_ms();
-
+  const uint32_t started_ms = osal_task_get_time_ms();
   for ( ;; )
   {
-    /* The authoritative outcome (completed generation plus result) is read
-     * under the state mutex; the semaphore below is only a wake-up hint. */
+    /* stop_sem is only a wake hint.  The exact generation and both independent
+     * HAL outcomes are authoritative under state_mutex. */
     _lock_state();
-    const bool done = ( g_ctx.stop_completed_gen == my_gen );
-    const bool ok   = g_ctx.stop_ok;
+    const bool exact = g_ctx.stop_completed_gen == generation &&
+                       g_ctx.stop_request_gen == generation;
+    const bool disabled = g_ctx.state == WIFI_APP_DISABLE;
+    const osal_status_t stop_result   = g_ctx.stop_result;
+    const osal_status_t deinit_result = g_ctx.deinit_result;
     _unlock_state();
 
-    if ( done )
+    if ( exact && disabled )
     {
-      return ok;
+      if ( stop_result == OSAL_SUCCESS && deinit_result == OSAL_SUCCESS )
+      {
+        /* Only this caller's exact successful result authorizes restart. */
+        _lock_state();
+        g_ctx.stop_clean           = true;
+        g_ctx.restart_authorized   = true;
+        g_ctx.stop_restart_blocked = false;
+        _unlock_state();
+        return true;
+      }
+      return false;
     }
 
-    /* Consume a posted wake hint if one is already pending; the outcome is
-     * re-read on the next iteration so a stale token can never settle this
-     * caller's generation. */
+    if ( _stop_budget_expired( started_ms, WIFI_MGMT_STOP_TIMEOUT_MS ) )
+    {
+      /* Do not cancel the request.  Its eventual completion cannot authorize a
+       * restart for this timed-out caller; the next stop gets a new generation. */
+      _record_stop_timeout( generation );
+      return false;
+    }
+
+    /* Drain a stale token, charging this zero-time operation to the same
+     * wall-clock budget. */
     if ( osal_bin_sem_timed_wait( g_ctx.stop_sem, 0 ) == OSAL_SUCCESS )
     {
       continue;
     }
 
-    const uint32_t elapsed = _wrap_delta( start, osal_task_get_time_ms() );
-    if ( elapsed >= budget )
+    const uint32_t elapsed = osal_task_get_time_ms() - started_ms;
+    if ( elapsed >= WIFI_MGMT_STOP_TIMEOUT_MS )
     {
-      /* Timeout returns false without cancelling the request; the worker keeps
-       * its pending round and a later serialized retry issues a fresh one. */
+      _record_stop_timeout( generation );
       return false;
     }
 
-    /* Block for at most the remaining budget so the call never overshoots its
-     * requested deadline. */
-    (void) osal_bin_sem_timed_wait( g_ctx.stop_sem, budget - elapsed );
+    /* Compute the wait from this fresh timestamp so it cannot underflow past
+     * the single wall-clock budget. */
+    const uint32_t remain = WIFI_MGMT_STOP_TIMEOUT_MS - elapsed;
+    (void) osal_bin_sem_timed_wait( g_ctx.stop_sem, remain );
   }
 }
 
 void wifi_mgmt_start( void )
 {
   _lock_state();
-  const wifi_app_status_t state       = g_ctx.state;
+  const wifi_app_status_t state        = g_ctx.state;
   const bool              from_disable = state == WIFI_APP_DISABLE;
+  const bool              stop_blocked = g_ctx.stop_pending ||
+                                          g_ctx.stop_restart_blocked;
   _unlock_state();
   osal_log_debug( "[wifi] wifi_mgmt_start called, current state=%s", _state_name( state ) );
 
-  if ( from_disable )
+  if ( from_disable && !stop_blocked )
   {
-    /* A failed teardown, or an outstanding timed-out teardown request, must
-     * keep startup disarmed.  The worker handles a pending request before it
-     * examines the state, but start() must not publish INIT in the meantime:
-     * doing so could let a failed stop fall through into a fresh init round. */
+    /* Accepting start invalidates clean-stop authorization before publishing
+     * INIT.  Startup failure later publishes DISABLE but does not restore it. */
     _lock_state();
-    const bool teardown_incomplete = g_ctx.stop_pending || !g_ctx.stop_ok;
-    _unlock_state();
-    if ( teardown_incomplete )
-    {
-      osal_log_debug( "[wifi] start held until teardown succeeds" );
-      return;
-    }
-
-    /* Arm a fresh startup round: drop any leftover readiness token so that
-     * wifi_mgmt_wait_ready() blocks until _state_init() completes this time. */
-    _lock_state();
-    g_ctx.startup_done = false;
-    g_ctx.startup_ok   = false;
+    g_ctx.stop_clean         = false;
+    g_ctx.restart_authorized = false;
+    g_ctx.startup_done       = false;
+    g_ctx.startup_ok         = false;
     _unlock_state();
     while ( osal_bin_sem_timed_wait( g_ctx.ready_sem, 0 ) == OSAL_SUCCESS )
     {

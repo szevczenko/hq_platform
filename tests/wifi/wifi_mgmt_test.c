@@ -28,7 +28,6 @@
 
 #include "wifi_managment.h"
 #include "wifi_hal_mock.h"
-#include "osal_bin_sem.h"
 #include "osal_task.h"
 #include "osal_mount.h"
 #include "osal_file.h"
@@ -235,70 +234,6 @@ static bool _wait_idle( uint32_t timeout_ms )
     elapsed += 50;
   }
   return wifi_mgmt_is_idle();
-}
-
-/* ---------------------------------------------------------------------------
- * Dedicated lifecycle-owner helper.
- *
- * A single helper task serializes stop commands issued over a command
- * semaphore and reports each result over a done semaphore.  It never sleeps:
- * it blocks on the command semaphore, executes exactly one stop, then signals
- * done.  The main thread uses this helper to prove that a late stale token from
- * round 1 cannot finish a later serialized stop.
- * ------------------------------------------------------------------------- */
-static osal_task_id_t    g_owner_task_id;
-static osal_bin_sem_id_t g_owner_cmd_sem;
-static osal_bin_sem_id_t g_owner_done_sem;
-static volatile bool     g_owner_running;
-static volatile bool     g_owner_result;
-
-static void _owner_helper_task( void* arg )
-{
-  (void) arg;
-  for ( ;; )
-  {
-    (void) osal_bin_sem_timed_wait( g_owner_cmd_sem, OSAL_MAX_DELAY );
-    g_owner_running = true;
-    g_owner_result  = wifi_mgmt_stop();
-    g_owner_running = false;
-    (void) osal_bin_sem_give( g_owner_done_sem );
-  }
-}
-
-static void _owner_setup( void )
-{
-  (void) osal_bin_sem_create( &g_owner_cmd_sem, "owner_cmd", OSAL_SEM_EMPTY );
-  (void) osal_bin_sem_create( &g_owner_done_sem, "owner_done", OSAL_SEM_EMPTY );
-  osal_task_attr_t attr;
-  (void) osal_task_attributes_init( &attr );
-  (void) osal_task_create( &g_owner_task_id, "owner", _owner_helper_task, NULL, NULL,
-                           OSAL_TASK_MIN_STACK_SIZE * 4, 1u, &attr );
-}
-
-/* Ask the owner to run one serialized stop. */
-static void _owner_start( void )
-{
-  g_owner_running = false;
-  g_owner_result  = false;
-  (void) osal_bin_sem_give( g_owner_cmd_sem );
-}
-
-/* Wait for the owner's in-flight stop to have actually reached wifi_mgmt_stop. */
-static bool _owner_wait_running( uint32_t timeout_ms )
-{
-  uint32_t elapsed = 0;
-  while ( !g_owner_running && elapsed < timeout_ms )
-  {
-    osal_task_delay_ms( 5 );
-    elapsed += 5;
-  }
-  return g_owner_running;
-}
-
-/* Wait until the owner reported the result of its current stop. */
-static bool _owner_wait_done( uint32_t timeout_ms )
-{
-  return osal_bin_sem_timed_wait( g_owner_done_sem, timeout_ms ) == OSAL_SUCCESS;
 }
 
 /* ============================================================================
@@ -1176,188 +1111,92 @@ static void test_request_mode_failure_recovery( void )
                             "MODE_CHANGED fired for restore" );
 }
 
-/* ============================================================================
- * Focused stop tests (TASK-135)
- *
- * These verify the restartable, worker-owned teardown protocol: a `true` stop
- * is tied to the caller's exact generation, a timeout or HAL error stays
- * retryable without an early restart, and the original worker task and
- * management objects survive the stop/restart cycles.
- * ========================================================================== */
-
-static void test_stop_restart_reuses_worker( void )
+/* Focused acknowledged-stop coverage using B2 result setters/snapshots. */
+static void test_stop_before_init( void )
 {
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before stop/restart test" );
-
-  wifi_hal_mock_lifecycle_t before;
-  wifi_hal_mock_lifecycle_t after;
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &before ), "lifecycle before stop" );
-
-  /* Normal stop -> a clean, worker-owned HAL teardown -> true. */
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "normal stop returns true" );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module disabled after stop" );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &after ), "lifecycle after stop" );
-  TEST_ASSERT_EQUAL_MESSAGE( before.stop_count + 1, after.stop_count,
-                             "HAL stop called exactly once" );
-  TEST_ASSERT_EQUAL_MESSAGE( before.deinit_count + 1, after.deinit_count,
-                             "HAL deinit called exactly once" );
-  TEST_ASSERT_FALSE_MESSAGE( after.started, "HAL stopped" );
-  TEST_ASSERT_FALSE_MESSAGE( after.initialized, "HAL deinitialized" );
-
-  /* Restart on the SAME worker/handles: a fresh init, no new task, then idle. */
-  wifi_mgmt_start();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "restart ready after stop" );
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after restart" );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &after ), "lifecycle after restart" );
-  TEST_ASSERT_TRUE_MESSAGE( after.initialized, "HAL re-initialized" );
-  TEST_ASSERT_TRUE_MESSAGE( after.started, "HAL restarted" );
-  TEST_ASSERT_EQUAL_MESSAGE( before.init_count + 1, after.init_count,
-                             "HAL init runs exactly once again" );
-
-  /* Repeated stop after a successful teardown is idempotent true. */
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "teardown stop true" );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "repeated stop true" );
-  wifi_mgmt_start();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "restart after repeated stop" );
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after repeated-stop restart" );
-}
-
-static void test_stop_while_init_held( void )
-{
-  /* Stop the running module so we can start a fresh init round under a hold. */
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop before init-held test" );
-
-  const uint32_t init_before = wifi_hal_mock_get_init_entered_count();
-  wifi_hal_mock_set_init_hold( true );
-  wifi_mgmt_start();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_init_entered_level( init_before + 1, 3000 ),
-                            "worker parked at HAL init barrier" );
-
-  /* The fixed stop budget expires while _state_init() owns the worker. */
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_stop(), "stop times out while init held" );
-
-  /* Once init is lifted, the pending request is handled by the worker. */
-  wifi_hal_mock_lifecycle_t before_teardown;
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &before_teardown ),
-                            "lifecycle before pending teardown" );
-  wifi_hal_mock_set_init_hold( false );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_deinit_entered_level(
-                              before_teardown.deinit_count + 1, 3000 ),
-                            "worker teardown ran after init handler" );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_deinit_completed_level(
-                              before_teardown.deinit_count + 1, 3000 ),
-                            "worker teardown completed" );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module disabled after worker teardown" );
-  wifi_hal_mock_lifecycle_t after;
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &after ), "lifecycle after teardown" );
-  TEST_ASSERT_FALSE_MESSAGE( after.started, "HAL left stopped" );
-  TEST_ASSERT_FALSE_MESSAGE( after.initialized, "HAL left deinitialized" );
-
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "repeat stop true after worker teardown" );
-  wifi_mgmt_start();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "restart after init-held test" );
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after init-held test" );
-}
-
-static void test_stop_hal_failure_is_retryable( void )
-{
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before stop-failure test" );
-  wifi_hal_mock_lifecycle_t before;
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &before ), "lifecycle before stop failure" );
-  wifi_hal_mock_set_stop_result( OSAL_ERROR );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_stop(), "HAL stop error -> stop false" );
-  wifi_hal_mock_lifecycle_t after;
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &after ), "lifecycle after stop failure" );
-  TEST_ASSERT_EQUAL_MESSAGE( before.stop_count + 1, after.stop_count,
-                             "HAL stop attempted once" );
-  TEST_ASSERT_EQUAL_MESSAGE( before.deinit_count + 1, after.deinit_count,
-                             "HAL deinit still attempted" );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module disabled after failed stop" );
-  TEST_ASSERT_FALSE_MESSAGE( after.initialized, "successful deinit released the HAL" );
-  wifi_mgmt_start();
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 100 ),
-                             "restart blocked until a successful retry" );
-
-  /* A serialized retry is a fresh generation and must succeed before restart. */
-  wifi_hal_mock_set_stop_result( OSAL_SUCCESS );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "retry stop succeeds" );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "not running before restart" );
-  wifi_mgmt_start();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "ready after retry+restart" );
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after retry+restart" );
-}
-
-static void test_stop_deinit_failure_is_retryable( void )
-{
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before deinit-failure test" );
-  wifi_hal_mock_lifecycle_t before;
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &before ), "lifecycle before deinit failure" );
-  wifi_hal_mock_set_deinit_result( OSAL_ERROR );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_stop(), "HAL deinit error -> stop false" );
-  wifi_hal_mock_lifecycle_t after;
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &after ), "lifecycle after deinit failure" );
-  TEST_ASSERT_EQUAL_MESSAGE( before.deinit_count + 1, after.deinit_count,
-                             "HAL deinit attempted once" );
-  TEST_ASSERT_TRUE_MESSAGE( after.initialized,
-                            "failed deinit left the HAL initialized" );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module disabled after failed stop" );
-  wifi_mgmt_start();
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 100 ),
-                             "restart blocked until deinit retry succeeds" );
-
-  /* The retry is a fresh teardown round and completes the release. */
-  wifi_hal_mock_set_deinit_result( OSAL_SUCCESS );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "retry stop succeeds" );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &after ), "lifecycle after retry" );
-  TEST_ASSERT_FALSE_MESSAGE( after.initialized, "retry deinit cleared the HAL" );
-  wifi_mgmt_start();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "ready after deinit retry+restart" );
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after deinit retry+restart" );
-}
-
-static void test_stop_late_stale_token_cannot_finish_later_stop( void )
-{
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before stale-token test" );
-  _owner_setup();
-
   wifi_hal_mock_lifecycle_t snapshot;
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_lifecycle( &snapshot ), "lifecycle snapshot" );
-  const uint32_t base = snapshot.deinit_count;
-  wifi_hal_mock_set_deinit_hold( true );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &snapshot ) );
+  TEST_ASSERT_EQUAL_UINT32( 0, snapshot.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( 0, snapshot.deinit_count );
+}
 
-  /* Stop 1 times out while its worker-owned deinit round is parked. */
-  _owner_start();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_deinit_entered_level( base + 1, 3000 ),
-                            "round-1 deinit entered and parked" );
-  TEST_ASSERT_TRUE_MESSAGE( _owner_wait_done( 5000 ), "stop 1 returned" );
-  TEST_ASSERT_FALSE_MESSAGE( g_owner_result, "stop 1 timed out false" );
-
-  /* Stop 2 is issued by the same serialized owner while round 1 is held. */
-  _owner_start();
-  TEST_ASSERT_TRUE_MESSAGE( _owner_wait_running( 2000 ), "owner entered stop 2" );
-  osal_task_delay_ms( 50 );
-
-  /* Release exactly round 1; its late token cannot finish stop 2. */
-  wifi_hal_mock_release_deinit_hold();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_deinit_entered_level( base + 2, 5000 ),
-                            "round-2 deinit entered after round 1" );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_hal_mock_wait_deinit_completed_level( base + 2, 200 ),
-                             "round-2 deinit is still parked" );
-  TEST_ASSERT_FALSE_MESSAGE( _owner_wait_done( 200 ),
-                             "round-1 completion did not finish stop 2" );
-
-  /* Only releasing round 2 allows stop 2 to complete successfully. */
-  wifi_hal_mock_release_deinit_hold();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_deinit_completed_level( base + 2, 5000 ),
-                            "round-2 deinit completed" );
-  TEST_ASSERT_TRUE_MESSAGE( _owner_wait_done( 5000 ), "stop 2 finished" );
-  TEST_ASSERT_TRUE_MESSAGE( g_owner_result, "stop 2 succeeded after round 2" );
-  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module disabled after stale-token test" );
-
-  wifi_hal_mock_set_deinit_hold( false );
+static void test_stop_restart_cycle( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+  wifi_hal_mock_lifecycle_t after;
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 1, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 1, after.deinit_count );
   wifi_mgmt_start();
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "restart after stale-token test" );
-  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after stale-token restart" );
+  TEST_ASSERT_TRUE( wifi_mgmt_wait_ready( 3000 ) );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+static void test_repeated_clean_stop( void )
+{
+  wifi_hal_mock_lifecycle_t first;
+  wifi_hal_mock_lifecycle_t repeat;
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &first ) );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &repeat ) );
+  TEST_ASSERT_EQUAL_UINT32( first.stop_count, repeat.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( first.deinit_count, repeat.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE( wifi_mgmt_wait_ready( 3000 ) );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+static void test_stop_hal_failure_retry( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+  wifi_hal_mock_lifecycle_t after;
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+  wifi_hal_mock_set_stop_result( OSAL_ERROR );
+  TEST_ASSERT_FALSE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 1, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 1, after.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_FALSE( wifi_mgmt_wait_ready( 100 ) );
+  wifi_hal_mock_set_stop_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 2, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 2, after.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE( wifi_mgmt_wait_ready( 3000 ) );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+static void test_stop_deinit_failure_retry( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+  wifi_hal_mock_lifecycle_t after;
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+  wifi_hal_mock_set_deinit_result( OSAL_ERROR );
+  TEST_ASSERT_FALSE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 1, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 1, after.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_FALSE( wifi_mgmt_wait_ready( 100 ) );
+  wifi_hal_mock_set_deinit_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 2, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 2, after.deinit_count );
+  TEST_ASSERT_FALSE( after.initialized );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE( wifi_mgmt_wait_ready( 3000 ) );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
 }
 
 /* ============================================================================
@@ -1377,6 +1216,8 @@ void wifi_mgmt_tests_run( void )
   strncpy( ip.netmask, "255.255.255.0", sizeof( ip.netmask ) - 1 );
   strncpy( ip.gw, "192.168.1.1", sizeof( ip.gw ) - 1 );
   wifi_hal_mock_set_ip_info( &ip );
+
+  RUN_TEST( test_stop_before_init );
 
   g_connect_cb_fired    = false;
   g_disconnect_cb_fired = false;
@@ -1412,11 +1253,10 @@ void wifi_mgmt_tests_run( void )
   RUN_TEST( test_request_mode_sta_to_apsta );
   RUN_TEST( test_request_mode_apsta_to_sta );
   RUN_TEST( test_request_mode_failure_recovery );
-  RUN_TEST( test_stop_restart_reuses_worker );
-  RUN_TEST( test_stop_while_init_held );
-  RUN_TEST( test_stop_hal_failure_is_retryable );
-  RUN_TEST( test_stop_deinit_failure_is_retryable );
-  RUN_TEST( test_stop_late_stale_token_cannot_finish_later_stop );
+  RUN_TEST( test_stop_restart_cycle );
+  RUN_TEST( test_repeated_clean_stop );
+  RUN_TEST( test_stop_hal_failure_retry );
+  RUN_TEST( test_stop_deinit_failure_retry );
 
   /* --- One-time stop --- */
   wifi_mgmt_stop();

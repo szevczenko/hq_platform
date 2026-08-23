@@ -151,31 +151,25 @@ bool wifi_mgmt_request_mode( wifi_type_t type );
 void wifi_mgmt_init( void );
 
 /**
- * @brief   Stop the Wi-Fi driver and release HAL resources.
+ * @brief   Request an acknowledged, restartable Wi-Fi stop.
  *
- * @details Requests a restartable, worker-owned teardown round.  Each call
- *          allocates a fresh monotonic generation and waits with the internal
- *          bounded, wrap-safe budget for the Wi-Fi worker to run the Wi-Fi HAL
- *          teardown (`wifi_hal_stop` then `wifi_hal_deinit`) and publish
- *          @c WIFI_APP_DISABLE together with the completed generation and the
- *          HAL outcomes.  A @c true result is tied to the caller's exact
- *          generation and therefore guarantees a successful HAL teardown and a
- *          published disabled state.
+ * @details One lifecycle owner must serialize init/start/stop calls. Two
+ *          simultaneous stop callers and arbitrary init/start/stop races are
+ *          unsupported. There is currently no wifi_mgmt_deinit() API; final
+ *          manager teardown remains a later task.
  *
- *          Lifecycle ownership contract: one owner thread serializes the
- *          @c wifi_mgmt_init(), @c wifi_mgmt_start(), @c wifi_mgmt_stop(), and
- *          @c wifi_mgmt_deinit() lifecycle entry points.  This API does not
- *          support two concurrent stop callers or arbitrary lifecycle API
- *          races; the same owner thread must issue any serialized retry.
+ *          A non-fast-path call allocates a fresh request generation and waits
+ *          for the persistent Wi-Fi worker to call wifi_hal_stop(), then
+ *          wifi_hal_deinit(), and publish WIFI_APP_DISABLE. The return value
+ *          belongs to this call's exact generation: true means both worker-
+ *          owned HAL calls succeeded and the disabled state was published.
+ *          A timeout or HAL error returns false and requires a fresh,
+ *          serialized stop before restart.
  *
- * @return  true when the module is disabled and the worker teardown for this
- *          caller's generation succeeded; false on timeout or when a HAL
- *          stop/deinit step reported an error.  A timeout does not cancel the
- *          pending request; later teardown rounds keep running on the worker,
- *          and a serialized retry must be issued until @c true is returned
- *          before the module may be started again.
- * @note    Calling this when the module is already disabled (never started, or
- *          after a successful teardown) returns @c true immediately.
+ * @return  true when this call's exact stop generation completed cleanly;
+ *          false on timeout or either HAL error.
+ * @note    Stop-before-init and repeated stop after an acknowledged clean stop
+ *          return true without a fresh HAL round.
  */
 bool wifi_mgmt_stop( void );
 
