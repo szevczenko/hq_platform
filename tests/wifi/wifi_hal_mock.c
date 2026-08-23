@@ -11,32 +11,65 @@
 
 #include "osal_bin_sem.h"
 #include "osal_mutex.h"
+#include "osal_task.h"
 #include <stdbool.h>
 #include <string.h>
 
 /* ---- internal state ------------------------------------------------------ */
 
 static wifi_hal_mock_state_t g_mock = { 0 };
-static bool                  g_hold_scan_done = false;
-static bool                  g_hold_init      = false;
-static osal_status_t         g_init_result    = OSAL_SUCCESS;
+static bool           g_hold_scan_done = false;
+static bool           g_hold_init      = false;
+static bool           g_hold_deinit    = false;
+static osal_status_t  g_init_result    = OSAL_SUCCESS;
 
 /* These primitives have process lifetime.  They are created together by the
  * first reset, on the single-threaded test bootstrap path, and are never
  * lazily created or deleted while a worker can call the mock. */
-static osal_mutex_id_t   g_mock_mutex        = NULL;
-static osal_bin_sem_id_t g_init_entered_sem  = NULL;
-static osal_bin_sem_id_t g_init_release_sem  = NULL;
-static bool              g_mock_ready       = false;
+static osal_mutex_id_t   g_mock_mutex           = NULL;
+static osal_bin_sem_id_t g_init_entered_sem     = NULL;
+static osal_bin_sem_id_t g_init_completed_sem   = NULL;
+static osal_bin_sem_id_t g_init_release_sem     = NULL;
+static osal_bin_sem_id_t g_stop_entered_sem     = NULL;
+static osal_bin_sem_id_t g_stop_completed_sem   = NULL;
+static osal_bin_sem_id_t g_deinit_entered_sem   = NULL;
+static osal_bin_sem_id_t g_deinit_completed_sem = NULL;
+static osal_bin_sem_id_t g_deinit_release_sem   = NULL;
+static bool              g_mock_ready           = false;
 
 /* Protected by g_mock_mutex.  An invocation is active from its locked entry
  * transition until its return.  parked/granted form the handshake that keeps a
  * release token tied to the invocation that requested it. */
-static bool g_init_active          = false;
-static bool g_init_parked          = false;
-static bool g_init_release_granted = false;
+static bool     g_init_active           = false;
+static bool     g_init_parked           = false;
+static bool     g_init_release_granted  = false;
+static bool     g_stop_active           = false;
+static bool     g_deinit_active         = false;
+static bool     g_deinit_parked         = false;
+static bool     g_deinit_release_granted = false;
+
+/* Generation counters.  The entered generation is the corresponding attempt
+ * counter held in g_mock (init_count/stop_count/deinit_count), incremented at
+ * the same locked entry transition.  The completed counters are advanced once
+ * an invocation's mock effects and configured result are final. */
+static uint32_t g_init_completed_gen   = 0;
+static uint32_t g_stop_completed_gen   = 0;
+static uint32_t g_deinit_completed_gen = 0;
 
 /* ---- mock control API ---------------------------------------------------- */
+
+static bool _bootstrap_sem( osal_bin_sem_id_t* sem, const char* name )
+{
+  osal_status_t status;
+
+  status = osal_bin_sem_create( sem, name, OSAL_SEM_EMPTY );
+  if ( status != OSAL_SUCCESS || *sem == NULL )
+  {
+    *sem = NULL;
+    return false;
+  }
+  return true;
+}
 
 static bool _mock_bootstrap( void )
 {
@@ -54,23 +87,31 @@ static bool _mock_bootstrap( void )
     return false;
   }
 
-  status = osal_bin_sem_create( &g_init_entered_sem, "wifi_mock_init_entered",
-                                OSAL_SEM_EMPTY );
-  if ( status != OSAL_SUCCESS || g_init_entered_sem == NULL )
+  if ( !_bootstrap_sem( &g_init_entered_sem,     "wifi_mock_init_entered" ) ||
+       !_bootstrap_sem( &g_init_completed_sem,   "wifi_mock_init_completed" ) ||
+       !_bootstrap_sem( &g_init_release_sem,     "wifi_mock_init_release" ) ||
+       !_bootstrap_sem( &g_stop_entered_sem,     "wifi_mock_stop_entered" ) ||
+       !_bootstrap_sem( &g_stop_completed_sem,   "wifi_mock_stop_completed" ) ||
+       !_bootstrap_sem( &g_deinit_entered_sem,   "wifi_mock_deinit_entered" ) ||
+       !_bootstrap_sem( &g_deinit_completed_sem, "wifi_mock_deinit_completed" ) ||
+       !_bootstrap_sem( &g_deinit_release_sem,   "wifi_mock_deinit_release" ) )
   {
-    g_init_entered_sem = NULL;
-    (void) osal_mutex_delete( g_mock_mutex );
-    g_mock_mutex = NULL;
-    return false;
-  }
-
-  status = osal_bin_sem_create( &g_init_release_sem, "wifi_mock_init_release",
-                                OSAL_SEM_EMPTY );
-  if ( status != OSAL_SUCCESS || g_init_release_sem == NULL )
-  {
-    g_init_release_sem = NULL;
     (void) osal_bin_sem_delete( g_init_entered_sem );
+    (void) osal_bin_sem_delete( g_init_completed_sem );
+    (void) osal_bin_sem_delete( g_init_release_sem );
+    (void) osal_bin_sem_delete( g_stop_entered_sem );
+    (void) osal_bin_sem_delete( g_stop_completed_sem );
+    (void) osal_bin_sem_delete( g_deinit_entered_sem );
+    (void) osal_bin_sem_delete( g_deinit_completed_sem );
+    (void) osal_bin_sem_delete( g_deinit_release_sem );
     g_init_entered_sem = NULL;
+    g_init_completed_sem = NULL;
+    g_init_release_sem = NULL;
+    g_stop_entered_sem = NULL;
+    g_stop_completed_sem = NULL;
+    g_deinit_entered_sem = NULL;
+    g_deinit_completed_sem = NULL;
+    g_deinit_release_sem = NULL;
     (void) osal_mutex_delete( g_mock_mutex );
     g_mock_mutex = NULL;
     return false;
@@ -105,24 +146,37 @@ bool wifi_hal_mock_reset( void )
     return false;
   }
 
-  /* Never clear or drain the round belonging to an active/parked init. */
-  if ( g_init_active )
+  /* Reset is rejected while any lifecycle invocation is active or parked,
+   * so it can never clear or drain the round belonging to a live call. */
+  if ( g_init_active || g_stop_active || g_deinit_active )
   {
     _mock_unlock();
     return false;
   }
 
   memset( &g_mock, 0, sizeof( g_mock ) );
-  g_hold_scan_done       = false;
-  g_hold_init            = false;
-  g_init_result          = OSAL_SUCCESS;
-  g_init_parked          = false;
-  g_init_release_granted = false;
+  g_hold_scan_done         = false;
+  g_hold_init              = false;
+  g_hold_deinit            = false;
+  g_init_result            = OSAL_SUCCESS;
+  g_init_completed_gen     = 0;
+  g_stop_completed_gen     = 0;
+  g_deinit_completed_gen   = 0;
+  g_init_parked            = false;
+  g_init_release_granted   = false;
+  g_deinit_parked          = false;
+  g_deinit_release_granted = false;
 
-  /* Keep the mutex through all drains.  A later init therefore cannot publish
-   * an entered token until every token from this round has been removed. */
+  /* Keep the mutex through all drains.  A later lifecycle invocation therefore
+   * cannot publish a token until every token from this round has been removed. */
   _drain( g_init_entered_sem );
+  _drain( g_init_completed_sem );
   _drain( g_init_release_sem );
+  _drain( g_stop_entered_sem );
+  _drain( g_stop_completed_sem );
+  _drain( g_deinit_entered_sem );
+  _drain( g_deinit_completed_sem );
+  _drain( g_deinit_release_sem );
   _mock_unlock();
   return true;
 }
@@ -207,6 +261,64 @@ void wifi_hal_mock_set_init_hold( bool hold )
   _mock_unlock();
 }
 
+void wifi_hal_mock_release_init_hold( void )
+{
+  if ( !_mock_lock() )
+  {
+    return;
+  }
+
+  /* Release exactly one already-parked invocation without disabling the
+   * hold.  A release made before an invocation parks leaves no credit, so it
+   * can never release a later round. */
+  if ( g_init_parked && !g_init_release_granted )
+  {
+    g_init_release_granted = true;
+    if ( osal_bin_sem_give( g_init_release_sem ) != OSAL_SUCCESS )
+    {
+      g_init_release_granted = false;
+    }
+  }
+  _mock_unlock();
+}
+
+void wifi_hal_mock_set_deinit_hold( bool hold )
+{
+  if ( !_mock_lock() )
+  {
+    return;
+  }
+
+  g_hold_deinit = hold;
+  if ( !hold && g_deinit_parked && !g_deinit_release_granted )
+  {
+    g_deinit_release_granted = true;
+    if ( osal_bin_sem_give( g_deinit_release_sem ) != OSAL_SUCCESS )
+    {
+      g_deinit_release_granted = false;
+    }
+  }
+  _mock_unlock();
+}
+
+void wifi_hal_mock_release_deinit_hold( void )
+{
+  if ( !_mock_lock() )
+  {
+    return;
+  }
+
+  if ( g_deinit_parked && !g_deinit_release_granted )
+  {
+    g_deinit_release_granted = true;
+    if ( osal_bin_sem_give( g_deinit_release_sem ) != OSAL_SUCCESS )
+    {
+      g_deinit_release_granted = false;
+    }
+  }
+  _mock_unlock();
+}
+
 bool wifi_hal_mock_wait_init_entered( uint32_t timeout_ms )
 {
   if ( !g_mock_ready )
@@ -214,6 +326,153 @@ bool wifi_hal_mock_wait_init_entered( uint32_t timeout_ms )
     return false;
   }
   return osal_bin_sem_timed_wait( g_init_entered_sem, timeout_ms ) == OSAL_SUCCESS;
+}
+
+/* ---- lifecycle generation helpers ---------------------------------------- */
+
+/* Wrap-safe wall-clock delta in milliseconds.  This works for any interval
+ * shorter than half of the 32-bit timer range (about 24.8 days). */
+static uint32_t _ms_delta( uint32_t start_ms, uint32_t now_ms )
+{
+  if ( now_ms >= start_ms )
+  {
+    return now_ms - start_ms;
+  }
+  return ( UINT32_MAX - start_ms ) + now_ms + 1U;
+}
+
+/* Generation-checked wait: first inspect the counter under the mutex, then use
+ * the semaphore only as a wake hint, re-checking the counter after every
+ * wake and charging the elapsed time against one wrap-safe budget. */
+static bool _wait_generation( uint32_t* generation, osal_bin_sem_id_t hint,
+                              uint32_t level, uint32_t timeout_ms )
+{
+  bool    satisfied;
+  uint32_t elapsed;
+  uint32_t start_ms;
+
+  if ( !g_mock_ready )
+  {
+    return false;
+  }
+
+  start_ms = osal_task_get_time_ms();
+
+  for ( ;; )
+  {
+    if ( _mock_lock() )
+    {
+      satisfied = ( *generation >= level );
+      _mock_unlock();
+    }
+    else
+    {
+      return false;
+    }
+
+    if ( satisfied )
+    {
+      return true;
+    }
+
+    if ( timeout_ms == OSAL_MAX_DELAY )
+    {
+      (void) osal_bin_sem_timed_wait( hint, OSAL_MAX_DELAY );
+      continue;
+    }
+
+    elapsed = _ms_delta( start_ms, osal_task_get_time_ms() );
+    if ( elapsed >= timeout_ms )
+    {
+      return false;
+    }
+
+    /* Charge the remaining budget against the hint wait. */
+    (void) osal_bin_sem_timed_wait( hint, timeout_ms - elapsed );
+
+    /* Loop: re-check the generation and recompute the elapsed time. */
+  }
+}
+
+/* ---- lifecycle counters and waits ----------------------------------------- */
+
+/* Copy one generation counter under the mock mutex so a concurrent getter
+ * never reads a partially-updated snapshot produced by a lifecycle worker
+ * invocation.  The mock is bootstrapped before any worker is created, so a
+ * lock failure is not expected in normal test flow; on failure the empty (0)
+ * sentinel is returned, consistent with the API treating an unavailable
+ * synchronized counter as if no attempt were yet observed. */
+static uint32_t _read_counter( uint32_t* counter )
+{
+  uint32_t value;
+
+  if ( !_mock_lock() )
+  {
+    return 0;
+  }
+  value = *counter;
+  _mock_unlock();
+  return value;
+}
+
+uint32_t wifi_hal_mock_get_init_entered_count( void )
+{
+  return _read_counter( &g_mock.init_count );
+}
+
+uint32_t wifi_hal_mock_get_init_completed_count( void )
+{
+  return _read_counter( &g_init_completed_gen );
+}
+
+uint32_t wifi_hal_mock_get_stop_entered_count( void )
+{
+  return _read_counter( &g_mock.stop_count );
+}
+
+uint32_t wifi_hal_mock_get_stop_completed_count( void )
+{
+  return _read_counter( &g_stop_completed_gen );
+}
+
+uint32_t wifi_hal_mock_get_deinit_entered_count( void )
+{
+  return _read_counter( &g_mock.deinit_count );
+}
+
+uint32_t wifi_hal_mock_get_deinit_completed_count( void )
+{
+  return _read_counter( &g_deinit_completed_gen );
+}
+
+bool wifi_hal_mock_wait_init_entered_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_mock.init_count, g_init_entered_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_init_completed_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_init_completed_gen, g_init_completed_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_stop_entered_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_mock.stop_count, g_stop_entered_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_stop_completed_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_stop_completed_gen, g_stop_completed_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_deinit_entered_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_mock.deinit_count, g_deinit_entered_sem, level, timeout_ms );
+}
+
+bool wifi_hal_mock_wait_deinit_completed_level( uint32_t level, uint32_t timeout_ms )
+{
+  return _wait_generation( &g_deinit_completed_gen, g_deinit_completed_sem, level, timeout_ms );
 }
 
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void )
@@ -345,6 +604,11 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
     g_mock.event_cb    = init->event_cb;
     g_mock.user_data   = init->user_data;
   }
+  /* Publish the completed generation once the effects and result are final,
+   * while the invocation is still marked active.  A completion waiter can
+   * therefore never observe a generation without the matching final state. */
+  g_init_completed_gen++;
+  (void) osal_bin_sem_give( g_init_completed_sem );
   g_init_active = false;
   _mock_unlock();
   return result;
@@ -352,9 +616,53 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
 
 osal_status_t wifi_hal_deinit( void )
 {
+  bool hold;
+
+  if ( !g_mock_ready || !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
+
+  /* Entry, active state, visible attempt counter, and entered acknowledgement
+   * are one transaction, so an entered ack and its counter snapshot cannot
+   * disagree and reset cannot slip between entry and publication. */
+  g_deinit_active = true;
   g_mock.deinit_count++;
+  hold = g_hold_deinit;
+  if ( hold )
+  {
+    g_deinit_parked          = true;
+    g_deinit_release_granted = false;
+  }
+  (void) osal_bin_sem_give( g_deinit_entered_sem );
+  _mock_unlock();
+
+  if ( hold )
+  {
+    /* The mutex is deliberately not held while the invocation blocks. */
+    (void) osal_bin_sem_take( g_deinit_release_sem );
+
+    if ( !_mock_lock() )
+    {
+      return OSAL_ERROR;
+    }
+    g_deinit_parked          = false;
+    g_deinit_release_granted = false;
+    _mock_unlock();
+  }
+
+  /* Apply the mock effects, then publish the completed generation, while still
+   * marked active so a waiter can never observe a stale partial generation. */
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
   g_mock.initialized = false;
   g_mock.started     = false;
+  g_deinit_completed_gen++;
+  (void) osal_bin_sem_give( g_deinit_completed_sem );
+  g_deinit_active = false;
+  _mock_unlock();
   return OSAL_SUCCESS;
 }
 
@@ -368,9 +676,30 @@ osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
 
 osal_status_t wifi_hal_stop( void )
 {
+  if ( !g_mock_ready || !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
+
+  /* Entry, active state, attempt counter, and entered acknowledgement are one
+   * transaction. */
+  g_stop_active = true;
   g_mock.stop_count++;
+  (void) osal_bin_sem_give( g_stop_entered_sem );
+  _mock_unlock();
+
+  /* Apply the mock effects, then publish the completed generation, while still
+   * marked active so a waiter can never observe a partial generation. */
+  if ( !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
   g_mock.started   = false;
   g_mock.connected = false;
+  g_stop_completed_gen++;
+  (void) osal_bin_sem_give( g_stop_completed_sem );
+  g_stop_active = false;
+  _mock_unlock();
   return OSAL_SUCCESS;
 }
 

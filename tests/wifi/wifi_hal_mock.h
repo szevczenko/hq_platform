@@ -46,9 +46,10 @@ typedef struct
  *
  * This is a fixture-owner operation and must not race another mock control or
  * wait API.  It returns false, without changing state or consuming tokens,
- * when wifi_hal_init() is active or parked.  A successful reset clears state
- * and drains all existing notification/release tokens while holding the mock
- * mutex, before allowing a later init to publish a token.
+ * while any init, stop, or deinit invocation is active or parked.  A
+ * successful reset clears state and drains all existing lifecycle
+ * notification/release tokens while holding the mock mutex, before allowing
+ * any later lifecycle entry to publish a token.
  */
 bool wifi_hal_mock_reset( void );
 
@@ -75,17 +76,61 @@ void wifi_hal_mock_inject_event( wifi_hal_event_t event, const wifi_hal_event_da
  * completing it via inject_event(WIFI_HAL_EVT_SCAN_DONE). */
 void wifi_hal_mock_set_scan_done_hold( bool hold );
 
-/* Acknowledged init hold/release.  When @p hold is true, a later
- * wifi_hal_init() publishes its entered acknowledgement and then parks on an
- * OSAL semaphore.  Setting it false releases the parked invocation.  The hold
- * decision and release are serialized with init entry by the mock mutex. */
+/* Per-invocation init hold controls.
+ *
+ * The hold decision is captured at the invocation's entry, serialized with
+ * init entry by the mock mutex.  release_init_hold() releases exactly one
+ * already-parked wifi_hal_init() without touching the hold; a release made
+ * before an invocation parks becomes no credit for a later round.
+ * set_init_hold(false) disables the hold and releases the currently parked
+ * invocation (if any). */
 void wifi_hal_mock_set_init_hold( bool hold );
+
+void wifi_hal_mock_release_init_hold( void );
+
+/* Per-invocation deinit hold, same contract as the init hold above. */
+void wifi_hal_mock_set_deinit_hold( bool hold );
+
+void wifi_hal_mock_release_deinit_hold( void );
 
 /* Consume one entered notification for wifi_hal_init(), or return false when
  * the timeout elapses.  This compatibility API is intentionally one-shot:
- * each successful wait consumes exactly one acknowledgement, including when
- * timeout_ms is zero. */
+ * each success consumes exactly one token, including when timeout_ms is
+ * zero.  New generation-checked waits are exposed separately (see the
+ * wifi_hal_mock_wait_*_level() family below) and do not change its
+ * semantics. */
 bool wifi_hal_mock_wait_init_entered( uint32_t timeout_ms );
+
+/* Lifecycle generation counters.
+ *
+ * Every accepted lifecycle invocation (a wifi_hal_init/stop/deinit call that
+ * has passed parameter validation and the entry boundary) advances the entered
+ * generation counter (which is the same value as the corresponding attempt
+ * counter) and, once the mock state effects and configured result are final,
+ * the completed generation counter.  Both counters therefore share one entry
+ * boundary, including for attempts that return a configured HAL failure. */
+uint32_t wifi_hal_mock_get_init_entered_count( void );
+uint32_t wifi_hal_mock_get_init_completed_count( void );
+uint32_t wifi_hal_mock_get_stop_entered_count( void );
+uint32_t wifi_hal_mock_get_stop_completed_count( void );
+uint32_t wifi_hal_mock_get_deinit_entered_count( void );
+uint32_t wifi_hal_mock_get_deinit_completed_count( void );
+
+/* Generation-checked lifecycle waits.
+ *
+ * @p level is the requested lifecycle attempt (1 = first invocation).  A wait
+ * first inspects the corresponding generation counter under the mock mutex and
+ * treats semaphore tokens only as wake hints.  After every wake, including a
+ * stale success from an earlier round, it re-checks the counter and charges
+ * the elapsed wall-clock time against one wrap-safe timeout budget.  A stale
+ * token left over from an earlier round can therefore never satisfy a wait for
+ * a later one. */
+bool wifi_hal_mock_wait_init_entered_level( uint32_t level, uint32_t timeout_ms );
+bool wifi_hal_mock_wait_init_completed_level( uint32_t level, uint32_t timeout_ms );
+bool wifi_hal_mock_wait_stop_entered_level( uint32_t level, uint32_t timeout_ms );
+bool wifi_hal_mock_wait_stop_completed_level( uint32_t level, uint32_t timeout_ms );
+bool wifi_hal_mock_wait_deinit_entered_level( uint32_t level, uint32_t timeout_ms );
+bool wifi_hal_mock_wait_deinit_completed_level( uint32_t level, uint32_t timeout_ms );
 
 /* Get read-only pointer to internal mock state for assertions. */
 const wifi_hal_mock_state_t* wifi_hal_mock_get_state( void );
