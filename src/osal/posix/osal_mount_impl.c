@@ -132,7 +132,14 @@ static int32_t osal_lfs_configure(const char *devname, const char *mount_point, 
         {
             return rc;
         }
-        strncpy(g_osal_lfs_mount_point, mount_point, sizeof(g_osal_lfs_mount_point) - 1);
+        /* The callers pass the cached global as the mount_point argument, so
+         * guard against a self-overlapping strncpy (undefined behaviour that
+         * the focused AddressSanitizer runs surface as strncpy-param-overlap).
+         */
+        if (mount_point != g_osal_lfs_mount_point)
+        {
+            strncpy(g_osal_lfs_mount_point, mount_point, sizeof(g_osal_lfs_mount_point) - 1);
+        }
         g_osal_lfs_mount_point[sizeof(g_osal_lfs_mount_point) - 1] = '\0';
     }
 

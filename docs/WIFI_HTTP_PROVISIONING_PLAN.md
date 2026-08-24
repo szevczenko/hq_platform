@@ -701,3 +701,68 @@ persistence, heap and task growth) is tracked by
 `docs/ESP_WIFI_PROVISIONING_HIL_CHECKLIST.md` and
 `docs/ESP_WIFI_PROVISIONING_SUPPORTED_CLIENT_MATRIX.md` and is not a gate for
 this automated validation record.
+
+## 16. Race / stress verification matrix (TASK-143)
+
+TASK-143 adds a deterministic verification matrix that reproduces the
+pre-fix ordering bugs and proves the lifecycle is now stable.
+
+### 16.1 Barrier-driven race regression executable
+
+A dedicated test executable `wifi_provisioning_race_tests` compiles the real
+provisioning application, controller and real Wi-Fi management layer against
+the mock Wi-Fi HAL and drives four barrier-synchronized scenarios (never a
+fixed wall-clock sleep):
+
+| Scenario | Behaviors exercised | What the barrier proves |
+|---|---|---|
+| Delayed HAL init | `wifi_hal_init` is parked while a command `STA GOT_IP` is injected | The early event is dropped (no delivery) and `READY` is not reported until init completes; releasing the barrier lets a normal connect complete |
+| Concurrent Mongoose invocations | several caller threads invoke the shared Mongoose poll thread at once | every caller observes only its own completion (no shared completion token); a later deinit is clean |
+| Grace expiry vs. disconnect + controller deinit | the armed success-grace timer races a `wifi_mgmt_disconnect()` and a controller `deinit()` from two worker tasks | the grace is cancelled once (never retires twice), the controller reaches a consistent `DISABLED`, a stale expiry cannot retire a fresh session, and re-init is clean |
+| Teardown while listener operations are pending | a provisioning HTTP request worker is parked on the live listener when `stop()` and the shared Mongoose teardown run | the parked operation is released/closed without a use-after-free and provisioning reports `STOPPED` |
+
+### 16.2 Pre-fix failure signatures (observed before the fixes)
+
+| Scenario | Pre-fix signature | Post-fix guarantee |
+|---|---|---|
+| Delayed HAL init | `GOT_IP` injected before the wifi worker installed the HAL callback could not connect; `wait_ready()` reflected the wall clock not readiness | readiness is derived from an explicit worker completion token |
+| Concurrent Mongoose invocations | a timed-out caller could consume/steal another caller's completion token | each invocation carries its own completion; timed-out caller cannot consume another's signal |
+| Grace expiry vs. disconnect + deinit | a stale grace expiry from a cancelled session could race the next session | the grace timer is cancelled/joined synchronously on deinit; session generation makes stale expiry a no-op |
+| Teardown while listeners pending | a parked request was used after the shared process was gone | listeners close and their closure is confirmed on the Mongoose thread before process teardown |
+
+### 16.3 TASK-143 build and validation commands (post-fix)
+
+Environment: host `x86_64` Linux; CMake + host GCC for POSIX.
+
+| # | Purpose | Command | Expected |
+| 1 | Build POSIX tree | `cmake -B build -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_TESTS=ON -DHQ_BUILD_EXAMPLES=ON` then `cmake --build build` | PASS |
+| 2 | Race regression executable | `cmake --build build --target wifi_provisioning_race_tests` | PASS |
+| 3 | Barrier-driven race tests | `build/tests/wifi_provisioning_race_tests` | 4 Tests 0 Failures 0 Ignored ok |
+| 4 | 200x stress of formerly-flaky executables | `ctest --test-dir build -R 'wifi_http_provisioning_disconnect_tests|wifi_provisioning_fallback_flow_tests' --repeat until-fail:200` | both complete 200 consecutive runs |
+| 5 | Full unit label, sequential | `ctest --test-dir build -L unit --output-on-failure` | all unit executables PASS |
+| 6 | Full unit label, parallel | `ctest --test-dir build -j 4 -L unit --output-on-failure` | all unit executables PASS |
+| 7 | Focused ASan/UBSan build | `cmake -B build_asan -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_TESTS=ON -DHQ_SANITIZE=address` then the race executable | no UAF/UBSan/leak; Unity OK |
+| 8 | Focused ThreadSanitizer build (clang where supported) | `cmake -B build_tsan -DHQ_DEFCONFIG=defconfig/posix.defconfig -DHQ_BUILD_TESTS=ON -DHQ_SANITIZE=thread` then the race executable | no data race; Unity OK |
+| 9 | Broker integration after stress | `bash scripts/validate_broker_integration_tests.sh build` | PASS (detect Mongoose lifecycle regressions) |
+
+The complete matrix is driven by `scripts/validate_wifi_provisioning_races.sh`.
+
+Some toolchains split the installed sanitizer runtime out of the base compiler
+into a separate package (Fedora ships `libasan`, `libubsan` and `libtsan`).  On
+such a host a plain `-fsanitize=address|thread` build fails at link time against
+the compiler's linker scripts, which point at absent system files.  The CMake
+knob `HQ_SANITIZE_RUNTIME_DIR` lets a user-local copy of the matching runtime be
+used: pass it as an extra `cmake -B ... -DHQ_SANITIZE_RUNTIME_DIR=/path` argument
+and run the instrumented race executable with `LD_LIBRARY_PATH=/path`.  The
+validation script probes the native toolchain first and, when it cannot link a
+sanitizer probe, transparently fetches the matching runtime packages under
+`build/sanitize_runtime/` (never touching system state) and drives the focused
+passes with them.  This is how items 7 and 8 are satisfied on a default Fedora
+toolchain.
+
+The focused AddressSanitizer pass also surfaced one pre-existing undefined
+behaviour outside the provisioning stack: the POSIX OSAL unit-mount shim
+(`src/osal/posix/osal_mount_impl.c`) was copying the cached mount-point global
+onto itself (`strncpy` with overlapping ranges).  It is guarded now so the
+fixture setup path (via `osal_mkfs`) is ASan-clean without changing behaviour
+for distinct buffers.

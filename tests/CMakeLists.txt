@@ -1,6 +1,24 @@
 if(NOT ESP_PLATFORM)
   include(${CMAKE_CURRENT_SOURCE_DIR}/common_tests.cmake)
 
+  # TASK-143: optional focused sanitizer build for the race regression
+  # executable.  Accepted values: ""/none (default), "address" (ASan + UBSan),
+  # "thread" (clang TSan data-race detector where supported).
+  set(HQ_SANITIZE "" CACHE STRING "Focused sanitizer for TASK-143 race tests: none|address|thread")
+
+  # Optional directory containing the sanitizer runtime shared libraries that
+  # belongs with the active toolchain (libasan.so, libubsan.so, libtsan.so and
+  # their versioned SONAME links).  Some toolchains split the sanitizer runtime
+  # out of the base compiler into a separate package (Fedora: libasan, libubsan,
+  # libtsan); when that package is missing the compiler's own linker scripts
+  # point at absent system files and the focused build cannot link.  Pointing
+  # this at a user-local copy of the matching runtime lets the focused sanitizer
+  # build link and run on such hosts.  The raced executables must then be run
+  # with LD_LIBRARY_PATH set to this directory so the loader finds the SONAME
+  # (e.g. libasan.so.8) at run time.
+  set(HQ_SANITIZE_RUNTIME_DIR "" CACHE STRING
+      "Optional dir with sanitizer runtime libs (libasan.so, libubsan.so, libtsan.so + SONAME links)")
+
   # POSIX platform: unified test application
   add_executable(osal_tests
     ${HQ_COMMON_TEST_RUNNER}
@@ -731,6 +749,75 @@ if(NOT ESP_PLATFORM)
       set_tests_properties(wifi_provisioning_fallback_flow_tests PROPERTIES LABELS "unit;wifi_provisioning")
 
       message(STATUS "Tests: Building Wi-Fi provisioning fallback flow test application (wifi_provisioning_fallback_flow_tests)")
+# ---- Wi-Fi provisioning deterministic race regression tests (TASK-143) ----
+      # Barrier-driven reproduction of the former pre-fix ordering races: delayed
+      # HAL init (early GOT_IP must be dropped until readiness), concurrent
+      # Mongoose invocations, grace expiry racing a disconnect + controller
+      # deinit, and teardown while a provisioning listener operation is pending.
+      add_executable(wifi_provisioning_race_tests
+        ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_race_test.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
+        ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_SRC_DIR}/wifi_config.c
+        ${WIFI_SRC_DIR}/wifi_utils.c
+        ${WIFI_TEST_DIR}/wifi_hal_mock.c
+      )
+
+      target_include_directories(wifi_provisioning_race_tests
+        PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
+        PRIVATE ${WIFI_SRC_DIR}
+        PRIVATE ${WIFI_TEST_DIR}
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+        PRIVATE ${HQ_CONFIG_DIR}
+        PRIVATE ${HQ_CJSON_INCLUDE_DIRS}
+      )
+
+      if(CONFIG_HQ_PLATFORM_POSIX)
+        target_include_directories(wifi_provisioning_race_tests
+          PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
+        )
+      endif()
+
+      target_link_libraries(wifi_provisioning_race_tests
+        hq_mongoose
+        hq_osal
+        hq_cjson
+        unity
+        pthread
+      )
+
+      # Optional focused sanitizer build (TASK-143).  HQ_SANITIZE=none is the
+      # default and adds no flags.  "address" enables AddressSanitizer +
+      # UndefinedBehaviorSanitizer (GCC/clang); "thread" enables the clang-only
+      # ThreadSanitizer data-race detector where the compiler supports it.
+      if(HQ_SANITIZE MATCHES "address|undefined")
+        target_compile_options(wifi_provisioning_race_tests PRIVATE
+          "-fsanitize=address,undefined" "-fno-omit-frame-pointer"
+        )
+        target_link_options(wifi_provisioning_race_tests PRIVATE
+          "-fsanitize=address,undefined"
+        )
+      elseif(HQ_SANITIZE STREQUAL "thread")
+        target_compile_options(wifi_provisioning_race_tests PRIVATE "-fsanitize=thread")
+        target_link_options(wifi_provisioning_race_tests PRIVATE "-fsanitize=thread")
+      endif()
+      # When the toolchain keeps the sanitizer runtime in a separate package/
+      # location (e.g. Fedora libasan/libubsan/libtsan are not installed), point
+      # the link at a user-local copy so `-lasan`/`-lubsan`/`-ltsan` resolve to a
+      # real shared object instead of the compiler's absent default.
+      if(HQ_SANITIZE_RUNTIME_DIR)
+        target_link_options(wifi_provisioning_race_tests PRIVATE
+          "-L${HQ_SANITIZE_RUNTIME_DIR}"
+        )
+      endif()
+
+      add_test(NAME wifi_provisioning_race_tests COMMAND wifi_provisioning_race_tests)
+      set_tests_properties(wifi_provisioning_race_tests PROPERTIES LABELS "unit;wifi_provisioning")
+
+      message(STATUS "Tests: Building Wi-Fi provisioning race regression test application (wifi_provisioning_race_tests)")
     endif()
   endif()
 
