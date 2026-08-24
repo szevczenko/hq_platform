@@ -348,7 +348,6 @@ bool captive_dns_server_stop(void)
 
   (void)osal_mutex_take(s_mutex);
   was_running = s_svc.running;
-  s_svc.running = false;
   (void)osal_mutex_give(s_mutex);
 
   if (was_running && MongooseProcess_IsRunning()) {
@@ -357,6 +356,11 @@ bool captive_dns_server_stop(void)
      * the caller is told so it can report a lifecycle error. */
     ok = MongooseProcess_Invoke(dns_listener_stop_cb, NULL,
                                 CAPTIVE_DNS_INVOKE_TIMEOUT_MS);
+  }
+  if (ok) {
+    (void)osal_mutex_take(s_mutex);
+    s_svc.running = false;
+    (void)osal_mutex_give(s_mutex);
   }
   /* was_running == false: nothing to close (idempotent stop).  Mongoose not
    * running: its teardown has already released every listener.  Both are

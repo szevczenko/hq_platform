@@ -83,6 +83,10 @@ bool wifi_http_provisioning_stop( void );
  */
 wifi_http_provisioning_state_t wifi_http_provisioning_get_state( void );
 
+#ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+void wifi_http_provisioning_test_set_stop_boundary_hook( void ( *hook )( void ) );
+#endif
+
 /**
  * @brief Override the HTTP listen URL used by the next start().
  *

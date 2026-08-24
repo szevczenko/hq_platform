@@ -89,17 +89,47 @@ static bool s_grace_override = false;
  * from the API, the Wi-Fi callback and the timer callback paths. The lock is
  * created on the first init and kept for the process (never deleted), so no
  * concurrent public call can ever hold or touch a released mutex. */
-static osal_mutex_id_t s_lock        = NULL;
-static bool            s_lock_ready  = false;
+static osal_mutex_id_t  s_lock       = NULL;
+static osal_mutex_id_t  s_lifecycle_lock = NULL;
+static volatile uint8_t s_lock_init  = 0u;
+
+static bool _ensure_lock( void )
+{
+  osal_mutex_id_t lock = NULL;
+
+  if ( s_lock_init == 2u ) return true;
+  if ( __sync_bool_compare_and_swap( &s_lock_init, 0u, 1u ) )
+  {
+    if ( osal_mutex_create( &lock, "wifi_prov_ctrl" ) != OSAL_SUCCESS )
+    {
+      s_lock_init = 0u;
+      return false;
+    }
+    s_lock = lock;
+    if ( osal_mutex_create( &s_lifecycle_lock, "wifi_prov_ctrl_lc" ) != OSAL_SUCCESS )
+    {
+      (void) osal_mutex_delete( s_lock );
+      s_lock = NULL;
+      s_lock_init = 0u;
+      return false;
+    }
+    __sync_synchronize();
+    s_lock_init  = 2u;
+    return true;
+  }
+
+  while ( s_lock_init == 1u ) __sync_synchronize();
+  return s_lock_init == 2u;
+}
 
 static void _lock( void )
 {
-  if ( s_lock_ready ) (void) osal_mutex_take( s_lock );
+  (void) osal_mutex_take( s_lock );
 }
 
 static void _unlock( void )
 {
-  if ( s_lock_ready ) (void) osal_mutex_give( s_lock );
+  (void) osal_mutex_give( s_lock );
 }
 
 /* Private helpers ------------------------------------------------------- */
@@ -134,6 +164,9 @@ static void _abort_grace_window( void )
 static void _start_grace( void )
 {
   bool arm = false;
+  uint32_t session = 0u;
+  uint32_t grace_ms = 0u;
+  osal_timer_id_t timer = NULL;
 
   _lock();
   if ( !s_ctx.enabled || s_ctx.state != WIFI_PROVISIONING_CONTROLLER_PROVISIONING )
@@ -156,17 +189,32 @@ static void _start_grace( void )
   {
     s_ctx.state                   = WIFI_PROVISIONING_CONTROLLER_GRACE;
     s_ctx.grace_armed_session     = s_ctx.session;
+    s_ctx.grace_timer_active      = true;
+    session                       = s_ctx.session;
+    grace_ms                      = s_ctx.grace_ms;
+    timer                         = s_ctx.grace_timer;
     arm                           = true;
   }
   _unlock();
 
   if ( arm )
   {
-    (void) osal_timer_change_period( s_ctx.grace_timer, s_ctx.grace_ms, 0u );
-    (void) osal_timer_start( s_ctx.grace_timer, 0u );
+    const bool timer_started =
+      osal_timer_change_period( timer, grace_ms, 0u ) == OSAL_SUCCESS &&
+      osal_timer_start( timer, 0u ) == OSAL_SUCCESS;
+
     _lock();
-    s_ctx.grace_timer_active = true;
+    const bool current = s_ctx.enabled &&
+                         s_ctx.session == session &&
+                         s_ctx.state == WIFI_PROVISIONING_CONTROLLER_GRACE &&
+                         s_ctx.grace_armed_session == session &&
+                         s_ctx.grace_timer_active;
+    if ( !timer_started && current ) s_ctx.grace_timer_active = false;
     _unlock();
+
+    if ( timer_started && current ) return;
+    if ( timer_started ) (void) osal_timer_stop( timer, 0u );
+    if ( current ) (void) _retire_provisioning( true );
     return;
   }
 
@@ -410,26 +458,17 @@ bool wifi_provisioning_controller_init( void )
 {
   bool timer_ready = false;
 
+  if ( !_ensure_lock() ) return false;
+
+  (void) osal_mutex_take( s_lifecycle_lock );
   _lock();
   if ( s_ctx.enabled )
   {
     _unlock();
+    (void) osal_mutex_give( s_lifecycle_lock );
     return true;
   }
   _unlock();
-
-  /* Create the shared lock once for the process lifetime. */
-  if ( !s_lock_ready )
-  {
-    osal_mutex_id_t mtx = NULL;
-    if ( osal_mutex_create( &mtx, "wifi_prov_ctrl" ) == OSAL_SUCCESS )
-    {
-      s_lock       = mtx;
-      s_lock_ready = true;
-    }
-    /* On failure the controller degrades to single-thread-safe operation; the
-     * statically-initialized lock no-ops until a fresh successful create. */
-  }
 
   _lock();
   s_ctx.enabled            = true;
@@ -479,15 +518,20 @@ bool wifi_provisioning_controller_init( void )
     _unlock();
   }
 
+  (void) osal_mutex_give( s_lifecycle_lock );
   return true;
 }
 
 void wifi_provisioning_controller_deinit( void )
 {
+  if ( !_ensure_lock() ) return;
+
+  (void) osal_mutex_take( s_lifecycle_lock );
   _lock();
   if ( !s_ctx.enabled )
   {
     _unlock();
+    (void) osal_mutex_give( s_lifecycle_lock );
     return;
   }
   _unlock();
@@ -520,20 +564,32 @@ void wifi_provisioning_controller_deinit( void )
   s_ctx.state             = WIFI_PROVISIONING_CONTROLLER_DISABLED;
   ++s_ctx.session;
   _unlock();
+  (void) osal_mutex_give( s_lifecycle_lock );
 }
 
 bool wifi_provisioning_controller_stop( void )
 {
+  if ( !_ensure_lock() ) return false;
+
+  (void) osal_mutex_take( s_lifecycle_lock );
   _lock();
   const bool active = s_ctx.enabled;
   _unlock();
-  if ( !active ) return false;
+  if ( !active )
+  {
+    (void) osal_mutex_give( s_lifecycle_lock );
+    return false;
+  }
 
-  return _retire_provisioning( false );
+  const bool stopped = _retire_provisioning( false );
+  (void) osal_mutex_give( s_lifecycle_lock );
+  return stopped;
 }
 
 void wifi_provisioning_controller_set_success_grace_ms( uint32_t grace_ms )
 {
+  if ( !_ensure_lock() ) return;
+
   _lock();
   s_ctx.grace_ms   = grace_ms;
   s_grace_override = true;
@@ -543,6 +599,8 @@ void wifi_provisioning_controller_set_success_grace_ms( uint32_t grace_ms )
 bool wifi_provisioning_controller_is_provisioning( void )
 {
   bool result;
+  if ( !_ensure_lock() ) return false;
+
   _lock();
   result = s_ctx.state == WIFI_PROVISIONING_CONTROLLER_PROVISIONING ||
            s_ctx.state == WIFI_PROVISIONING_CONTROLLER_GRACE;
@@ -553,10 +611,20 @@ bool wifi_provisioning_controller_is_provisioning( void )
 wifi_provisioning_controller_state_t wifi_provisioning_controller_get_state( void )
 {
   wifi_provisioning_controller_state_t result;
+  if ( !_ensure_lock() ) return WIFI_PROVISIONING_CONTROLLER_DISABLED;
+
   _lock();
   result = s_ctx.state;
   _unlock();
   return result;
 }
+
+#ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+void wifi_provisioning_controller_test_fire_grace_expiry( void )
+{
+  if ( !_ensure_lock() ) return;
+  _on_grace_timer_expired( s_ctx.grace_timer );
+}
+#endif
 
 #endif    /* CONFIG_WIFI_HTTP_PROVISIONING_AUTO_FALLBACK */

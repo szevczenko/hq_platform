@@ -745,6 +745,10 @@ if(NOT ESP_PLATFORM)
         pthread
       )
 
+      target_compile_definitions(wifi_provisioning_fallback_flow_tests
+        PRIVATE WIFI_PROVISIONING_TEST_OBSERVABILITY=1
+      )
+
       add_test(NAME wifi_provisioning_fallback_flow_tests COMMAND wifi_provisioning_fallback_flow_tests)
       set_tests_properties(wifi_provisioning_fallback_flow_tests PROPERTIES LABELS "unit;wifi_provisioning")
 
@@ -787,6 +791,10 @@ if(NOT ESP_PLATFORM)
         hq_cjson
         unity
         pthread
+      )
+
+      target_compile_definitions(wifi_provisioning_race_tests
+        PRIVATE WIFI_PROVISIONING_TEST_OBSERVABILITY=1
       )
 
       # Optional focused sanitizer build (TASK-143).  HQ_SANITIZE=none is the

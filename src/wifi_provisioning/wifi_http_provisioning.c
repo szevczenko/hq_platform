@@ -91,6 +91,9 @@
  * result. */
 static struct mg_connection  *s_http_nc;      /* Poll thread only. */
 static bool   s_http_bound;                   /* Lifecycle snapshot.         */
+#ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+static void ( *s_stop_boundary_hook )( void );
+#endif
 static wifi_http_provisioning_state_t s_state;
 static char   s_http_url[WIFI_PROVISIONING_URL_MAX_LEN];
 static bool   s_http_configured;
@@ -1067,20 +1070,28 @@ bool wifi_http_provisioning_stop( void )
   /* HTTP listener: close on the poll thread and confirm that the close
    * callback completed. If the owned listener cannot be closed while Mongoose
    * is still running, the stop fails and the module reports ERROR. */
+#ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+  if ( s_stop_boundary_hook != NULL ) s_stop_boundary_hook();
+#endif
   if ( s_http_bound && MongooseProcess_IsRunning() )
   {
     if ( !MongooseProcess_Invoke( http_listener_stop_cb, NULL,
                                   WIFI_PROVISIONING_INVOKE_TIMEOUT_MS ) )
       ok = false;
+    else
+      s_http_bound = false;
   }
-  s_http_bound = false;
+  else if ( s_http_bound )
+  {
+    s_http_bound = false;
+  }
 
   /* DNS listener: close through the captive DNS service (its stop runs the
    * close callback on the poll thread and reports whether it completed). */
   if ( s_dns_started )
   {
-    if ( !captive_dns_server_stop() ) ok = false;
-    s_dns_started = false;
+    if ( captive_dns_server_stop() ) s_dns_started = false;
+    else ok = false;
   }
 
   /* Confirm closure succeeded before reporting STOPPED; otherwise ERROR. */
@@ -1103,6 +1114,13 @@ wifi_http_provisioning_state_t wifi_http_provisioning_get_state( void )
   }
   return st;
 }
+
+#ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+void wifi_http_provisioning_test_set_stop_boundary_hook( void ( *hook )( void ) )
+{
+  s_stop_boundary_hook = hook;
+}
+#endif
 
 bool wifi_http_provisioning_set_http_url( const char * url )
 {

@@ -1579,7 +1579,11 @@ bool wifi_mgmt_deinit( void )
 
   /* 2. Terminate request and quiescence.  Only arm a fresh terminate if the
    *    worker is not already parked from an earlier attempt. */
-  if ( !g_ctx.quit_quiesced )
+  _lock_state();
+  const bool quit_quiesced = g_ctx.quit_quiesced &&
+                              !g_ctx.quit_pending;
+  _unlock_state();
+  if ( !quit_quiesced )
   {
     const uint32_t quit_gen = _next_quit_generation();
     _lock_state();

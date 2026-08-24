@@ -79,20 +79,22 @@
 #define CONNECT_WAIT_MS    6000u
 #define EVENT_WAIT_MS      6000u
 #define TRANSITION_WAIT_MS ( TEST_GRACE_MS + 4000u )
-#define MONITOR_TICK_MS    5u
-#define MONITOR_STOP_MS    20u
 
 /* --- typed-event completion semaphores ------------------------------------ */
 
 static osal_bin_sem_id_t s_connected_sem    = NULL;
 static osal_bin_sem_id_t s_disconnected_sem = NULL;
 static osal_bin_sem_id_t s_mode_changed_sem = NULL;
-static osal_bin_sem_id_t s_prov_stopped_sem = NULL;
 static osal_bin_sem_id_t s_deinit_done      = NULL;
+static osal_bin_sem_id_t s_disconnect_done  = NULL;
 static osal_count_sem_id_t s_race_start_sem = NULL;
-
-static volatile bool  s_watch_stop = false;
-static osal_task_id_t s_watch_task = 0;
+static pthread_mutex_t s_listener_barrier_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  s_listener_barrier_cond  = PTHREAD_COND_INITIALIZER;
+static bool            s_listener_op_entered;
+static bool            s_listener_op_release;
+static osal_bin_sem_id_t s_stop_boundary_sem = NULL;
+static osal_bin_sem_id_t s_stop_done_sem     = NULL;
+static bool              s_stop_result;
 
 static void on_connected_event( wifi_mgmt_event_t event, void * user_data )
 {
@@ -118,50 +120,6 @@ static void on_mode_changed_event( wifi_mgmt_event_t event, void * user_data )
   if ( mock.mode == WIFI_HAL_MODE_STA && s_mode_changed_sem != NULL )
   {
     ( void ) osal_bin_sem_give( s_mode_changed_sem );
-  }
-}
-
-static void prov_stopped_watch_fn( void * arg )
-{
-  bool signalled = false;
-
-  ( void ) arg;
-  while ( !s_watch_stop )
-  {
-    if ( wifi_http_provisioning_get_state() == WIFI_PROVISIONING_STOPPED )
-    {
-      if ( !signalled && s_prov_stopped_sem != NULL )
-      {
-        signalled = true;
-        ( void ) osal_bin_sem_give( s_prov_stopped_sem );
-      }
-    }
-    else
-    {
-      signalled = false;
-    }
-    ( void ) osal_task_delay_ms( MONITOR_TICK_MS );
-  }
-}
-
-static bool start_prov_stopped_watch( void )
-{
-  if ( s_watch_task != 0 ) return true;
-  if ( s_prov_stopped_sem == NULL ) return false;
-  s_watch_stop = false;
-  return osal_task_create( &s_watch_task, "race_watch", prov_stopped_watch_fn,
-                           NULL, NULL, OSAL_TASK_MIN_STACK_SIZE * 2,
-                           1u, NULL ) == OSAL_SUCCESS;
-}
-
-static void stop_prov_stopped_watch( void )
-{
-  if ( s_watch_task != 0 )
-  {
-    s_watch_stop = true;
-    ( void ) osal_task_delay_ms( MONITOR_STOP_MS );
-    ( void ) osal_task_delete( s_watch_task );
-    s_watch_task = 0;
   }
 }
 
@@ -204,10 +162,10 @@ void setUp( void )
     ( void ) osal_bin_sem_create( &s_disconnected_sem, "r_disc", OSAL_SEM_EMPTY );
   if ( s_mode_changed_sem == NULL )
     ( void ) osal_bin_sem_create( &s_mode_changed_sem, "r_mode", OSAL_SEM_EMPTY );
-  if ( s_prov_stopped_sem == NULL )
-    ( void ) osal_bin_sem_create( &s_prov_stopped_sem, "r_stop", OSAL_SEM_EMPTY );
   if ( s_deinit_done == NULL )
     ( void ) osal_bin_sem_create( &s_deinit_done, "r_deinit", OSAL_SEM_EMPTY );
+  if ( s_disconnect_done == NULL )
+    ( void ) osal_bin_sem_create( &s_disconnect_done, "r_disc_done", OSAL_SEM_EMPTY );
   if ( s_race_start_sem == NULL )
     ( void ) osal_count_sem_create( &s_race_start_sem, "race_start", 0u, 2u );
 
@@ -220,6 +178,12 @@ void setUp( void )
 
 void tearDown( void )
 {
+  ( void ) pthread_mutex_lock( &s_listener_barrier_mutex );
+  s_listener_op_release = true;
+  ( void ) pthread_cond_broadcast( &s_listener_barrier_cond );
+  ( void ) pthread_mutex_unlock( &s_listener_barrier_mutex );
+  wifi_http_provisioning_test_set_stop_boundary_hook( NULL );
+
   wifi_hal_mock_set_init_hold( false );
   wifi_hal_mock_set_start_hold( false );
   wifi_hal_mock_set_connect_hold( false );
@@ -229,7 +193,6 @@ void tearDown( void )
 
   ( void ) wifi_http_provisioning_stop();
   ( void ) wifi_provisioning_controller_deinit();
-  stop_prov_stopped_watch();
   ( void ) wifi_mgmt_stop();
   ( void ) wifi_mgmt_deinit();
   MongooseProcess_Deinit();
@@ -251,20 +214,30 @@ void tearDown( void )
     ( void ) osal_bin_sem_delete( s_mode_changed_sem );
     s_mode_changed_sem = NULL;
   }
-  if ( s_prov_stopped_sem != NULL )
-  {
-    ( void ) osal_bin_sem_delete( s_prov_stopped_sem );
-    s_prov_stopped_sem = NULL;
-  }
   if ( s_deinit_done != NULL )
   {
     ( void ) osal_bin_sem_delete( s_deinit_done );
     s_deinit_done = NULL;
   }
+  if ( s_disconnect_done != NULL )
+  {
+    ( void ) osal_bin_sem_delete( s_disconnect_done );
+    s_disconnect_done = NULL;
+  }
   if ( s_race_start_sem != NULL )
   {
     ( void ) osal_count_sem_delete( s_race_start_sem );
     s_race_start_sem = NULL;
+  }
+  if ( s_stop_boundary_sem != NULL )
+  {
+    ( void ) osal_bin_sem_delete( s_stop_boundary_sem );
+    s_stop_boundary_sem = NULL;
+  }
+  if ( s_stop_done_sem != NULL )
+  {
+    ( void ) osal_bin_sem_delete( s_stop_done_sem );
+    s_stop_done_sem = NULL;
   }
 }
 
@@ -515,6 +488,7 @@ static void race_disconnect_fn( void * arg )
   ( void ) arg;
   if ( s_race_start_sem != NULL ) ( void ) osal_count_sem_take( s_race_start_sem );
   ( void ) wifi_mgmt_disconnect();
+  if ( s_disconnect_done != NULL ) ( void ) osal_bin_sem_give( s_disconnect_done );
 }
 
 static void race_deinit_fn( void * arg )
@@ -566,7 +540,9 @@ static void test_grace_expiry_racing_disconnect_and_deinit( void )
   TEST_ASSERT_TRUE_MESSAGE(
     wait_semaphore( s_deinit_done, TRANSITION_WAIT_MS ),
     "controller deinit must complete while racing the grace timer" );
-  ( void ) osal_task_delay_ms( TEST_GRACE_MS + 100u );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wait_semaphore( s_disconnect_done, TRANSITION_WAIT_MS ),
+    "disconnect actor must complete while racing controller deinit" );
   ( void ) osal_task_delete( t_disc );
   ( void ) osal_task_delete( t_deinit );
 
@@ -578,7 +554,7 @@ static void test_grace_expiry_racing_disconnect_and_deinit( void )
   TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
                          wifi_provisioning_controller_get_state() );
-  ( void ) osal_task_delay_ms( TEST_GRACE_MS + 200u );
+  wifi_provisioning_controller_test_fire_grace_expiry();
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
                          wifi_http_provisioning_get_state() );
   TEST_ASSERT_TRUE( wifi_hal_mock_get_state( &state_snapshot ) );
@@ -592,41 +568,82 @@ static void test_grace_expiry_racing_disconnect_and_deinit( void )
 /*  Scenario 4 - teardown while a listener operation is pending.     */
 /* ----------------------------------------------------------------- */
 
-static volatile int    s_http_port = 0;
-static volatile int    s_http_resp = 0;
-static osal_task_id_t  s_http_task = 0;
-
-static void pending_listener_op_fn( void * arg )
+static void pending_listener_op_cb( struct mg_mgr * mgr, void * user )
 {
-  char resp[2048];
+  ( void ) mgr;
+  ( void ) user;
+  ( void ) pthread_mutex_lock( &s_listener_barrier_mutex );
+  s_listener_op_entered = true;
+  ( void ) pthread_cond_broadcast( &s_listener_barrier_cond );
+  while ( !s_listener_op_release )
+    ( void ) pthread_cond_wait( &s_listener_barrier_cond,
+                                &s_listener_barrier_mutex );
+  ( void ) pthread_mutex_unlock( &s_listener_barrier_mutex );
+}
 
+static void *pending_listener_invoke_thread( void * arg )
+{
   ( void ) arg;
-  ( void ) osal_task_delay_ms( 50u );
-  s_http_resp = http_request( s_http_port, "GET", STATUS_PATH,
-                              resp, sizeof( resp ) );
+  ( void ) MongooseProcess_Invoke( pending_listener_op_cb, NULL, EVENT_WAIT_MS );
+  return NULL;
+}
+
+static void stop_boundary_hook( void )
+{
+  if ( s_stop_boundary_sem != NULL ) ( void ) osal_bin_sem_give( s_stop_boundary_sem );
+}
+
+static void stop_listener_task( void * arg )
+{
+  ( void ) arg;
+  s_stop_result = wifi_http_provisioning_stop();
+  if ( s_stop_done_sem != NULL ) ( void ) osal_bin_sem_give( s_stop_done_sem );
 }
 
 static void test_teardown_while_listener_operations_pending( void )
 {
   char http_url[64], dns_url[64];
+  osal_task_id_t stop_task = 0;
+  pthread_t invoke_thread;
 
   start_wifi_ready();
-  s_http_port = reserve_listeners( http_url, sizeof( http_url ),
-                                   dns_url, sizeof( dns_url ) );
+  ( void ) reserve_listeners( http_url, sizeof( http_url ),
+                              dns_url, sizeof( dns_url ) );
   TEST_ASSERT_TRUE( wifi_http_provisioning_start() );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
                          wifi_http_provisioning_get_state() );
 
-  s_http_resp = 0;
-  TEST_ASSERT_TRUE_MESSAGE(
-    osal_task_create( &s_http_task, "http_pend", pending_listener_op_fn,
-                      NULL, NULL, OSAL_TASK_MIN_STACK_SIZE * 2,
-                      1u, NULL ) == OSAL_SUCCESS,
-    "pending listener worker must start" );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS,
+    osal_bin_sem_create( &s_stop_boundary_sem, "r_stop_boundary", OSAL_SEM_EMPTY ) );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS,
+    osal_bin_sem_create( &s_stop_done_sem, "r_stop_done", OSAL_SEM_EMPTY ) );
+  s_listener_op_entered = false;
+  s_listener_op_release = false;
+  s_stop_result = false;
+  wifi_http_provisioning_test_set_stop_boundary_hook( stop_boundary_hook );
 
-  ( void ) osal_task_delay_ms( 30u );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_http_provisioning_stop(),
-                            "listeners must stop while a request is pending" );
+  TEST_ASSERT_EQUAL_INT( 0, pthread_create( &invoke_thread, NULL,
+    pending_listener_invoke_thread, NULL ) );
+  ( void ) pthread_mutex_lock( &s_listener_barrier_mutex );
+  while ( !s_listener_op_entered )
+    ( void ) pthread_cond_wait( &s_listener_barrier_cond,
+                                &s_listener_barrier_mutex );
+  ( void ) pthread_mutex_unlock( &s_listener_barrier_mutex );
+
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS,
+    osal_task_create( &stop_task, "listener_stop", stop_listener_task,
+                      NULL, NULL, OSAL_TASK_MIN_STACK_SIZE * 2, 1u, NULL ) );
+  TEST_ASSERT_TRUE( wait_semaphore( s_stop_boundary_sem, EVENT_WAIT_MS ) );
+
+  ( void ) pthread_mutex_lock( &s_listener_barrier_mutex );
+  s_listener_op_release = true;
+  ( void ) pthread_cond_broadcast( &s_listener_barrier_cond );
+  ( void ) pthread_mutex_unlock( &s_listener_barrier_mutex );
+  ( void ) pthread_join( invoke_thread, NULL );
+  TEST_ASSERT_TRUE( wait_semaphore( s_stop_done_sem, EVENT_WAIT_MS ) );
+  ( void ) osal_task_delete( stop_task );
+  TEST_ASSERT_TRUE_MESSAGE( s_stop_result,
+                            "listeners must stop after the pending operation drains" );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
                          wifi_http_provisioning_get_state() );
 
@@ -635,13 +652,11 @@ static void test_teardown_while_listener_operations_pending( void )
   MongooseProcess_Deinit();
   TEST_ASSERT_FALSE( MongooseProcess_IsRunning() );
 
-  ( void ) osal_task_delay_ms( 100u );
-  if ( s_http_task != 0 )
-  {
-    ( void ) osal_task_delete( s_http_task );
-    s_http_task = 0;
-  }
-  ( void ) s_http_resp;
+  wifi_http_provisioning_test_set_stop_boundary_hook( NULL );
+  ( void ) osal_bin_sem_delete( s_stop_boundary_sem );
+  ( void ) osal_bin_sem_delete( s_stop_done_sem );
+  s_stop_boundary_sem = NULL;
+  s_stop_done_sem = NULL;
 
   MongooseProcess_Init();
   TEST_ASSERT_TRUE( MongooseProcess_IsRunning() );

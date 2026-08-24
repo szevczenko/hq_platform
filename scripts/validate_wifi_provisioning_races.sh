@@ -96,9 +96,17 @@ fi
 # Pre-flight: configure + build the task-mandated POSIX tree.
 # ---------------------------------------------------------------------------
 note "Configuring POSIX test build in $BUILD_DIR"
-cmake -B "$BUILD_DIR" "${CMAKE_COMMON_ARGS[@]}" \
-  > "$LOG_DIR/cfg_143.log" 2>&1
-cmake --build "$BUILD_DIR" > "$LOG_DIR/build_143.log" 2>&1
+if ! cmake -B "$BUILD_DIR" "${CMAKE_COMMON_ARGS[@]}" \
+        > "$LOG_DIR/cfg_143.log" 2>&1; then
+        bad "POSIX test build configuration failed"
+        tail -n 120 "$LOG_DIR/cfg_143.log" | sed 's/^/        /'
+        exit 1
+fi
+if ! cmake --build "$BUILD_DIR" > "$LOG_DIR/build_143.log" 2>&1; then
+        bad "POSIX test build failed"
+        tail -n 120 "$LOG_DIR/build_143.log" | sed 's/^/        /'
+        exit 1
+fi
 
 RACE_BIN="$TESTS_DIR/wifi_provisioning_race_tests"
 if [ ! -x "$RACE_BIN" ]; then

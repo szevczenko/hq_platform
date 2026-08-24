@@ -35,10 +35,9 @@
  *    asserted to prove the 700 ms value was actually armed,
  *  - the pre-GOT_IP wait uses the mock connect-call completion channel, and
  *    the persisted-configuration check waits for the typed CONNECTED event,
- *  - the former 20 ms polling loop / 5000 ms boundary is replaced by a
- *    provisioning-stopped monitor semaphore and a typed MODE_CHANGED
- *    semaphore; the controller ONLINE state, the HTTP/DNS closure, and the
- *    HAL STA mode are then asserted from a mock snapshot,
+ *  - the former polling loop is replaced by the authoritative typed
+ *    MODE_CHANGED completion; controller state, HTTP/DNS closure, and HAL
+ *    mode are then asserted from snapshots,
  *  - teardown stops the controller before Wi-Fi, stops/deinitializes Wi-Fi
  *    before Mongoose, and cleans the filesystem only after every writer that
  *    owns the shared image is joined,
@@ -94,67 +93,11 @@
 #define CONNECT_WAIT_MS      6000u
 #define EVENT_WAIT_MS        6000u
 #define TRANSITION_WAIT_MS   ( TEST_GRACE_MS + 4000u )
-#define STALE_EXTRA_MS       500u
-#define MONITOR_TICK_MS      5u
-#define MONITOR_STOP_MS      20u
 
 /* -- typed-event completion semaphores ------------------------------------- */
 
 static osal_bin_sem_id_t s_connected_sem    = NULL;
-static osal_bin_sem_id_t s_prov_stopped_sem = NULL;
 static osal_bin_sem_id_t s_mode_changed_sem = NULL;
-
-/* Dedicated observer task that notifies when the provisioning application
- * reaches STOPPED. This is the test-local completion source for the former
- * boolean poll: the main flow waits on the semaphore instead of elapsed-time
- * polling, so it never has to guess a wall-clock boundary for the listener
- * shutdown. */
-static volatile bool     s_watch_stop = false;
-static osal_task_id_t    s_watch_task = 0;
-
-static void prov_stopped_watch_fn( void * arg )
-{
-  bool signalled = false;
-
-  ( void ) arg;
-  while ( !s_watch_stop )
-  {
-    if ( wifi_http_provisioning_get_state() == WIFI_PROVISIONING_STOPPED )
-    {
-      if ( !signalled && s_prov_stopped_sem != NULL )
-      {
-        signalled = true;
-        ( void ) osal_bin_sem_give( s_prov_stopped_sem );
-      }
-    }
-    else
-    {
-      signalled = false;
-    }
-    ( void ) osal_task_delay_ms( MONITOR_TICK_MS );
-  }
-}
-
-static bool start_prov_stopped_watch( void )
-{
-  if ( s_watch_task != 0 ) return true;
-  if ( s_prov_stopped_sem == NULL ) return false;
-  s_watch_stop = false;
-  return osal_task_create( &s_watch_task, "prov_watch", prov_stopped_watch_fn,
-                           NULL, NULL, OSAL_TASK_MIN_STACK_SIZE * 2,
-                           1u, NULL ) == OSAL_SUCCESS;
-}
-
-static void stop_prov_stopped_watch( void )
-{
-  if ( s_watch_task != 0 )
-  {
-    s_watch_stop = true;
-    ( void ) osal_task_delay_ms( MONITOR_STOP_MS );
-    ( void ) osal_task_delete( s_watch_task );
-    s_watch_task = 0;
-  }
-}
 
 static void on_connected_event( wifi_mgmt_event_t event, void * user_data )
 {
@@ -219,8 +162,6 @@ void setUp( void )
   /* Fresh completion semaphores (no token from a prior scenario). */
   if ( s_connected_sem == NULL )
     (void) osal_bin_sem_create( &s_connected_sem, "t_conn", OSAL_SEM_EMPTY );
-  if ( s_prov_stopped_sem == NULL )
-    (void) osal_bin_sem_create( &s_prov_stopped_sem, "t_stop", OSAL_SEM_EMPTY );
   if ( s_mode_changed_sem == NULL )
     (void) osal_bin_sem_create( &s_mode_changed_sem, "t_mode", OSAL_SEM_EMPTY );
 
@@ -251,7 +192,6 @@ void tearDown( void )
    * and deinitialized before the shared Mongoose process, and the filesystem
    * is only cleaned once every writer behind the shared image is joined. */
   ( void ) wifi_http_provisioning_stop();
-  stop_prov_stopped_watch();
   wifi_provisioning_controller_deinit();
   (void) wifi_mgmt_stop();
   (void) wifi_mgmt_deinit();
@@ -263,11 +203,6 @@ void tearDown( void )
   {
     ( void ) osal_bin_sem_delete( s_connected_sem );
     s_connected_sem = NULL;
-  }
-  if ( s_prov_stopped_sem != NULL )
-  {
-    ( void ) osal_bin_sem_delete( s_prov_stopped_sem );
-    s_prov_stopped_sem = NULL;
   }
   if ( s_mode_changed_sem != NULL )
   {
@@ -576,11 +511,6 @@ static void test_automatic_fallback_flow( void )
 
   subscribe_test_events();
 
-  /* Arm the provisioning-stopped observer now that the portal is RUNNING so
-   * an initial STOPPED cannot satisfy the transition wait. */
-  TEST_ASSERT_TRUE_MESSAGE( start_prov_stopped_watch(),
-                            "provisioning-stopped observer must start" );
-
   /* --- 2. DNS responses --------------------------------------------------- */
   TEST_ASSERT_TRUE_MESSAGE( dns_query_a( dns_port, DNS_NAME, ip, sizeof( ip ) ),
                             "captive DNS must answer an A query" );
@@ -627,13 +557,11 @@ static void test_automatic_fallback_flow( void )
 
   /* --- 7. STA-only transition after the grace period ------------------------
    * Synchronize to the two real completions instead of the former 5000 ms
-   * polling loop: the provisioning-stopped monitor semaphore and the typed
-   * MODE_CHANGED of the STA-only retire. The elapsed time since the grace
+  * polling loop: the typed MODE_CHANGED event of the STA-only retire. The
+  * elapsed time since the grace
    * window opened is then compared against TEST_GRACE_MS to prove the test's
    * 700 ms override (and not the Kconfig default) was actually armed. */
   t_start = osal_task_get_time_ms();
-  TEST_ASSERT_TRUE_MESSAGE( wait_semaphore( s_prov_stopped_sem, TRANSITION_WAIT_MS ),
-                            "grace expiry must reach provisioning STOPPED" );
   TEST_ASSERT_TRUE_MESSAGE( wait_semaphore( s_mode_changed_sem, TRANSITION_WAIT_MS ),
                             "grace expiry must confirm the STA-only mode change" );
   {
@@ -691,7 +619,6 @@ static void test_stale_grace_expiry_cannot_retire_next_session( void )
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
                          wifi_http_provisioning_get_state() );
   subscribe_test_events();
-  TEST_ASSERT_TRUE( start_prov_stopped_watch() );
 
   /* Arm a genuine grace session (a station connects through the portal). */
   TEST_ASSERT_TRUE( wifi_mgmt_set_ap_name( "testnet", ( size_t ) 7 ) );
@@ -716,10 +643,9 @@ static void test_stale_grace_expiry_cannot_retire_next_session( void )
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
                          wifi_http_provisioning_get_state() );
 
-  /* Wait well past the cancelled session's grace window: its stale expiry (if
-   * it could race) would have retired the new session by now. It cannot, so
-   * the new session must still be PROVISIONING with the portal up. */
-  ( void ) osal_task_delay_ms( TEST_GRACE_MS + STALE_EXTRA_MS );
+  /* Inject the cancelled generation's expiry synchronously. Generation and
+   * state validation must reject it without retiring the fresh session. */
+  wifi_provisioning_controller_test_fire_grace_expiry();
 
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
                          wifi_provisioning_controller_get_state() );

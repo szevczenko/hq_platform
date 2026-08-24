@@ -140,4 +140,8 @@ void wifi_provisioning_controller_set_success_grace_ms( uint32_t grace_ms );
  */
 wifi_provisioning_controller_state_t wifi_provisioning_controller_get_state( void );
 
+#ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+void wifi_provisioning_controller_test_fire_grace_expiry( void );
+#endif
+
 #endif    /* WIFI_PROVISIONING_CONTROLLER_H */

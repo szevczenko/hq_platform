@@ -25,3 +25,4 @@ cert/*.srl
 cert/*.ext
 
 logs/
+Testing/Temporary/

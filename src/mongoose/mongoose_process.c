@@ -26,6 +26,9 @@ static volatile bool             s_shutting_down  = false;
 static osal_bin_sem_id_t         s_stopped_sem;
 static osal_task_id_t            s_poll_task_id;
 static osal_mutex_id_t           s_state_mutex;
+static osal_mutex_id_t           s_lifecycle_mutex;
+static volatile uint8_t          s_state_mutex_init;
+static bool                      s_poll_stopped;
 
 /* Each queued invocation is a heap-allocated record independently owned by the
  * caller and by the poll thread (refs starts at 2).  The caller owns one
@@ -52,6 +55,34 @@ typedef struct {
 static osal_queue_id_t       s_invoke_q;
 static struct mg_connection *s_control_nc;
 static unsigned long         s_control_conn_id;
+
+static bool mongoose_state_mutex_ensure(void)
+{
+	osal_mutex_id_t mutex = NULL;
+
+	if (s_state_mutex_init == 2)
+		return true;
+	if (__sync_bool_compare_and_swap(&s_state_mutex_init, 0, 1)) {
+		if (osal_mutex_create(&mutex, "mg_state") != OSAL_SUCCESS) {
+			s_state_mutex_init = 0;
+			return false;
+		}
+		s_state_mutex = mutex;
+		if (osal_mutex_create(&s_lifecycle_mutex, "mg_lifecycle") != OSAL_SUCCESS) {
+			(void)osal_mutex_delete(s_state_mutex);
+			s_state_mutex = NULL;
+			s_state_mutex_init = 0;
+			return false;
+		}
+		__sync_synchronize();
+		s_state_mutex_init = 2;
+		return true;
+	}
+
+	while (s_state_mutex_init == 1)
+		(void)osal_task_delay_ms(1);
+	return s_state_mutex_init == 2;
+}
 
 /* Drop one party's ownership of an invocation record.  The last owner releases
  * the completion semaphore and the heap block.  Atomic so a caller timing out
@@ -117,15 +148,20 @@ static void invoke_control_cb(struct mg_connection *nc, int ev, void *ev_data)
 
 void MongooseProcess_Init(void)
 {
-	if (s_running)
+	if (!mongoose_state_mutex_ensure())
 		return;
+
+	(void)osal_mutex_take(s_lifecycle_mutex);
+	(void)osal_mutex_take(s_state_mutex);
+	if (s_running)
+		goto out_unlock;
 
 	s_stop_requested  = false;
 	s_shutting_down   = false;
+	s_poll_stopped    = false;
 	s_invoke_q        = NULL;
 	s_control_nc      = NULL;
 	s_control_conn_id = 0;
-
 	mg_mgr_init(&mgr);
 	mg_wakeup_init(&mgr);
 	mg_log_set(CONFIG_MONGOOSE_LOG_LEVEL);
@@ -148,12 +184,11 @@ void MongooseProcess_Init(void)
 			     MONGOOSE_POLL_STACK_SIZE, 5, NULL) != OSAL_SUCCESS)
 		goto err_control_close;
 
-	if (s_state_mutex == NULL)
-		(void)osal_mutex_create(&s_state_mutex, "mg_state");
-
-	(void)osal_mutex_take(s_state_mutex);
 	s_running = true;
+
+out_unlock:
 	(void)osal_mutex_give(s_state_mutex);
+	(void)osal_mutex_give(s_lifecycle_mutex);
 	return;
 
 err_control_close:
@@ -166,37 +201,43 @@ err_stopped_sem_delete:
 	(void)osal_bin_sem_delete(s_stopped_sem);
 err_mgr_free:
 	mg_mgr_free(&mgr);
+	(void)osal_mutex_give(s_state_mutex);
+	(void)osal_mutex_give(s_lifecycle_mutex);
 }
 
 void MongooseProcess_Deinit(void)
 {
-	/* Never initialised, or already torn down: the state mutex is not created
-	 * on a failed init, so bail before touching it. */
-	if (s_state_mutex == NULL) {
-		s_running = false;
+	if (!mongoose_state_mutex_ensure())
 		return;
-	}
 
-	/* Serialize with enqueue: take the lock, mark shutdown, release the lock
-	 * so the poll thread can run and so an enqueuer already inside the state
-	 * lock may finish handing its item to the poll thread. */
+	(void)osal_mutex_take(s_lifecycle_mutex);
 	(void)osal_mutex_take(s_state_mutex);
 	if (!s_running) {
 		(void)osal_mutex_give(s_state_mutex);
+		(void)osal_mutex_give(s_lifecycle_mutex);
 		return;
 	}
 	s_shutting_down  = true;
 	s_stop_requested = true;
 	(void)osal_mutex_give(s_state_mutex);
 
-	/* The poll thread cancels every queued record before giving this sem.
-	 * The bounded wait tolerates a stuck callback, but we only reclaim the
-	 * queue after it has produced a final release for each pending caller. */
-	(void)osal_bin_sem_timed_wait(s_stopped_sem, 2000);
-	(void)osal_task_delete(s_poll_task_id);
-	(void)osal_bin_sem_delete(s_stopped_sem);
+	/* A timeout or failed task join retains every resource for a later retry. */
+	if (!s_poll_stopped) {
+		if (osal_bin_sem_timed_wait(s_stopped_sem, 2000) != OSAL_SUCCESS) {
+			(void)osal_mutex_give(s_lifecycle_mutex);
+			return;
+		}
+		(void)osal_mutex_take(s_state_mutex);
+		s_poll_stopped = true;
+		(void)osal_mutex_give(s_state_mutex);
+	}
+	if (osal_task_delete(s_poll_task_id) != OSAL_SUCCESS) {
+		(void)osal_mutex_give(s_lifecycle_mutex);
+		return;
+	}
 
 	(void)osal_mutex_take(s_state_mutex);
+	(void)osal_bin_sem_delete(s_stopped_sem);
 	if (s_invoke_q != NULL) {
 		(void)osal_queue_delete(s_invoke_q);
 		s_invoke_q = NULL;
@@ -204,12 +245,10 @@ void MongooseProcess_Deinit(void)
 	s_control_nc      = NULL;
 	s_control_conn_id = 0;
 	s_running         = false;
-	/* Tear the manager down under the state lock so no enqueue can be midway
-	 * through mg_wakeup() against a connection that is being freed. */
+	s_shutting_down   = false;
 	mg_mgr_free(&mgr);
 	(void)osal_mutex_give(s_state_mutex);
-
-	s_shutting_down = false;
+	(void)osal_mutex_give(s_lifecycle_mutex);
 }
 
 bool MongooseProcess_Invoke(mongoose_process_fn_t fn, void *user,
