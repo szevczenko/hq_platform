@@ -602,6 +602,21 @@ static void _save_current_sta_config( void )
 {
   const char* ssid = (const char*) g_ctx.sta_cfg.ssid;
   const char* pass = (const char*) g_ctx.sta_cfg.password;
+  wifi_config_entry_t persisted = { 0 };
+
+  /* A normal reboot reconnects with the already-persisted last-used entry.
+   * Do not promote and rewrite that unchanged credential on every boot. A
+   * newly provisioned credential, changed password, or successful fallback
+   * entry still reaches the update/save path below. */
+  if ( g_ctx.config_loaded &&
+       g_ctx.current_cred_nb == g_ctx.config_list.last_use &&
+       wifi_config_get_by_nb( &g_ctx.config_list, g_ctx.current_cred_nb,
+                              &persisted ) &&
+       strncmp( persisted.ssid, ssid, sizeof( persisted.ssid ) ) == 0 &&
+       strncmp( persisted.password, pass, sizeof( persisted.password ) ) == 0 )
+  {
+    return;
+  }
 
   if ( wifi_config_add_credential( &g_ctx.config_list, ssid, pass ) != OSAL_SUCCESS )
   {
@@ -898,8 +913,6 @@ static void _request_mode_change( void )
   _lock_state();
   const wifi_type_t requested = g_ctx.mode_req;
   g_ctx.mode_req = (wifi_type_t) 0;
-  g_ctx.connected   = false;
-  g_ctx.is_started  = false;
   _unlock_state();
 
   if ( requested != T_WIFI_TYPE_SERVER &&
@@ -923,21 +936,24 @@ static void _request_mode_change( void )
     hal_mode = WIFI_HAL_MODE_APSTA;
   }
 
-  /* Always cycle the HAL when a distinct mode is requested. It was either still
-   * running in the old mode (stop + restart) or already stopped (restart). */
-  (void) wifi_hal_stop();
-
-  if ( _start_mode( hal_mode ) != OSAL_SUCCESS )
+  if ( wifi_hal_set_ap_config( &g_ctx.ap_cfg ) != OSAL_SUCCESS ||
+       wifi_hal_set_sta_config( &g_ctx.sta_cfg ) != OSAL_SUCCESS )
   {
-    /* Start failed: keep current mode, HAL stopped, IDLE/READY drive a retry. */
-    osal_log_error( "[wifi] mode change to %u failed, HAL left stopped", (unsigned) requested );
+    osal_log_error( "[wifi] mode change configuration failed" );
+    return;
+  }
+
+  /* Change mode in place so AP+STA -> STA removes only the provisioning AP and
+   * preserves the established station connection and its DHCP lease. */
+  if ( wifi_hal_set_mode( hal_mode ) != OSAL_SUCCESS )
+  {
+    osal_log_error( "[wifi] mode change to %u failed", (unsigned) requested );
     return;
   }
 
   _lock_state();
   g_wifi_type = requested;
   _unlock_state();
-  _update_ip_info( UPDATE_LOST_CONNECTION );
   _event_dispatch( WIFI_MGMT_EVENT_MODE_CHANGED );
 }
 
@@ -1287,6 +1303,11 @@ void wifi_mgmt_set_wifi_type( wifi_type_t type )
   }
 
   g_wifi_type = type;
+
+  if ( !g_ctx.initialized )
+  {
+    return;
+  }
 
   /* Only notify once the module is live; read state under the state mutex. */
   _lock_state();

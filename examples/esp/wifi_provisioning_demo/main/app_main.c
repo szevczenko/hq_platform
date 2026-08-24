@@ -15,8 +15,8 @@
  * The runtime is brought up in the documented ownership order and every
  * module depends only on the layers below it:
  *
- *   init:     OSAL -> storage -> Mongoose -> Wi-Fi management -> provisioning
- *   shutdown: provisioning -> Wi-Fi management -> Mongoose -> storage -> OS
+ *   init:     OSAL -> storage -> Wi-Fi HAL -> Mongoose -> provisioning
+ *   shutdown: provisioning -> Mongoose -> Wi-Fi HAL -> storage -> OS
  *
  * Storage (the littlefs "storage" partition, see partitions.csv) is mounted
  * before Wi-Fi management so saved credentials can be loaded at startup and
@@ -108,43 +108,36 @@ static int demo_init_storage( void )
   return 0;
 }
 
-/* Init step 3: shared Mongoose process (hosts the portal HTTP listener on
- * port 80 and the captive DNS responder on port 53). */
+/* Init step 3: Wi-Fi management. Its HAL owns platform network setup, including
+ * the ESP lwIP and event-loop prerequisites used later by Mongoose sockets. */
+static int demo_init_wifi( void )
+{
+  printf( "[demo] init 3/5: Wi-Fi management (AP+STA)...\n" );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLI_SER );
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+
+  if ( !wifi_mgmt_wait_ready( DEMO_WIFI_START_TIMEOUT_MS ) )
+  {
+    printf( "[demo] ERROR: Wi-Fi management did not start\n" );
+    return -1;
+  }
+  printf( "[demo] init 3/5: Wi-Fi management running (AP+STA)\n" );
+  return 0;
+}
+
+/* Init step 4: shared Mongoose process. Wi-Fi/HAL is already ready, so socket
+ * wakeups can safely use the platform network stack. */
 static int demo_init_mongoose( void )
 {
-  printf( "[demo] init 3/5: Mongoose process...\n" );
+  printf( "[demo] init 4/5: Mongoose process...\n" );
   MongooseProcess_Init();
   if ( !MongooseProcess_IsRunning() )
   {
     printf( "[demo] ERROR: Mongoose process failed to start\n" );
     return -1;
   }
-  printf( "[demo] init 3/5: Mongoose process running\n" );
-  return 0;
-}
-
-/* Init step 4: Wi-Fi management. AP+STA is requested up front so the station
- * and the temporary access point both exist before provisioning opens. */
-static int demo_init_wifi( void )
-{
-  uint32_t waited = 0u;
-
-  printf( "[demo] init 4/5: Wi-Fi management (AP+STA)...\n" );
-  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLI_SER );
-  wifi_mgmt_init();
-  wifi_mgmt_start();
-
-  while ( !wifi_mgmt_is_running() && waited < DEMO_WIFI_START_TIMEOUT_MS )
-  {
-    osal_task_delay_ms( 10u );
-    waited += 10u;
-  }
-  if ( !wifi_mgmt_is_running() )
-  {
-    printf( "[demo] ERROR: Wi-Fi management did not start\n" );
-    return -1;
-  }
-  printf( "[demo] init 4/5: Wi-Fi management running (AP+STA)\n" );
+  printf( "[demo] init 4/5: Mongoose process running\n" );
   return 0;
 }
 
@@ -207,16 +200,16 @@ void app_main( void )
   printf( "===========================================================\n" );
   printf( "     Wi-Fi Provisioning Demo (ESP32)\n" );
   printf( "===========================================================\n" );
-  printf( "Portal:   http://%s/\n", CONFIG_WIFI_HTTP_PROVISIONING_HTTP_URL );
+  printf( "Portal:   %s/\n", CONFIG_WIFI_HTTP_PROVISIONING_HTTP_URL );
   printf( "DNS:      %s\n", CONFIG_WIFI_HTTP_PROVISIONING_DNS_URL );
-  printf( "Ownership order: OS -> storage -> Mongoose -> Wi-Fi -> provisioning\n" );
+  printf( "Ownership order: OSAL -> storage -> Wi-Fi HAL -> Mongoose -> provisioning\n" );
   printf( "Automatic fallback: enabled (no saved credential => portal opens)\n" );
   printf( "\n" );
 
   if ( demo_init_osal() != 0 )          goto fail;
   if ( demo_init_storage() != 0 )       goto fail;
-  if ( demo_init_mongoose() != 0 )      goto fail;
   if ( demo_init_wifi() != 0 )          goto fail;
+  if ( demo_init_mongoose() != 0 )      goto fail;
   if ( demo_init_provisioning() != 0 )  goto fail;
 
   demo_print_status();

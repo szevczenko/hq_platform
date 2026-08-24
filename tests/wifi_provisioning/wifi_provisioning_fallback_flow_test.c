@@ -577,6 +577,8 @@ static void test_automatic_fallback_flow( void )
                          wifi_provisioning_controller_get_state() );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
                          wifi_http_provisioning_get_state() );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_connected(),
+                            "STA connection must survive SoftAP retirement" );
   TEST_ASSERT_FALSE_MESSAGE( http_port_accepts( http_port ),
                              "HTTP listener must be released after the transition" );
   TEST_ASSERT_FALSE( dns_query_a( dns_port, DNS_NAME, ip, sizeof( ip ) ) );
@@ -587,6 +589,7 @@ static void test_automatic_fallback_flow( void )
 
     TEST_ASSERT_TRUE( wifi_hal_mock_get_state( &mock ) );
     TEST_ASSERT_EQUAL_INT( WIFI_HAL_MODE_STA, mock.mode );
+    TEST_ASSERT_TRUE( mock.connected );
   }
   printf( "PASS: portal stopped, HAL mode = STA (STA-only transition)\n" );
 }

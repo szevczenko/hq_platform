@@ -204,6 +204,18 @@ static const char *s_html_headers =
   "X-Content-Type-Options: nosniff\r\n"
   "X-Frame-Options: DENY\r\n";
 
+static const char *s_css_headers =
+  "Content-Type: text/css; charset=utf-8\r\n"
+  "Cache-Control: no-store\r\n"
+  "X-Content-Type-Options: nosniff\r\n"
+  "X-Frame-Options: DENY\r\n";
+
+static const char *s_js_headers =
+  "Content-Type: text/javascript; charset=utf-8\r\n"
+  "Cache-Control: no-store\r\n"
+  "X-Content-Type-Options: nosniff\r\n"
+  "X-Frame-Options: DENY\r\n";
+
 /* Full headers returned on a portal fallback redirect. Carries the Location
  * (to the portal root), a no-store cache policy, and plain text content so the
  * redirect body stays tiny. */
@@ -215,10 +227,7 @@ static const char *s_redirect_headers =
 static const char *s_method_headers =
   "Allow: GET\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n";
 
-/* Minimal, self-contained captive portal landing page. Served directly for the
- * portal root ("/") and for every recognised OS connectivity probe so the
- * device detects the captive network and opens its assistant UI. Keeping the
- * page static and dependency-free makes the portal fast and deterministic. */
+/* Minimal fallback used only when the packed portal asset is unavailable. */
 static const char *s_portal_html =
   "<!DOCTYPE html>\r\n"
   "<html><head><title>Network assistant</title></head>\r\n"
@@ -694,10 +703,22 @@ static void prov_handle_disconnect_request( struct mg_connection * nc )
   mg_http_reply( nc, 202, s_json_headers, "%s", "{\"state\":\"accepted\"}" );
 }
 
+static bool prov_respond_packed( struct mg_connection * nc, const char * path,
+                                const char * headers )
+{
+  size_t size = 0u;
+  const char * data = mg_unpack( path, &size, NULL );
+
+  if ( data == NULL ) return false;
+  mg_http_reply( nc, 200, headers, "%.*s", ( int ) size, data );
+  return true;
+}
+
 /* Serve the captive portal landing page as a 200 OK HTML document. */
 static void prov_respond_portal( struct mg_connection * nc )
 {
-  mg_http_reply( nc, 200, s_html_headers, "%s", s_portal_html );
+  if ( !prov_respond_packed( nc, "/index.html", s_html_headers ) )
+    mg_http_reply( nc, 200, s_html_headers, "%s", s_portal_html );
 }
 
 /* Redirect a browser GET route to the portal root ("/"). The Location header
@@ -860,6 +881,22 @@ static void http_ev_handler( struct mg_connection * nc, int ev, void * ev_data )
   if ( mg_strcmp( hm->uri, mg_str( "/" ) ) == 0 )
   {
     prov_respond_portal( nc );
+    nc->is_draining = 1;
+    return;
+  }
+
+  if ( mg_strcmp( hm->uri, mg_str( "/app.css" ) ) == 0 )
+  {
+    if ( !prov_respond_packed( nc, "/app.css", s_css_headers ) )
+      mg_http_reply( nc, 404, "Content-Type: text/plain\r\n", "Not Found" );
+    nc->is_draining = 1;
+    return;
+  }
+
+  if ( mg_strcmp( hm->uri, mg_str( "/app.js" ) ) == 0 )
+  {
+    if ( !prov_respond_packed( nc, "/app.js", s_js_headers ) )
+      mg_http_reply( nc, 404, "Content-Type: text/plain\r\n", "Not Found" );
     nc->is_draining = 1;
     return;
   }

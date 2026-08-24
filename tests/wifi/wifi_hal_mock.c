@@ -1123,6 +1123,23 @@ osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
   return result;
 }
 
+osal_status_t wifi_hal_set_mode( wifi_hal_mode_t mode )
+{
+  if ( !g_mock_ready || !_mock_lock() )
+  {
+    return OSAL_ERROR;
+  }
+  if ( !g_mock.started )
+  {
+    _mock_unlock();
+    return OSAL_ERROR;
+  }
+  const osal_status_t result = g_mock.start_result;
+  if ( result == OSAL_SUCCESS ) g_mock.mode = mode;
+  _mock_unlock();
+  return result;
+}
+
 osal_status_t wifi_hal_stop( void )
 {
   osal_status_t result;

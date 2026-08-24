@@ -277,8 +277,8 @@ static void assert_portal_html_response( const char * resp )
   TEST_ASSERT_TRUE_MESSAGE( contains_ci( resp, "X-Frame-Options: DENY" ),
                             "portal response must deny frame embedding" );
   body = body_of( resp );
-  TEST_ASSERT_TRUE_MESSAGE( strstr( body, "Network assistant" ) != NULL,
-                            "portal response must carry the landing page" );
+  TEST_ASSERT_TRUE_MESSAGE( strstr( body, "HQ Wi-Fi Provisioning Portal" ) != NULL,
+                            "portal response must carry the packed application" );
 }
 
 /* Assert a 302 fallback redirect to the portal root. */
@@ -351,6 +351,16 @@ static void run_captive_tests( void )
                                   resp, sizeof( resp ) ) > 0 );
   assert_portal_html_response( resp );
 
+  TEST_ASSERT_TRUE( http_request( http_port, "GET", "/app.css",
+                                  resp, sizeof( resp ) ) > 0 );
+  assert_status_code( resp, 200 );
+  TEST_ASSERT_TRUE( contains_ci( resp, "Content-Type: text/css" ) );
+
+  TEST_ASSERT_TRUE( http_request( http_port, "GET", "/app.js",
+                                  resp, sizeof( resp ) ) > 0 );
+  assert_status_code( resp, 200 );
+  TEST_ASSERT_TRUE( contains_ci( resp, "Content-Type: text/javascript" ) );
+
   /* --- unknown browser GET route redirects to the portal root -------- */
   TEST_ASSERT_TRUE( http_request( http_port, "GET", "/favicon.ico",
                                   resp, sizeof( resp ) ) > 0 );
@@ -397,7 +407,7 @@ static void run_captive_tests( void )
                          tls_resp, sizeof( tls_resp ) );
     TEST_ASSERT_FALSE_MESSAGE( contains_ci( tls_resp, "HTTP/" ),
                                "HTTPS probe must not be intercepted over HTTP" );
-    TEST_ASSERT_FALSE_MESSAGE( strstr( tls_resp, "Network assistant" ) != NULL,
+    TEST_ASSERT_FALSE_MESSAGE( strstr( tls_resp, "HQ Wi-Fi Provisioning Portal" ) != NULL,
                                "HTTPS probe must not receive the portal page" );
   }
 }

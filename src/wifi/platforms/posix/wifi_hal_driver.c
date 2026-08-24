@@ -1281,6 +1281,26 @@ osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
   return OSAL_SUCCESS;
 }
 
+osal_status_t wifi_hal_set_mode( wifi_hal_mode_t mode )
+{
+  if ( !_admit_operation() )
+  {
+    return OSAL_ERROR;
+  }
+
+  pthread_mutex_lock( &g_sim.state_mutex );
+  if ( !g_sim.started )
+  {
+    pthread_mutex_unlock( &g_sim.state_mutex );
+    _release_operation();
+    return OSAL_ERROR;
+  }
+  g_sim.mode = mode;
+  pthread_mutex_unlock( &g_sim.state_mutex );
+  _release_operation();
+  return OSAL_SUCCESS;
+}
+
 /* Retry the retained stop-owned release through the process-lifetime gates.
  * Used only when the lifecycle is CLEANUP_REQUIRED, where no active session
  * lease exists and the per-session primitives may be partially destroyed.  The

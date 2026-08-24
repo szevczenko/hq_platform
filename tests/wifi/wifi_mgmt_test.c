@@ -1053,7 +1053,7 @@ static void test_ip_conn_snapshot_events( void )
  * Test 16: Asynchronous mode request STA -> AP+STA
  *
  * Verifies wifi_mgmt_request_mode() serializes the transition through the
- * worker task, stops and restarts the HAL for a differing mode, and emits
+ * worker task, changes the live HAL mode in place, and emits
  * MODE_CHANGED only after the transition succeeds. A repeated request for the
  * current mode must be harmless (no HAL cycle, no event).
  * ========================================================================== */
@@ -1082,11 +1082,11 @@ static void test_request_mode_sta_to_apsta( void )
   _snap_mock( &ms );
   TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_APSTA, (int) ms.mode,
                              "HAL in APSTA after transition" );
-  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL restarted in APSTA" );
-  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms.start_count,
-                             "HAL started exactly once for the transition" );
-  TEST_ASSERT_EQUAL_MESSAGE( stop_before + 1, ms.stop_count,
-                             "HAL stopped exactly once for the transition" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL remains started in APSTA" );
+  TEST_ASSERT_EQUAL_MESSAGE( start_before, ms.start_count,
+                             "mode transition does not restart HAL" );
+  TEST_ASSERT_EQUAL_MESSAGE( stop_before, ms.stop_count,
+                             "mode transition does not stop HAL" );
 
   /* Repeated request for the current mode is a harmless no-op. */
   _reset_event( &g_ev_mode );
@@ -1138,8 +1138,8 @@ static void test_request_mode_apsta_to_sta( void )
 /* ============================================================================
  * Test 18: HAL start failure leaves a defined recoverable state
  *
- * A failed HAL start must not emit MODE_CHANGED, must leave the HAL stopped
- * with the worker still alive and idle, and must allow a later retry to
+ * A failed in-place mode change must not emit MODE_CHANGED, must leave the HAL
+ * running in its prior mode, and must allow a later retry to
  * succeed without blocking the caller.
  * ========================================================================== */
 static void test_request_mode_failure_recovery( void )
@@ -1155,18 +1155,16 @@ static void test_request_mode_failure_recovery( void )
   _reset_event( &g_ev_mode );
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
                             "request accepted despite failing HAL" );
-  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_start_entered_level( start_before + 1, 3000 ),
-                            "worker reached the failing HAL start" );
   osal_task_delay_ms( 300 ); /* give the worker time to attempt + fail */
 
   TEST_ASSERT_EQUAL_MESSAGE( 0, (int) g_ev_mode.count,
                              "no MODE_CHANGED emitted on failed start" );
   memset( &ms, 0, sizeof( ms ) );
   _snap_mock( &ms );
-  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms.start_count,
-                             "HAL start attempted exactly once" );
-  TEST_ASSERT_FALSE_MESSAGE( ms.started,
-                             "HAL left stopped after failed start" );
+  TEST_ASSERT_EQUAL_MESSAGE( start_before, ms.start_count,
+                             "failed mode transition does not restart HAL" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started,
+                            "HAL remains started after failed mode change" );
 
   /* Defined recoverable state: worker alive, machine idle, retry possible. */
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_idle(), "machine idle after HAL failure" );
@@ -1694,6 +1692,59 @@ static void test_lifecycle_event_after_deinit_is_inert( void )
 }
 
 /* ============================================================================
+ * A successful reboot auto-connect must not promote and rewrite the already
+ * persisted last-used credential. New or fallback credentials are covered by
+ * the normal connect flow; this test isolates the unchanged restart path.
+ * ========================================================================== */
+static void test_restart_autoconnect_does_not_resave_credential( void )
+{
+  wifi_config_list_t seeded = { 0 };
+  wifi_config_list_t loaded = { 0 };
+  wifi_hal_event_data_t event_data = { 0 };
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "clean baseline before restart test" );
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  seeded.count = 1;
+  seeded.last_use = 2;
+  seeded.entries[0].nb = 2;
+  strncpy( seeded.entries[0].ssid, "SavedNet",
+           sizeof( seeded.entries[0].ssid ) - 1 );
+  strncpy( seeded.entries[0].password, "SavedPass",
+           sizeof( seeded.entries[0].password ) - 1 );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_save( &seeded ) );
+
+  TEST_ASSERT_TRUE( wifi_hal_mock_reset() );
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "restart Wi-Fi becomes ready" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_connect_completed_level( 1, 3000 ),
+    "saved credential reaches auto-connect" );
+  _reset_event( &g_ev_connected );
+  TEST_ASSERT_TRUE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED,
+                                         _record_event, &g_ev_connected ) );
+
+  strncpy( event_data.ip_info.ip, "192.168.1.10",
+           sizeof( event_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &event_data );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_ev_connected, 3000 ),
+                            "saved credential auto-connect succeeds" );
+
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_load( &loaded ) );
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE( 2, loaded.last_use,
+                                   "restart does not advance last_use" );
+  TEST_ASSERT_EQUAL_UINT8( 2, loaded.entries[0].nb );
+  TEST_ASSERT_EQUAL_STRING( "SavedNet", loaded.entries[0].ssid );
+  TEST_ASSERT_EQUAL_STRING( "SavedPass", loaded.entries[0].password );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "restart module deinitializes" );
+}
+
+/* ============================================================================
  * Typed and legacy registrations do not survive reinit.
  *
  * Module #1 takes a legacy connect callback and a typed CONNECTED subscription
@@ -1914,6 +1965,7 @@ void wifi_mgmt_tests_run( void )
    * baseline. */
   RUN_TEST( test_lifecycle_repeated_cycles );
   RUN_TEST( test_lifecycle_event_after_deinit_is_inert );
+  RUN_TEST( test_restart_autoconnect_does_not_resave_credential );
   RUN_TEST( test_lifecycle_registrations_do_not_survive_reinit );
   RUN_TEST( test_lifecycle_failed_deinit_retains_objects );
   RUN_TEST( test_lifecycle_timed_out_deinit_retains_objects );

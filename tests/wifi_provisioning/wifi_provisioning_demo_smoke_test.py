@@ -35,9 +35,7 @@ HTTP_PORT = 8080
 DNS_HOST = "127.0.0.1"
 DNS_PORT = 10053
 
-# The portal root is currently served as the minimal captive assistant page
-# (the packed web UI assets are wired in by a later task).
-PORTAL_TITLE = "Network assistant"
+PORTAL_TITLE = "HQ Wi-Fi Provisioning Portal"
 DNS_NAME = "provision.local"
 DNS_ANSWER = "10.10.0.1"
 

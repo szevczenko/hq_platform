@@ -29,6 +29,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 #include "osal_bin_sem.h"
 #include "osal_log.h"
 #include "osal_mutex.h"
@@ -828,9 +829,23 @@ osal_status_t wifi_hal_init( const wifi_hal_init_t* init )
   g_wifi_hal_ctx.cb           = init->event_cb;
   g_wifi_hal_ctx.cb_user_data = init->user_data;
 
-  /* esp_netif_init() and the default event loop are process facilities: they
-   * are ensured here but ownership is never acquired, so they are not torn
-   * down by this HAL. */
+  /* NVS, esp_netif and the default event loop are process facilities: ensure
+   * them here but never tear them down with a Wi-Fi session. NVS remains
+   * required for PHY calibration even though Wi-Fi credential NVS is disabled. */
+  {
+    esp_err_t err = nvs_flash_init();
+    if ( err == ESP_ERR_NVS_NO_FREE_PAGES ||
+         err == ESP_ERR_NVS_NEW_VERSION_FOUND )
+    {
+      err = nvs_flash_erase();
+      if ( err == ESP_OK ) err = nvs_flash_init();
+    }
+    if ( err != ESP_OK )
+    {
+      osal_log_error( "[wifi-hal] init: NVS failed (0x%x)", (unsigned) err );
+      goto unwind;
+    }
+  }
   {
     esp_err_t err = esp_netif_init();
     if ( err != ESP_OK && err != ESP_ERR_INVALID_STATE )
@@ -1125,6 +1140,48 @@ osal_status_t wifi_hal_start( wifi_hal_mode_t mode )
 
   g_wifi_hal_ctx.started = true;
 
+done:
+  _release_operation();
+  return result;
+}
+
+osal_status_t wifi_hal_set_mode( wifi_hal_mode_t mode )
+{
+  if ( !_admit_operation() )
+  {
+    return OSAL_ERROR;
+  }
+
+  wifi_mode_t esp_mode = WIFI_MODE_STA;
+  if ( mode == WIFI_HAL_MODE_AP ) esp_mode = WIFI_MODE_AP;
+  else if ( mode == WIFI_HAL_MODE_APSTA ) esp_mode = WIFI_MODE_APSTA;
+
+  wifi_mode_t previous_mode;
+  osal_status_t result = OSAL_ERROR;
+  if ( esp_wifi_get_mode( &previous_mode ) != ESP_OK ) goto done;
+  if ( esp_wifi_set_mode( esp_mode ) != ESP_OK ) goto done;
+
+  const bool add_ap = ( esp_mode == WIFI_MODE_AP || esp_mode == WIFI_MODE_APSTA ) &&
+                      previous_mode == WIFI_MODE_STA;
+  const bool add_sta = ( esp_mode == WIFI_MODE_STA || esp_mode == WIFI_MODE_APSTA ) &&
+                       previous_mode == WIFI_MODE_AP;
+  if ( add_ap )
+  {
+    wifi_config_t ap_cfg;
+    _copy_ap_config( &ap_cfg, &g_wifi_hal_ctx.ap_cfg );
+    if ( esp_wifi_set_config( WIFI_IF_AP, &ap_cfg ) != ESP_OK ) goto rollback;
+  }
+  if ( add_sta )
+  {
+    wifi_config_t sta_cfg;
+    _copy_sta_config( &sta_cfg, &g_wifi_hal_ctx.sta_cfg );
+    if ( esp_wifi_set_config( WIFI_IF_STA, &sta_cfg ) != ESP_OK ) goto rollback;
+  }
+  result = OSAL_SUCCESS;
+  goto done;
+
+rollback:
+  (void) esp_wifi_set_mode( previous_mode );
 done:
   _release_operation();
   return result;

@@ -216,6 +216,15 @@ osal_status_t wifi_hal_deinit( void );
 osal_status_t wifi_hal_start( wifi_hal_mode_t mode );
 
 /**
+ * @brief   Change the mode of an already-started Wi-Fi session in place.
+ * @details Unlike stop followed by start, this preserves an established STA
+ *          connection when removing or adding the SoftAP role.
+ * @param   [in] mode - requested operating mode
+ * @return  OSAL_SUCCESS on success, error code otherwise
+ */
+osal_status_t wifi_hal_set_mode( wifi_hal_mode_t mode );
+
+/**
  * @brief   Stop Wi-Fi and release the stop-owned runtime.
  *
  * @details @c wifi_hal_stop is an idempotent successful no-op whenever no

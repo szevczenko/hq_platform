@@ -337,7 +337,8 @@ static void test_no_saved_credentials_starts_once( void )
   TEST_ASSERT_EQUAL_INT( 1, s_provision_start_count );
 }
 
-/* Successful saved credential -> AWAITING_CONNECT -> ONLINE, no portal. */
+/* Successful saved credential retires the startup AP and reaches ONLINE only
+ * after the STA-only mode change is acknowledged. */
 static void test_saved_credentials_success_no_portal( void )
 {
   reset_mocks();
@@ -349,6 +350,13 @@ static void test_saved_credentials_success_no_portal( void )
   TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
 
   fire( WIFI_MGMT_EVENT_CONNECTED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_stop_count );
+  TEST_ASSERT_EQUAL_INT( 1, s_request_mode_count );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
+
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED );
   TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
                      wifi_provisioning_controller_get_state() );
   TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
@@ -361,6 +369,7 @@ static void test_transient_disconnect_does_not_start( void )
   s_has_saved_credentials = true;
   TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
   fire( WIFI_MGMT_EVENT_CONNECTED );
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED );
   fire( WIFI_MGMT_EVENT_DISCONNECTED );
 
   TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,

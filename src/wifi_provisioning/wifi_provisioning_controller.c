@@ -253,6 +253,13 @@ static bool _retire_provisioning( bool as_online )
     case WIFI_PROVISIONING_CONTROLLER_GRACE:
     case WIFI_PROVISIONING_CONTROLLER_PROVISIONING:
       break;
+    case WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT:
+      if ( as_online ) break;
+      /* Explicit stop while waiting has no active portal to retire. */
+      s_ctx.state         = WIFI_PROVISIONING_CONTROLLER_DISABLED;
+      s_ctx.retire_online = false;
+      _unlock();
+      return true;
     default:
       /* No active portal. Only an explicit stop turns this into DISABLED; a
        * tokenised grace-expiry retire from here is not meaningful. */
@@ -347,9 +354,8 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
     case WIFI_MGMT_EVENT_CONNECTED:
       /* If the station obtained an IP while the portal is active, the
        * submitted credential succeeded: enter the grace window. Otherwise
-       * this is a saved-credential connect and the device is simply ONLINE --
-       * except while a STA-only retirement is in progress (that must settle
-       * first). */
+       * this is a saved-credential connect: retire the startup SoftAP and only
+       * report ONLINE after the STA-only mode change is acknowledged. */
       _lock();
       if ( !s_ctx.enabled ) { _unlock(); return; }
       if ( s_ctx.state == WIFI_PROVISIONING_CONTROLLER_PROVISIONING )
@@ -357,13 +363,13 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
         _unlock();
         _start_grace();
       }
+      else if ( s_ctx.state == WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT )
+      {
+        _unlock();
+        (void) _retire_provisioning( true );
+      }
       else
       {
-        if ( s_ctx.state != WIFI_PROVISIONING_CONTROLLER_RETIRING_AP &&
-             s_ctx.state != WIFI_PROVISIONING_CONTROLLER_GRACE )
-        {
-          s_ctx.state = WIFI_PROVISIONING_CONTROLLER_ONLINE;
-        }
         _unlock();
       }
       break;
