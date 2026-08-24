@@ -265,6 +265,18 @@ static void fw_fail(const char *reason)
 			reason ? reason : "firmware update failed");
 }
 
+static const char *fw_ota_error(osal_status_t status, const char *fallback)
+{
+	switch (status) {
+	case OSAL_ERR_IMAGE_INVALID:
+		return "firmware image validation failed";
+	case OSAL_ERR_SECURITY_VERSION:
+		return "firmware security version rejected";
+	default:
+		return fallback;
+	}
+}
+
 static void fw_restore_persisted_state(void)
 {
 	osal_ota_state_t persisted_state;
@@ -378,9 +390,10 @@ static void fw_chunk_handler(const char *topic, const char *payload,
 		return;
 	}
 
-	if (osal_ota_write((const uint8_t *)payload, payload_len) !=
-	    OSAL_SUCCESS) {
-		fw_fail("ota write failed");
+	osal_status_t write_status =
+		osal_ota_write((const uint8_t *)payload, payload_len);
+	if (write_status != OSAL_SUCCESS) {
+		fw_fail(fw_ota_error(write_status, "ota write failed"));
 		return;
 	}
 
@@ -404,8 +417,9 @@ static void fw_chunk_handler(const char *topic, const char *payload,
 		fw_report_state(TB_FW_STATE_UPDATING, NULL);
 		fw_persist_state(TB_FW_STATE_UPDATING, NULL);
 
-		if (osal_ota_finish(true) != OSAL_SUCCESS) {
-			fw_fail("ota finalize failed");
+		osal_status_t finish_status = osal_ota_finish(true);
+		if (finish_status != OSAL_SUCCESS) {
+			fw_fail(fw_ota_error(finish_status, "ota finalize failed"));
 			return;
 		}
 

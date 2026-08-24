@@ -78,6 +78,19 @@ osal_status_t osal_ota_init(void)
     return OSAL_SUCCESS;
 }
 
+osal_status_t osal_ota_get_security_info(osal_ota_security_info_t *info)
+{
+    if (info == NULL) {
+        return OSAL_INVALID_POINTER;
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->boot_state = s_running_image_pending_confirmation
+                           ? OSAL_OTA_BOOT_STATE_PENDING_CONFIRMATION
+                           : OSAL_OTA_BOOT_STATE_VALID;
+    return OSAL_SUCCESS;
+}
+
 osal_status_t osal_ota_begin(const osal_ota_descriptor_t *descriptor)
 {
     if (descriptor == NULL) {

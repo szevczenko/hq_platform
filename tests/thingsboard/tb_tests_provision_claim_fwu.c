@@ -416,9 +416,24 @@ static void test_osal_ota_checksum_failures(void)
 
 static void test_osal_ota_health_confirmation_api(void)
 {
+	osal_ota_security_info_t security_info;
+
 	TEST_ASSERT_EQUAL(OSAL_SUCCESS, osal_ota_init());
 	TEST_ASSERT_FALSE(osal_ota_needs_confirmation());
 	TEST_ASSERT_EQUAL(OSAL_SUCCESS, osal_ota_confirm_running_image());
+	TEST_ASSERT_EQUAL(OSAL_INVALID_POINTER,
+			  osal_ota_get_security_info(NULL));
+	TEST_ASSERT_EQUAL(OSAL_SUCCESS,
+			  osal_ota_get_security_info(&security_info));
+	TEST_ASSERT_FALSE(security_info.secure_boot_enforced);
+	TEST_ASSERT_FALSE(security_info.flash_encryption_enabled);
+	TEST_ASSERT_FALSE(security_info.rollback_enabled);
+	TEST_ASSERT_FALSE(security_info.anti_rollback_enabled);
+	TEST_ASSERT_EQUAL(OSAL_OTA_BOOT_STATE_VALID, security_info.boot_state);
+	TEST_ASSERT_EQUAL_STRING("OSAL_ERR_IMAGE_INVALID",
+				 osal_get_status_name(OSAL_ERR_IMAGE_INVALID));
+	TEST_ASSERT_EQUAL_STRING("OSAL_ERR_SECURITY_VERSION",
+				 osal_get_status_name(OSAL_ERR_SECURITY_VERSION));
 }
 
 static void test_osal_ota_state_persistence(void)

@@ -1,0 +1,8 @@
+# Non-destructive signed OTA verification without hardware Secure Boot.
+# The build emits a secure-padded image for external signing; no private key is
+# stored in this repository and no eFuse is changed by this profile.
+CONFIG_ESP32_REV_MIN_3=y
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+# CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES is not set

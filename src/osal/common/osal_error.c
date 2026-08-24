@@ -80,6 +80,10 @@ const char *osal_get_status_name(osal_status_t status)
             return "OSAL_ERR_TRY_AGAIN";
         case OSAL_ERR_EMPTY_SET:
             return "OSAL_ERR_EMPTY_SET";
+        case OSAL_ERR_IMAGE_INVALID:
+            return "OSAL_ERR_IMAGE_INVALID";
+        case OSAL_ERR_SECURITY_VERSION:
+            return "OSAL_ERR_SECURITY_VERSION";
         default:
             break;
     }

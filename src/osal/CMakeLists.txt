@@ -47,7 +47,7 @@ set(OSAL_ALL_SOURCES ${OSAL_COMMON_SOURCES} ${OSAL_PLATFORM_SOURCES} ${OSAL_LITT
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${OSAL_ALL_SOURCES}
                          INCLUDE_DIRS ${OSAL_PUBLIC_INCLUDES} ${OSAL_PLATFORM_INCLUDES}
-                         REQUIRES app_update esp_partition vfs spi_flash mongoose
+                         REQUIRES app_update bootloader_support efuse esp_app_format esp_partition vfs spi_flash mongoose
                          KCONFIG ${COMPONENT_DIR}/esp/littlefs_impl/Kconfig)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE LFS_CONFIG=lfs_config.h)
 else()

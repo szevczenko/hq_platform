@@ -77,9 +77,19 @@ static int _init_wifi(void)
 
 void app_main(void)
 {
+	osal_ota_security_info_t security_info = { 0 };
 	osal_status_t ota_rc = osal_ota_init();
 	if (ota_rc != OSAL_SUCCESS) {
 		printf("OTA init/confirm failed: %d\n", ota_rc);
+	}
+	if (osal_ota_get_security_info(&security_info) == OSAL_SUCCESS) {
+		printf("OTA security: secure_boot=%s flash_encryption=%s "
+		       "rollback=%s anti_rollback=%s boot_state=%d\n",
+		       security_info.secure_boot_enforced ? "enforced" : "off",
+		       security_info.flash_encryption_enabled ? "enabled" : "off",
+		       security_info.rollback_enabled ? "enabled" : "off",
+		       security_info.anti_rollback_enabled ? "enabled" : "off",
+		       (int) security_info.boot_state);
 	}
 
 	if (_init_wifi() != 0) {
