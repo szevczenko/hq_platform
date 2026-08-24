@@ -34,6 +34,7 @@
 #include "unity.h"
 #include "wifi_http_provisioning.h"
 #include "wifi_managment.h"
+#include "wifi_provisioning_test_fixture.h"
 
 #ifdef ESP_PLATFORM
 #error "wifi_http_provisioning_lifecycle_test.c targets POSIX only"
@@ -45,14 +46,19 @@
  * still servable (i.e. available for MQTT/ThingsBoard) after a stop. */
 static bool s_mongoose_invoke_ran = false;
 
-/* This test manages its own single init/cleanup lifecycle in main(), so the
- * Unity setup hooks are intentionally empty (still required at link time). */
+/* Dedicated littlefs image so this test never touches another test's state. */
+#define TEST_IMAGE_PATH "/tmp/wifi_prov_lifecycle.img"
+
+/* The shared fixture owns the whole component stack (filesystem, Wi-Fi
+ * management, Mongoose) around every RUN_TEST. */
 void setUp( void )
 {
+  wifi_provisioning_test_fixture_setup();
 }
 
 void tearDown( void )
 {
+  wifi_provisioning_test_fixture_teardown();
 }
 
 /* -- socket helpers (borrowed pattern from the lifecycle test) --------- */
@@ -519,26 +525,16 @@ int main( void )
 {
 	int rc = 0;
 
-	/* --- bring up Wi-Fi management once for all subtests ---------- */
-	MongooseProcess_Deinit();	/* clean slate */
-	wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLI_SER );
-	wifi_mgmt_init();
-	wifi_mgmt_start();
-	{
-		uint32_t elapsed = 0;
-		while ( !wifi_mgmt_is_running() && elapsed < 3000 )
-		{
-			osal_task_delay_ms( 10 );
-			elapsed += 10;
-		}
-	}
-
 	setvbuf( stdout, NULL, _IONBF, 0 );
+	wifi_provisioning_test_fixture_configure( TEST_IMAGE_PATH );
+
+#ifdef ESP_PLATFORM
 	UNITY_BEGIN();
-
-	TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(),
-	       "Wi-Fi management must be running for the lifecycle tests" );
-
+#endif
+	/* Every RUN_TEST runs under the shared fixture's setUp()/tearDown(), so
+	 * each subtest starts from a clean component + filesystem state, and an
+	 * assertion failure aborts into a protected Unity frame (clean FAIL, not a
+	 * SEGFAULT). */
 	RUN_TEST( test_start_rejected_without_mongoose );
 	RUN_TEST( test_repeated_start_stop_cycles );
 	RUN_TEST( test_http_bind_failure_roll_back_dns );
@@ -549,11 +545,10 @@ int main( void )
 	RUN_TEST( test_concurrent_stop_callers );
 	RUN_TEST( test_concurrent_start_stop_hammer );
 
-	/* --- teardown -------------------------------------------------- */
-	wifi_http_provisioning_stop();
-	MongooseProcess_Deinit();
-	wifi_mgmt_stop();
-
+#ifdef ESP_PLATFORM
+	UNITY_END();
+#else
 	rc = UNITY_END();
+#endif
 	return rc;
 }

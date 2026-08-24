@@ -27,19 +27,25 @@
 #include "unity.h"
 #include "wifi_http_provisioning.h"
 #include "wifi_managment.h"
+#include "wifi_provisioning_test_fixture.h"
 
 #ifdef ESP_PLATFORM
 #error "wifi_http_provisioning_test.c targets POSIX only"
 #endif
 
-/* This test manages its own single init/cleanup lifecycle in main(), so the
- * Unity setup hooks are intentionally empty (still required at link time). */
+/* Dedicated littlefs image so this test never touches another test's state. */
+#define TEST_IMAGE_PATH "/tmp/wifi_prov_http.img"
+
+/* The shared fixture owns the whole component stack (filesystem, Wi-Fi
+ * management, Mongoose) around every RUN_TEST. */
 void setUp( void )
 {
+  wifi_provisioning_test_fixture_setup();
 }
 
 void tearDown( void )
 {
+  wifi_provisioning_test_fixture_teardown();
 }
 
 /* -- socket helpers ------------------------------------------------------- */
@@ -296,38 +302,20 @@ int main( void )
 {
 	int rc = 0;
 
-	/* --- bring up Wi-Fi management once for all subtests ---------- */
-	MongooseProcess_Deinit();	/* clean slate */
-	wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLI_SER );
-	wifi_mgmt_init();
-	wifi_mgmt_start();
-	{
-		uint32_t elapsed = 0;
-		while ( !wifi_mgmt_is_running() && elapsed < 3000 )
-		{
-			osal_task_delay_ms( 10 );
-			elapsed += 10;
-		}
-	}
+	setvbuf( stdout, NULL, _IONBF, 0 );
+	wifi_provisioning_test_fixture_configure( TEST_IMAGE_PATH );
 
 #ifdef ESP_PLATFORM
-	setvbuf( stdout, NULL, _IONBF, 0 );
 	UNITY_BEGIN();
 #endif
-	TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(),
-				  "Wi-Fi management must be running for the lifecycle tests" );
-	run_lifecycle_tests();
-
-	/* --- teardown -------------------------------------------------- */
-	wifi_http_provisioning_stop();
-	wifi_mgmt_stop();
-	MongooseProcess_Deinit();
+	/* RUN_TEST installs Unity's protected frame so an assertion failure is a
+	 * clean test failure; setUp()/tearDown() own the component + filesystem
+	 * lifecycle around the scenario. */
+	RUN_TEST( run_lifecycle_tests );
 
 #ifdef ESP_PLATFORM
 	UNITY_END();
 #else
-	setvbuf( stdout, NULL, _IONBF, 0 );
-	UNITY_BEGIN();
 	rc = UNITY_END();
 #endif
 	return rc;

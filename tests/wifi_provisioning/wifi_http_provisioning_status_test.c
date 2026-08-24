@@ -30,6 +30,7 @@
 #include "wifi_hal_mock.h"
 #include "wifi_http_provisioning.h"
 #include "wifi_managment.h"
+#include "wifi_provisioning_test_fixture.h"
 
 #ifdef ESP_PLATFORM
 #error "wifi_http_provisioning_status_test.c targets POSIX only"
@@ -38,12 +39,18 @@
 #define STATUS_PATH "/api/v1/wifi/status"
 #define PASSWORD    "supersecretpw"
 
+/* Dedicated littlefs image so this test never touches another test's state. */
+#define TEST_IMAGE_PATH "/tmp/wifi_prov_status.img"
+
+/* The shared fixture owns the component + filesystem stack around the run. */
 void setUp( void )
 {
+  wifi_provisioning_test_fixture_setup();
 }
 
 void tearDown( void )
 {
+  wifi_provisioning_test_fixture_teardown();
 }
 
 /* -- small predicates used by the wait helpers ---------------------------- */
@@ -396,37 +403,13 @@ int main( void )
   int rc = 0;
 
   setvbuf( stdout, NULL, _IONBF, 0 );
+  wifi_provisioning_test_fixture_configure( TEST_IMAGE_PATH );
   UNITY_BEGIN();
 
-  (void) remove( "wifi_ap.json" );   /* Avoid a stale auto-connect from a prior run. */
-
-  wifi_hal_mock_reset();
-  wifi_hal_mock_set_start_result( OSAL_SUCCESS );
-  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
-
-  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLI_SER );
-  wifi_mgmt_init();
-  wifi_mgmt_start();
-  {
-    int elapsed = 0;
-    while ( !wifi_mgmt_is_running() && elapsed < 3000 )
-    {
-      (void) osal_task_delay_ms( 10 );
-      elapsed += 10;
-    }
-  }
-  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(),
-                            "Wi-Fi management must be running before provisioning" );
-
-  MongooseProcess_Init();
-  TEST_ASSERT_TRUE_MESSAGE( MongooseProcess_IsRunning(),
-                            "Mongoose process must be running" );
-
-  run_status_tests();
-
-  /* --- teardown ---------------------------------------------------------- */
-  wifi_http_provisioning_stop();
-  MongooseProcess_Deinit();
+  /* RUN_TEST installs Unity's protected frame so an assertion failure is a
+   * clean test failure; setUp()/tearDown() own the component + filesystem
+   * lifecycle around the scenario. */
+  RUN_TEST( run_status_tests );
 
   rc = UNITY_END();
   return rc;

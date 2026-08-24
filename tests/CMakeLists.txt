@@ -272,14 +272,23 @@ if(NOT ESP_PLATFORM)
   message(STATUS "Tests: Building captive DNS server loopback test application (captive_dns_server_loopback_tests)")
   endif() # CONFIG_WIFI_HTTP_PROVISIONING (captive DNS tests)
 
+  # Shared paths for the Wi-Fi HTTP provisioning test targets.
+  set(WIFI_PROVISIONING_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning)
+  set(WIFI_PROVISIONING_SRC_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning)
+
   # ---- Wi-Fi HTTP provisioning application lifecycle tests ----
   # Only built when the optional provisioning component is enabled.
+  # TASK-142: each integration-style target compiles the shared test fixture
+  # so it installs its own unique temporary littlefs image and tears down in
+  # reverse ownership order (provisioning -> Wi-Fi -> Mongoose -> filesystem).
   if(CONFIG_WIFI_HTTP_PROVISIONING)
     add_executable(wifi_http_provisioning_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning/wifi_http_provisioning_test.c
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_test.c
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_test_fixture.c
     )
 
     target_include_directories(wifi_http_provisioning_tests
+      PRIVATE ${WIFI_PROVISIONING_TEST_DIR}
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
@@ -313,10 +322,12 @@ if(NOT ESP_PLATFORM)
     # separate target so a lifecycle regression is isolated from the route
     # tests.
     add_executable(wifi_http_provisioning_lifecycle_tests
-      ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning/wifi_http_provisioning_lifecycle_test.c
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_lifecycle_test.c
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_test_fixture.c
     )
 
     target_include_directories(wifi_http_provisioning_lifecycle_tests
+      PRIVATE ${WIFI_PROVISIONING_TEST_DIR}
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
@@ -387,11 +398,10 @@ if(NOT ESP_PLATFORM)
     # HAL gives deterministic control over the Wi-Fi link state (connect
     # results and injected events), so this target compiles the Wi-Fi
     # management sources directly instead of linking the platform driver.
-    set(WIFI_PROVISIONING_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning)
-    set(WIFI_PROVISIONING_SRC_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning)
 
     add_executable(wifi_http_provisioning_status_tests
       ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_status_test.c
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_test_fixture.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
@@ -401,6 +411,7 @@ if(NOT ESP_PLATFORM)
     )
 
     target_include_directories(wifi_http_provisioning_status_tests
+      PRIVATE ${WIFI_PROVISIONING_TEST_DIR}
       PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
       PRIVATE ${WIFI_SRC_DIR}
       PRIVATE ${WIFI_TEST_DIR}
@@ -415,6 +426,11 @@ if(NOT ESP_PLATFORM)
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
       )
     endif()
+
+    # Mock-based targets reseed the mock HAL through the shared fixture.
+    target_compile_definitions(wifi_http_provisioning_status_tests PRIVATE
+      WIFI_PROVISIONING_TEST_FIXTURE_MOCK_HAL
+    )
 
     target_link_libraries(wifi_http_provisioning_status_tests
       hq_mongoose
@@ -436,6 +452,7 @@ if(NOT ESP_PLATFORM)
     # deterministically.
     add_executable(wifi_http_provisioning_scan_tests
       ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_scan_test.c
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_test_fixture.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
@@ -445,6 +462,7 @@ if(NOT ESP_PLATFORM)
     )
 
     target_include_directories(wifi_http_provisioning_scan_tests
+      PRIVATE ${WIFI_PROVISIONING_TEST_DIR}
       PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
       PRIVATE ${WIFI_SRC_DIR}
       PRIVATE ${WIFI_TEST_DIR}
@@ -459,6 +477,11 @@ if(NOT ESP_PLATFORM)
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
       )
     endif()
+
+    # Mock-based targets reseed the mock HAL through the shared fixture.
+    target_compile_definitions(wifi_http_provisioning_scan_tests PRIVATE
+      WIFI_PROVISIONING_TEST_FIXTURE_MOCK_HAL
+    )
 
     target_link_libraries(wifi_http_provisioning_scan_tests
       hq_mongoose
@@ -480,6 +503,7 @@ if(NOT ESP_PLATFORM)
     # can be driven deterministically over HTTP.
     add_executable(wifi_http_provisioning_credentials_tests
       ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_credentials_test.c
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_test_fixture.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
@@ -489,6 +513,7 @@ if(NOT ESP_PLATFORM)
     )
 
     target_include_directories(wifi_http_provisioning_credentials_tests
+      PRIVATE ${WIFI_PROVISIONING_TEST_DIR}
       PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
       PRIVATE ${WIFI_SRC_DIR}
       PRIVATE ${WIFI_TEST_DIR}
@@ -503,6 +528,11 @@ if(NOT ESP_PLATFORM)
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
       )
     endif()
+
+    # Mock-based targets reseed the mock HAL through the shared fixture.
+    target_compile_definitions(wifi_http_provisioning_credentials_tests PRIVATE
+      WIFI_PROVISIONING_TEST_FIXTURE_MOCK_HAL
+    )
 
     target_link_libraries(wifi_http_provisioning_credentials_tests
       hq_mongoose
@@ -575,6 +605,7 @@ if(NOT ESP_PLATFORM)
     # portal response).
     add_executable(wifi_http_provisioning_captive_tests
       ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_captive_test.c
+      ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_test_fixture.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
@@ -584,6 +615,7 @@ if(NOT ESP_PLATFORM)
     )
 
     target_include_directories(wifi_http_provisioning_captive_tests
+      PRIVATE ${WIFI_PROVISIONING_TEST_DIR}
       PRIVATE ${WIFI_PROVISIONING_SRC_DIR}
       PRIVATE ${WIFI_SRC_DIR}
       PRIVATE ${WIFI_TEST_DIR}
@@ -598,6 +630,11 @@ if(NOT ESP_PLATFORM)
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/posix
       )
     endif()
+
+    # Mock-based targets reseed the mock HAL through the shared fixture.
+    target_compile_definitions(wifi_http_provisioning_captive_tests PRIVATE
+      WIFI_PROVISIONING_TEST_FIXTURE_MOCK_HAL
+    )
 
     target_link_libraries(wifi_http_provisioning_captive_tests
       hq_mongoose
