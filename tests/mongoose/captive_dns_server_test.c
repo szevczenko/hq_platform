@@ -1,7 +1,7 @@
 /*
  * Captive DNS server packet codec unit tests.
  *
- * Exercises CaptiveDns_ParseQuery() and CaptiveDns_BuildResponse():
+ * Exercises captive_dns_parse_query() and captive_dns_build_response():
  *  - bounded rejection of truncated/oversized/multi-question/zero-question,
  *    unsupported-opcode and non-query packets,
  *  - authoritative A responses that preserve the transaction ID and question,
@@ -116,11 +116,11 @@ static void test_truncated_packet_is_rejected(void)
 	/* Every packet shorter than the header must be rejected. */
 	for (size_t len = 0; len < CAPTIVE_DNS_HEADER_LEN; len++) {
 		for (size_t i = 0; i < len; i++) buf[i] = (uint8_t) (i * 7u);
-		captive_dns_query_t q = CaptiveDns_ParseQuery(buf, len);
+		captive_dns_query_t q = captive_dns_parse_query(buf, len);
 		TEST_ASSERT_EQUAL_MESSAGE(CAPTIVE_DNS_KIND_NONE, q.kind,
 					  "truncated packet must be rejected");
 		TEST_ASSERT_EQUAL_UINT32_MESSAGE(
-			0u, CaptiveDns_BuildResponse(buf, len, g_ip4, out, sizeof(out)),
+			0u, captive_dns_build_response(buf, len, g_ip4, out, sizeof(out)),
 			"truncated packet must not generate a response");
 	}
 }
@@ -135,10 +135,10 @@ static void test_oversized_packet_is_rejected(void)
 	/* Plausible header with one question; only the size is the problem. */
 	put16(&buf[0], 0x1234u);
 	put16(&buf[4], 1);
-	captive_dns_query_t q = CaptiveDns_ParseQuery(buf, len);
+	captive_dns_query_t q = captive_dns_parse_query(buf, len);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_NONE, q.kind);
 	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
-		0u, CaptiveDns_BuildResponse(buf, len, g_ip4, out, sizeof(out)),
+		0u, captive_dns_build_response(buf, len, g_ip4, out, sizeof(out)),
 		"oversized packet must not generate a response");
 	free(buf);
 }
@@ -147,10 +147,10 @@ static void test_zero_questions_is_rejected(void)
 {
 	uint8_t buf[64], out[128];
 	put_header(buf, 0x1111u, 0x0100u, 0);   /* QDCOUNT = 0 */
-	captive_dns_query_t q = CaptiveDns_ParseQuery(buf, sizeof(buf));
+	captive_dns_query_t q = captive_dns_parse_query(buf, sizeof(buf));
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_NONE, q.kind);
 	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
-		0u, CaptiveDns_BuildResponse(buf, sizeof(buf), g_ip4, out, sizeof(out)),
+		0u, captive_dns_build_response(buf, sizeof(buf), g_ip4, out, sizeof(out)),
 		"zero-question packet must not generate a response");
 }
 
@@ -162,10 +162,10 @@ static void test_multi_question_packet_is_rejected(void)
 	p = CAPTIVE_DNS_HEADER_LEN;
 	p += put_question(buf, p, "example.com", TEST_QTYPE_A, CAPTIVE_DNS_CLASS_IN);
 	p += put_question(buf, p, "example.org", TEST_QTYPE_A, CAPTIVE_DNS_CLASS_IN);
-	captive_dns_query_t q = CaptiveDns_ParseQuery(buf, p);
+	captive_dns_query_t q = captive_dns_parse_query(buf, p);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_NONE, q.kind);
 	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
-		0u, CaptiveDns_BuildResponse(buf, p, g_ip4, out, sizeof(out)),
+		0u, captive_dns_build_response(buf, p, g_ip4, out, sizeof(out)),
 		"multi-question packet must not generate a response");
 }
 
@@ -177,10 +177,10 @@ static void test_unsupported_opcode_is_rejected(void)
 	put_header(buf, 0x0001u, 0x0800u, 1);
 	p = CAPTIVE_DNS_HEADER_LEN;
 	p += put_question(buf, p, "example.com", TEST_QTYPE_A, CAPTIVE_DNS_CLASS_IN);
-	captive_dns_query_t q = CaptiveDns_ParseQuery(buf, p);
+	captive_dns_query_t q = captive_dns_parse_query(buf, p);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_NONE, q.kind);
 	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
-		0u, CaptiveDns_BuildResponse(buf, p, g_ip4, out, sizeof(out)),
+		0u, captive_dns_build_response(buf, p, g_ip4, out, sizeof(out)),
 		"unsupported-opcode packet must not generate a response");
 }
 
@@ -192,10 +192,10 @@ static void test_response_packet_is_ignored(void)
 	put_header(buf, 0x2222u, 0x8180u, 1);
 	p = CAPTIVE_DNS_HEADER_LEN;
 	p += put_question(buf, p, "example.com", TEST_QTYPE_A, CAPTIVE_DNS_CLASS_IN);
-	captive_dns_query_t q = CaptiveDns_ParseQuery(buf, p);
+	captive_dns_query_t q = captive_dns_parse_query(buf, p);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_NONE, q.kind);
 	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
-		0u, CaptiveDns_BuildResponse(buf, p, g_ip4, out, sizeof(out)),
+		0u, captive_dns_build_response(buf, p, g_ip4, out, sizeof(out)),
 		"a response packet must not be answered");
 }
 
@@ -212,12 +212,12 @@ static void test_a_query_produces_authoritative_answer(void)
 	inlen = build_query(in, TEST_QTYPE_A, CAPTIVE_DNS_CLASS_IN);
 	qlen  = inlen - CAPTIVE_DNS_HEADER_LEN;
 
-	q = CaptiveDns_ParseQuery(in, inlen);
+	q = captive_dns_parse_query(in, inlen);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_A, q.kind);
 	TEST_ASSERT_EQUAL_UINT16(0xBEEFu, q.txn_id);
 	TEST_ASSERT_EQUAL(qlen, q.qlen);
 
-	outlen = CaptiveDns_BuildResponse(in, inlen, g_ip4, out, sizeof(out));
+	outlen = captive_dns_build_response(in, inlen, g_ip4, out, sizeof(out));
 	TEST_ASSERT_NOT_EQUAL(0u, outlen);
 	TEST_ASSERT_TRUE(outlen > inlen);
 
@@ -258,10 +258,10 @@ static void test_unsupported_type_gets_empty_answer(void)
 		size_t inlen = build_query(in, types[i], CAPTIVE_DNS_CLASS_IN);
 		size_t outlen;
 
-		q = CaptiveDns_ParseQuery(in, inlen);
+		q = captive_dns_parse_query(in, inlen);
 		TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_EMPTY, q.kind);
 
-		outlen = CaptiveDns_BuildResponse(in, inlen, g_ip4, out, sizeof(out));
+		outlen = captive_dns_build_response(in, inlen, g_ip4, out, sizeof(out));
 		TEST_ASSERT_NOT_EQUAL(0u, outlen);
 		TEST_ASSERT_EQUAL_UINT16(0xBEEFu, rd16(&out[0]));
 		TEST_ASSERT_EQUAL_UINT16(1u, rd16(&out[4]));   /* QDCOUNT */
@@ -284,11 +284,11 @@ static void test_mixed_case_query_is_accepted(void)
 	inlen += put_question(in, inlen, "ExAmPlE.CoM", TEST_QTYPE_A,
 	                      CAPTIVE_DNS_CLASS_IN);
 
-	q = CaptiveDns_ParseQuery(in, inlen);
+	q = captive_dns_parse_query(in, inlen);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_A, q.kind);
 	TEST_ASSERT_EQUAL_UINT16(0x4242u, q.txn_id);
 
-	outlen = CaptiveDns_BuildResponse(in, inlen, g_ip4, out, sizeof(out));
+	outlen = captive_dns_build_response(in, inlen, g_ip4, out, sizeof(out));
 	TEST_ASSERT_NOT_EQUAL(0u, outlen);
 	TEST_ASSERT_EQUAL_UINT16(0x4242u, rd16(&out[0]));
 	/* The mixed-case question must be preserved byte-for-byte. */
@@ -309,13 +309,13 @@ static void test_compressed_name_query_is_accepted(void)
 	size_t inlen, outlen;
 
 	inlen = build_compressed_query(in, TEST_QTYPE_A);
-	q = CaptiveDns_ParseQuery(in, inlen);
+	q = captive_dns_parse_query(in, inlen);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_A, q.kind);
 	TEST_ASSERT_EQUAL_UINT16(0x5150u, q.txn_id);
 	/* The QNAME is a 2-byte pointer followed by 4 bytes of type/class. */
 	TEST_ASSERT_EQUAL(6u, q.qlen);
 
-	outlen = CaptiveDns_BuildResponse(in, inlen, g_ip4, out, sizeof(out));
+	outlen = captive_dns_build_response(in, inlen, g_ip4, out, sizeof(out));
 	TEST_ASSERT_NOT_EQUAL(0u, outlen);
 	TEST_ASSERT_EQUAL_UINT16(0x5150u, rd16(&out[0]));
 	TEST_ASSERT_EQUAL_UINT16(1u, rd16(&out[4]));   /* QDCOUNT */
@@ -340,10 +340,10 @@ static void test_malformed_label_is_rejected(void)
 	in[p++] = 0x40u;    /* label length 64 -- far beyond the available bytes */
 	in[p++] = 'e';
 	in[p++] = 'x';
-	captive_dns_query_t q = CaptiveDns_ParseQuery(in, p);
+	captive_dns_query_t q = captive_dns_parse_query(in, p);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_NONE, q.kind);
 	TEST_ASSERT_EQUAL_UINT32(
-		0u, CaptiveDns_BuildResponse(in, p, g_ip4, out, sizeof(out)));
+		0u, captive_dns_build_response(in, p, g_ip4, out, sizeof(out)));
 }
 
 static void test_undersized_output_buffer_is_refused(void)
@@ -352,17 +352,17 @@ static void test_undersized_output_buffer_is_refused(void)
 	size_t  inlen = build_query(in, TEST_QTYPE_A, CAPTIVE_DNS_CLASS_IN);
 	/* The real A response is longer than 30 bytes, so it must be refused. */
 	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
-		0u, CaptiveDns_BuildResponse(in, inlen, g_ip4, out, sizeof(out)),
+		0u, captive_dns_build_response(in, inlen, g_ip4, out, sizeof(out)),
 		"an undersized output buffer must be refused");
 }
 
 static void test_null_input_is_ignored(void)
 {
 	uint8_t out[128];
-	captive_dns_query_t q = CaptiveDns_ParseQuery(NULL, 0);
+	captive_dns_query_t q = captive_dns_parse_query(NULL, 0);
 	TEST_ASSERT_EQUAL(CAPTIVE_DNS_KIND_NONE, q.kind);
 	TEST_ASSERT_EQUAL_UINT32(
-		0u, CaptiveDns_BuildResponse(NULL, 0, g_ip4, out, sizeof(out)));
+		0u, captive_dns_build_response(NULL, 0, g_ip4, out, sizeof(out)));
 }
 
 /* ------------------------------------------------------------------ */

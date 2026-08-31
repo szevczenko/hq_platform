@@ -42,7 +42,7 @@ static void put16(uint8_t *p, uint16_t v)
   p[1] = (uint8_t) (v & 0xFFu);
 }
 
-captive_dns_query_t CaptiveDns_ParseQuery(const uint8_t *buf, size_t len)
+captive_dns_query_t captive_dns_parse_query(const uint8_t *buf, size_t len)
 {
   captive_dns_query_t r     = {CAPTIVE_DNS_KIND_NONE, 0, 0};
   struct mg_dns_header  hdr;
@@ -78,11 +78,11 @@ captive_dns_query_t CaptiveDns_ParseQuery(const uint8_t *buf, size_t len)
   return r;
 }
 
-size_t CaptiveDns_BuildResponse(const uint8_t *query, size_t len,
+size_t captive_dns_build_response(const uint8_t *query, size_t len,
                                 const uint8_t ip4[4], uint8_t *out,
                                 size_t out_cap)
 {
-  captive_dns_query_t q   = CaptiveDns_ParseQuery(query, len);
+  captive_dns_query_t q   = captive_dns_parse_query(query, len);
   size_t              pos = 0;
   size_t              need;
 
@@ -187,7 +187,7 @@ static void dns_ev_handler(struct mg_connection *nc, int ev, void *ev_data)
   if (ev != MG_EV_READ) return;
   if (nc->recv.len == 0) return;
 
-  n = CaptiveDns_BuildResponse(nc->recv.buf, nc->recv.len, s_svc.ip4,
+  n = captive_dns_build_response(nc->recv.buf, nc->recv.len, s_svc.ip4,
                                s_resp, sizeof(s_resp));
   if (n != 0) (void)mg_send(nc, s_resp, n);
 
