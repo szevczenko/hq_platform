@@ -37,7 +37,8 @@ endif()
 if(ESP_PLATFORM)
   idf_component_register(SRCS ${WIFI_PROVISIONING_SOURCES}
                          INCLUDE_DIRS ${WIFI_PROVISIONING_PUBLIC_INCLUDES}
-                         REQUIRES osal mongoose wifi)
+                         REQUIRES osal mongoose wifi
+                         PRIV_REQUIRES json)
 elseif(CONFIG_WIFI_HTTP_PROVISIONING)
   add_library(hq_wifi_provisioning STATIC ${WIFI_PROVISIONING_SOURCES})
   target_include_directories(hq_wifi_provisioning

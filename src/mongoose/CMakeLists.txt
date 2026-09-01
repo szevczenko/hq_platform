@@ -81,16 +81,22 @@ if(ESP_PLATFORM)
       "#define MG_TLS MG_TLS_MBED\n"
       "#define MG_ENABLE_PACKED_FS 1\n")
 
+    # mongoose.h (a public header) includes esp_ota_ops.h, esp_timer.h and the
+    # mbedtls headers on ESP32 (MG_TLS_MBED), so app_update, esp_timer and
+    # mbedtls are public (REQUIRES).  osal/json/esp_partition are used only by
+    # the implementation and stay private (PRIV_REQUIRES).
     idf_component_register(SRCS "${MONGOOSE_PACKED_FS}" ${MONGOOSE_COMMON_SOURCES}
                            INCLUDE_DIRS "${CMAKE_BINARY_DIR}/config"
                                        ${MONGOOSE_PUBLIC_INCLUDES}
                                        ${MONGOOSE_PLATFORM_INCLUDES}
-                           REQUIRES osal esp_partition vfs app_update esp_timer mbedtls json)
+                           REQUIRES app_update esp_timer mbedtls
+                           PRIV_REQUIRES osal esp_partition json)
     unset(_MONGOOSE_PACK_ESP_RESULT)
   else()
     idf_component_register(SRCS ${MONGOOSE_COMMON_SOURCES}
                            INCLUDE_DIRS ${MONGOOSE_PUBLIC_INCLUDES} ${MONGOOSE_PLATFORM_INCLUDES}
-                           REQUIRES osal esp_partition vfs app_update esp_timer mbedtls json)
+                           REQUIRES app_update esp_timer mbedtls
+                           PRIV_REQUIRES osal esp_partition json)
   endif()
 else()
   add_library(hq_mongoose STATIC ${MONGOOSE_COMMON_SOURCES})

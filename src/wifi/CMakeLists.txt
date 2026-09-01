@@ -31,9 +31,12 @@ set(WIFI_ALL_SOURCES
 )
 
 if(ESP_PLATFORM)
+  # cJSON is compiled into this component only for the implementation
+  # (wifi_config.c / wifi_utils.c); no public Wi-Fi header exposes it, so its
+  # include directory stays private.
   idf_component_register(SRCS ${WIFI_ALL_SOURCES} ${HQ_CJSON_SOURCES}
-                         INCLUDE_DIRS ${WIFI_PUBLIC_INCLUDES} ${HQ_CJSON_INCLUDE_DIRS}
-                         PRIV_INCLUDE_DIRS ${WIFI_PLATFORM_INCLUDES}
+                         INCLUDE_DIRS ${WIFI_PUBLIC_INCLUDES}
+                         PRIV_INCLUDE_DIRS ${WIFI_PLATFORM_INCLUDES} ${HQ_CJSON_INCLUDE_DIRS}
                          REQUIRES osal
                          PRIV_REQUIRES esp_event esp_netif esp_wifi nvs_flash)
 else()
