@@ -80,6 +80,7 @@ files into their own tree.
 | `src/wifi` | `wifi` | Wi-Fi management |
 | `src/wifi_provisioning` | `wifi_provisioning` | Wi-Fi HTTP provisioning (optional) |
 | `src/thingsboard` | `thingsboard` | ThingsBoard client |
+| `src/hal` | `hal` | Hardware abstraction layer. On ESP-IDF it is registered directly from `src/hal` as `hal`; on host/POSIX builds it is the `hq_hal` static library from `src/hal`. Public API: `src/hal/include` |
 | `cmake/configure.cmake` | — | Generates `hq_config.h` / `hq_config.cmake` from Kconfig + defconfig |
 | `cmake/esp.cmake`, `cmake/modules.cmake` | — | ESP platform flags and vendored-library paths |
 | `defconfig/*.defconfig` | — | hq_platform configuration presets |
@@ -172,6 +173,7 @@ set(EXTRA_COMPONENT_DIRS
   ${HQ_REPO_ROOT}/src/wifi             # only if needed
   ${HQ_REPO_ROOT}/src/wifi_provisioning  # only if needed
   ${HQ_REPO_ROOT}/src/thingsboard      # only if needed
+  ${HQ_REPO_ROOT}/src/hal              # only if needed
 )
 ```
 

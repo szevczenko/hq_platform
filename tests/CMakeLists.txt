@@ -44,6 +44,32 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building HAL API contract test (hal_api_tests)")
 
+  # ---- HAL POSIX backend tests (TASK-005) ----
+  # Links the real POSIX GPIO/PWM backends (src/hal/posix) and exercises the
+  # portable contract: argument/pin validation, the non-idempotent
+  # init/write/read/deinit lifecycle, logical-value round trips for both
+  # active polarities, and PWM duty-cycle range checks (including NaN/inf).
+  # This also verifies that the hq_hal host library is discovered by the
+  # POSIX build and exports src/hal/include as its public include directory.
+  add_executable(hal_posix_backend_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_posix_backend_test.c
+  )
+
+  target_include_directories(hal_posix_backend_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_link_libraries(hal_posix_backend_tests
+    hq_hal
+    unity
+  )
+
+  add_test(NAME hal_posix_backend_tests COMMAND hal_posix_backend_tests)
+  set_tests_properties(hal_posix_backend_tests PROPERTIES LABELS "unit;hal")
+
+  message(STATUS "Tests: Building HAL POSIX backend test (hal_posix_backend_tests)")
+
   # POSIX platform: unified test application
   add_executable(osal_tests
     ${HQ_COMMON_TEST_RUNNER}

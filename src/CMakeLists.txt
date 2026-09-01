@@ -1,4 +1,5 @@
 add_subdirectory(osal)
+add_subdirectory(hal)
 add_subdirectory(mongoose)
 add_subdirectory(wifi)
 add_subdirectory(thingsboard)

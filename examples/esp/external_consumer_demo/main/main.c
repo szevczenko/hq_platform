@@ -11,6 +11,12 @@
  *   - at least one existing public API is called from each of the
  *     osal, wifi and thingsboard components.
  *
+ * The HAL (src/hal) is additionally discovered as the ESP-IDF component
+ * "hal" and linked in via REQUIRES, proving that the ESP backend compiles
+ * inside a downstream ESP-IDF application.  It is not exercised here because
+ * driving GPIO/PWM pads requires board-specific pin wiring; the portable API
+ * is covered by the host/POSIX unit tests.
+ *
  * It deliberately does not copy or duplicate any hq_platform source file and
  * does not add hq_platform component-private include directories manually.
  */
