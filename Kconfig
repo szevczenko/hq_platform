@@ -37,3 +37,4 @@ endmenu
 source "src/osal/Kconfig"
 source "src/cmd/Kconfig"
 source "src/mongoose/Kconfig"
+source "src/wifi_provisioning/Kconfig"

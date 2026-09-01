@@ -1,0 +1,21 @@
+# ESP-IDF SDK defaults for the Wi-Fi provisioning example.
+#
+# A custom partition table provides the littlefs "storage" partition that
+# backs saved Wi-Fi credentials (wifi_ap.json). Wi-Fi HTTP provisioning is
+# enabled here so every layer of the ESP-IDF build (the optional provisioning
+# component, the captive DNS/portal listeners and the mongoose packed
+# filesystem) is selected for this example; the hq_platform compile-time
+# configuration is provided by defconfig/esp_provisioning.defconfig via the
+# project CMakeLists.txt.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Wi-Fi HTTP provisioning enabled by default (captive portal + DNS on ports
+# 80/53, automatic fallback controller, 30 s success grace period).
+CONFIG_WIFI_HTTP_PROVISIONING=y
+CONFIG_WIFI_HTTP_PROVISIONING_AUTO_FALLBACK=y
+CONFIG_WIFI_HTTP_PROVISIONING_HTTP_URL="http://0.0.0.0:80"
+CONFIG_WIFI_HTTP_PROVISIONING_DNS_URL="udp://0.0.0.0:53"
+CONFIG_WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS=30000

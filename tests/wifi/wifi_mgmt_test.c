@@ -7,6 +7,9 @@
  * task.
  *
  * Tests:
+ * 0a. wait_ready() is held until the HAL callback is installed (init barrier)
+ * 0b. Startup mode-start failure is reported deterministically via wait_ready()
+ * 0c. Startup HAL-init failure is reported deterministically via wait_ready()
  * 1.  Init and start reach IDLE
  * 2.  Set SSID / password validation
  * 3.  Scan returns predefined AP list
@@ -25,6 +28,7 @@
 
 #include "wifi_managment.h"
 #include "wifi_hal_mock.h"
+#include "osal_bin_sem.h"
 #include "osal_task.h"
 #include "osal_mount.h"
 #include "osal_file.h"
@@ -64,6 +68,140 @@ static void _on_disconnect( void )
   g_disconnect_cb_fired = true;
 }
 
+/* Typed event subscription recording --------------------------------------- */
+typedef struct
+{
+  volatile bool         fired;
+  wifi_mgmt_event_t     evt;
+  void*                 ctx;
+  volatile unsigned int count;
+} event_rec_t;
+
+static event_rec_t g_ev_connected;
+static event_rec_t g_ev_disconnected;
+static event_rec_t g_ev_failed;
+static event_rec_t g_ev_scan;
+static event_rec_t g_ev_mode;
+static event_rec_t g_ev_unsub;
+static event_rec_t g_ev_repeat_init;
+
+static void _record_event( wifi_mgmt_event_t event, void* user_data )
+{
+  event_rec_t* rec = (event_rec_t*) user_data;
+  if ( rec )
+  {
+    rec->fired = true;
+    rec->evt   = event;
+    rec->ctx   = user_data;
+    rec->count++;
+  }
+}
+
+static void _reset_event( event_rec_t* rec )
+{
+  rec->fired = false;
+  rec->evt   = (wifi_mgmt_event_t) -1;
+  rec->ctx   = NULL;
+  rec->count = 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Focused state-machine event recorder.
+ *
+ * The capture callback runs synchronously inside the Wi-Fi worker task at the
+ * moment a typed event is dispatched.  It records a snapshot of the management
+ * state (connection flag, IP reason code, scanned-AP count) at that instant.
+ * This lets tests assert that an event is delivered only *after* the relevant
+ * state snapshot has been updated, and that callbacks may re-enter the event
+ * API (i.e. no internal mutex is held during dispatch).
+ * ------------------------------------------------------------------------- */
+typedef struct
+{
+  volatile bool         received;
+  volatile unsigned int count;
+  wifi_mgmt_event_t     evt;
+  volatile bool         connected_at_cb;
+  volatile int          ip_urc_at_cb;
+  volatile char         ip_ssid_at_cb[MAX_SSID_SIZE + 1];
+  volatile uint16_t     scan_count_at_cb;
+  volatile bool         reentered_api;
+} state_mg_rec_t;
+
+static state_mg_rec_t g_rec_scan;
+static state_mg_rec_t g_rec_connected;
+static state_mg_rec_t g_rec_disconnected;
+static state_mg_rec_t g_rec_failed;
+
+/* Dummy callback used to verify a handler may re-enter the subscription API. */
+static void _dummy_ignored_event( wifi_mgmt_event_t event, void* user_data )
+{
+  (void) event;
+  (void) user_data;
+}
+
+static void _capture_state_event( wifi_mgmt_event_t event, void* user_data )
+{
+  state_mg_rec_t* rec = (state_mg_rec_t*) user_data;
+  if ( !rec )
+  {
+    return;
+  }
+
+  rec->received = true;
+  rec->evt      = event;
+  rec->count++;
+
+  /* Snapshot of management state at dispatch time. */
+  rec->connected_at_cb = wifi_mgmt_is_connected();
+  rec->ip_urc_at_cb    = 0;
+  memset( (char*) rec->ip_ssid_at_cb, 0, sizeof( rec->ip_ssid_at_cb ) );
+  {
+    wifi_mgmt_ip_info_t info = { 0 };
+    (void) wifi_mgmt_get_ip_info( &info );
+    rec->ip_urc_at_cb = info.urc;
+    strncpy( (char*) rec->ip_ssid_at_cb, info.ssid,
+             sizeof( rec->ip_ssid_at_cb ) - 1 );
+  }
+  (void) wifi_mgmt_get_scan_result( (uint16_t*) &rec->scan_count_at_cb );
+
+  /* Re-entering the subscription API must not deadlock: it is only safe if the
+     internal event mutex has been released before our callback is invoked. */
+  rec->reentered_api = false;
+  bool sub = wifi_mgmt_subscribe( WIFI_MGMT_EVENT_MODE_CHANGED,
+                                  _dummy_ignored_event, rec );
+  bool unsub = wifi_mgmt_unsubscribe( WIFI_MGMT_EVENT_MODE_CHANGED,
+                                      _dummy_ignored_event, rec );
+  rec->reentered_api = sub && unsub;
+}
+
+static void _reset_state_event( state_mg_rec_t* rec )
+{
+  memset( rec, 0, sizeof( *rec ) );
+  rec->evt = (wifi_mgmt_event_t) -1;
+}
+
+static bool _wait_state_event( state_mg_rec_t* rec, uint32_t timeout_ms )
+{
+  uint32_t elapsed = 0;
+  while ( !rec->received && elapsed < timeout_ms )
+  {
+    osal_task_delay_ms( 50 );
+    elapsed += 50;
+  }
+  return rec->received;
+}
+
+static bool _wait_event( event_rec_t* rec, uint32_t timeout_ms )
+{
+  uint32_t elapsed = 0;
+  while ( !rec->fired && elapsed < timeout_ms )
+  {
+    osal_task_delay_ms( 50 );
+    elapsed += 50;
+  }
+  return rec->fired;
+}
+
 /* Wait for a condition with timeout (spin-wait). */
 static bool _wait_for( volatile bool* flag, uint32_t timeout_ms )
 {
@@ -74,6 +212,18 @@ static bool _wait_for( volatile bool* flag, uint32_t timeout_ms )
     elapsed += 50;
   }
   return *flag;
+}
+
+/* Wait until the mode-change recorder has fired at least @p min_count times. */
+static bool _wait_mode_for_count( unsigned int min_count, uint32_t timeout_ms )
+{
+  uint32_t elapsed = 0;
+  while ( g_ev_mode.count < min_count && elapsed < timeout_ms )
+  {
+    osal_task_delay_ms( 50 );
+    elapsed += 50;
+  }
+  return g_ev_mode.count >= min_count;
 }
 
 /* Wait for management to reach idle state. */
@@ -88,6 +238,215 @@ static bool _wait_idle( uint32_t timeout_ms )
   return wifi_mgmt_is_idle();
 }
 
+/* Copy a full synchronized mock state snapshot for assertions.  The TASK-139
+ * snapshot API never returns the mutable global address: it copies the complete
+ * state under the mock mutex, so a tester never holds or retains a pointer into
+ * g_mock while the Wi-Fi worker writes it. */
+static void _snap_mock( wifi_hal_mock_state_t* out )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_get_state( out ),
+                            "mock state snapshot readable" );
+}
+
+/* ============================================================================
+ * TASK-135D  Serialized owner helper
+ *
+ * A single dedicated owner task executes exactly one wifi_mgmt_stop() per
+ * command.  It is controlled entirely by OSAL binary semaphores:
+ *   - cmd_sem     (fixture -> helper)  orders one wifi_mgmt_stop()
+ *   - accept_sem  (helper -> fixture)  acknowledges the command was accepted
+ *   - done_sem    (helper -> fixture)  reports the command's result
+ * The order of the handoff is cmd -> accept -> stop -> publish -> done, so
+ * the fixture and this helper never overlap two wifi_mgmt_stop() calls.  The
+ * stop result is written before done is given and read by the fixture only
+ * after a bounded done wait; the semaphore handoff, not a volatile flag,
+ * establishes result visibility.
+ * ========================================================================== */
+typedef struct
+{
+  osal_bin_sem_id_t cmd_sem;    /**< Fixture -> helper: execute next command.  */
+  osal_bin_sem_id_t accept_sem; /**< Helper -> fixture: command accepted.      */
+  osal_bin_sem_id_t done_sem;   /**< Helper -> fixture: command completed.     */
+  bool*              result;    /**< Last command result, published pre-done.  */
+} stop_owner_ctx_t;
+
+static void _stop_owner_task( void* arg )
+{
+  stop_owner_ctx_t* ctx = (stop_owner_ctx_t*) arg;
+
+  for ( ;; )
+  {
+    /* Block for the next command; the fixture post command previous done. */
+    (void) osal_bin_sem_take( ctx->cmd_sem );
+
+    /* Publish acceptance before starting so the fixture never releases the
+     * parked round of command N-1 until command N has begun. */
+    (void) osal_bin_sem_give( ctx->accept_sem );
+
+    const bool r = wifi_mgmt_stop();
+
+    /* Publish the exact result of this command before signalling done. */
+    *ctx->result = r;
+    (void) osal_bin_sem_give( ctx->done_sem );
+  }
+}
+
+/* ============================================================================
+ * Test 0a: wifi_mgmt_wait_ready() is held until the HAL callback is installed
+ *
+ * Performs the very first lifecycle start with wifi_hal_init() parked at the
+ * mock barrier (before the event callback is stored).  While the worker is
+ * stuck inside init():
+ *   - wifi_mgmt_wait_ready() must NOT report ready,
+ *   - wifi_mgmt_is_running() must be false (state == INIT),
+ *   - a GOT_IP injected into the mock is dropped (no callback installed).
+ * After the barrier is lifted, wait_ready() reports success and a GOT_IP
+ * injected afterwards is delivered through the installed HAL callback, proving
+ * that events cannot be lost once readiness is reported.
+ * ========================================================================== */
+static void test_wait_ready_held_at_callback_barrier( void )
+{
+  /* Hold the worker inside wifi_hal_init(); the callback is not stored yet. */
+  wifi_hal_mock_set_init_hold( true );
+  wifi_mgmt_start();
+
+  /* First acknowledge that the worker has actually reached wifi_hal_init() and
+   * is parked at the barrier (before the event callback is stored).  Without
+   * this the assertion below could pass just because the worker has not run
+   * yet, rather than because init is held before callback installation. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_wait_init_entered( 2000 ),
+                            "worker entered wifi_hal_init() at the barrier" );
+
+  /* Readiness must NOT be reported while the init barrier is held. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 150 ),
+                             "not ready while HAL init is held" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "not running while state is INIT" );
+
+  /* A GOT_IP injected before the callback exists is dropped. */
+  wifi_hal_event_data_t evt_data = { 0 };
+  strncpy( evt_data.ip_info.ip, "192.168.77.1", sizeof( evt_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_connected(),
+                             "pre-callback GOT_IP is not delivered" );
+
+  /* Release the barrier: startup completes and readiness is reported. */
+  wifi_hal_mock_set_init_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "ready once HAL init completes" );
+
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_TRUE_MESSAGE( ms.initialized, "HAL initialized" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL started" );
+  TEST_ASSERT_NOT_NULL_MESSAGE( (void*) ms.event_cb, "HAL callback installed" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(), "running after startup" );
+
+  /* Post-ready GOT_IP cannot be lost: the HAL callback is present now. */
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_connected(),
+                            "post-ready GOT_IP is delivered" );
+
+  /* Drop the link again so later tests start from a clean idle station. */
+  wifi_hal_event_data_t disc_data = { 0 };
+  disc_data.disconnect_reason = 2;
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_DISCONNECTED, &disc_data );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_connected(), "idle after disconnect" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "machine idle after barrier test" );
+}
+
+/* ============================================================================
+ * Test 0b: Startup mode-start failure is reported deterministically
+ *
+ * Shuts the module down, sabotages the HAL mode start, and starts again:
+ * wifi_mgmt_wait_ready() must return false without relying on timing sleeps,
+ * the HAL must be stopped AND deinitialized on the failure path, the module
+ * must be not running, and a fresh start with a healthy HAL must complete
+ * successfully.
+ * ========================================================================== */
+static void test_startup_failure_is_deterministic( void )
+{
+  /* Stop the current lifecycle; stop() blocks until state == DISABLE. */
+  wifi_mgmt_stop();
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "not running after stop" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 100 ),
+                             "not ready after stop" );
+
+  /* Sabotage the HAL mode start and trigger a fresh init round. */
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  const uint32_t start_before  = ms.start_count;
+  const uint32_t init_before   = ms.init_count;
+  const uint32_t deinit_before = ms.deinit_count;
+  wifi_hal_mock_set_start_result( OSAL_ERROR );
+  wifi_mgmt_start();
+
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 2000 ),
+                             "startup failure reported by wait_ready" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "not running after failed startup" );
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( start_before + 1, ms.start_count,
+                             "HAL start attempted exactly once" );
+  TEST_ASSERT_EQUAL_MESSAGE( init_before + 1, ms.init_count,
+                             "HAL init attempted exactly once" );
+  TEST_ASSERT_EQUAL_MESSAGE( deinit_before + 1, ms.deinit_count,
+                             "HAL deinitialized on the mode-start failure path" );
+  TEST_ASSERT_FALSE_MESSAGE( ms.started, "HAL left stopped after failure" );
+  TEST_ASSERT_FALSE_MESSAGE( ms.initialized,
+                             "HAL left deinitialized after failure" );
+
+  /* Retry with a healthy HAL: startup completes. */
+  wifi_hal_mock_set_start_result( OSAL_SUCCESS );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "startup succeeds after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(), "running after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after retry" );
+}
+
+/* ============================================================================
+ * Test 0c: Startup HAL-init failure is reported deterministically
+ *
+ * Same contract as test 0b but for the HAL initialization step: the failure is
+ * surfaced through wifi_mgmt_wait_ready(), the HAL is deinitialized so a retry
+ * never re-initializes an already initialized HAL, and a healthy retry
+ * completes.
+ * ========================================================================== */
+static void test_startup_init_failure_is_deterministic( void )
+{
+  /* Stop the current lifecycle; stop() blocks until state == DISABLE. */
+  wifi_mgmt_stop();
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "not running after stop" );
+
+  /* Sabotage HAL initialization and trigger a fresh init round. */
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  const uint32_t init_before = ms.init_count;
+  wifi_hal_mock_set_init_result( OSAL_ERROR );
+  wifi_mgmt_start();
+
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 2000 ),
+                             "init failure reported by wait_ready" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "not running after failed init" );
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( init_before + 1, ms.init_count,
+                             "HAL init attempted exactly once" );
+  TEST_ASSERT_FALSE_MESSAGE( ms.initialized,
+                             "HAL left deinitialized after init failure" );
+
+  /* Retry with a healthy HAL: startup completes. */
+  wifi_hal_mock_set_init_result( OSAL_SUCCESS );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "startup succeeds after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_running(), "running after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after retry" );
+}
+
 /* ============================================================================
  * Test 1: Init and start reach IDLE
  * ========================================================================== */
@@ -97,9 +456,10 @@ static void test_init_reaches_idle( void )
   TEST_ASSERT_TRUE_MESSAGE( idle, "state is IDLE after init+start" );
   TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_connected(), "not connected initially" );
 
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_TRUE_MESSAGE( ms->initialized, "HAL was initialized" );
-  TEST_ASSERT_TRUE_MESSAGE( ms->started, "HAL was started" );
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_TRUE_MESSAGE( ms.initialized, "HAL was initialized" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL was started" );
 }
 
 /* ============================================================================
@@ -308,11 +668,14 @@ static void test_power_save( void )
 {
   wifi_mgmt_power_save( true );
 
-  const wifi_hal_mock_state_t* ms = wifi_hal_mock_get_state();
-  TEST_ASSERT_TRUE_MESSAGE( ms->power_save, "power save enabled in HAL" );
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_TRUE_MESSAGE( ms.power_save, "power save enabled in HAL" );
 
   wifi_mgmt_power_save( false );
-  TEST_ASSERT_FALSE_MESSAGE( ms->power_save, "power save disabled in HAL" );
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_FALSE_MESSAGE( ms.power_save, "power save disabled in HAL" );
 }
 
 /* ============================================================================
@@ -338,6 +701,1193 @@ static void test_is_read_data( void )
      verify the function doesn't crash. */
   TEST_ASSERT_TRUE_MESSAGE( ( rd == true ) || ( rd == false ), "is_read_data returns a bool" );
 }
+/* ============================================================================
+ * Test 12: Typed event subscriptions
+ * ========================================================================== */
+static void test_event_subscriptions( void )
+{
+  /* --- API validation: null callbacks are rejected --- */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED, NULL, NULL ),
+                             "subscribe(NULL) rejected" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_unsubscribe( WIFI_MGMT_EVENT_CONNECTED, NULL, NULL ),
+                            "unsubscribe(NULL) rejected" );
+
+  _reset_event( &g_ev_connected );
+  _reset_event( &g_ev_disconnected );
+  _reset_event( &g_ev_failed );
+  _reset_event( &g_ev_scan );
+  _reset_event( &g_ev_mode );
+  _reset_event( &g_ev_unsub );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED, _record_event, &g_ev_connected ),
+                           "sub CONNECTED" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_DISCONNECTED, _record_event, &g_ev_disconnected ),
+                           "sub DISCONNECTED" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECT_FAILED, _record_event, &g_ev_failed ),
+                           "sub CONNECT_FAILED" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_SCAN_COMPLETED, _record_event, &g_ev_scan ),
+                           "sub SCAN_COMPLETED" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_MODE_CHANGED, _record_event, &g_ev_mode ),
+                           "sub MODE_CHANGED" );
+
+  /* --- Duplicate subscriptions are rejected and consume no slots --- */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED, _record_event, &g_ev_connected ),
+                           "duplicate CONNECTED rejected" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_MODE_CHANGED, _record_event, &g_ev_mode ),
+                           "duplicate MODE_CHANGED rejected" );
+
+  /* --- MODE_CHANGED: subscriber receives event and user context --- */
+  _reset_event( &g_ev_mode );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLI_SER );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_ev_mode, 2000 ), "MODE_CHANGED fired on mode switch" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_MODE_CHANGED, g_ev_mode.evt, "mode event type correct" );
+  TEST_ASSERT_EQUAL_PTR_MESSAGE( &g_ev_mode, g_ev_mode.ctx, "mode event context correct" );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after mode change" );
+
+  /* --- SCAN_COMPLETED: subscriber receives event and context --- */
+  _reset_event( &g_ev_scan );
+  bool scan_ok = wifi_mgmt_start_scan();
+  TEST_ASSERT_TRUE_MESSAGE( scan_ok, "start_scan succeeds for event test" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_ev_scan, 2000 ), "SCAN_COMPLETED event fired" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_SCAN_COMPLETED, g_ev_scan.evt, "scan event type correct" );
+  TEST_ASSERT_EQUAL_PTR_MESSAGE( &g_ev_scan, g_ev_scan.ctx, "scan event context correct" );
+
+  /* --- CONNECTED / DISCONNECTED cycle with user context --- */
+  osal_task_delay_ms( 150 );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_ap_name( "EventAP", 7 ), "set ap name" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_password( "pass123", 7 ), "set password" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_connect(), "connect accepted" );
+
+  wifi_hal_event_data_t evt_data = { 0 };
+  strncpy( evt_data.ip_info.ip, "10.1.2.3", sizeof( evt_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_ev_connected, 3000 ), "CONNECTED event fired" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_CONNECTED, g_ev_connected.evt, "connected event type correct" );
+  TEST_ASSERT_EQUAL_PTR_MESSAGE( &g_ev_connected, g_ev_connected.ctx, "connected event context correct" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_disconnect(), "disconnect accepted" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_ev_disconnected, 3000 ), "DISCONNECTED event fired" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_DISCONNECTED, g_ev_disconnected.evt, "disconnected event type correct" );
+  TEST_ASSERT_EQUAL_PTR_MESSAGE( &g_ev_disconnected, g_ev_disconnected.ctx, "disconnected event context correct" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after event disconnect" );
+
+  /* --- CONNECT_FAILED: only subscribers of that event + correct context --- */
+  _reset_event( &g_ev_failed );
+  wifi_hal_mock_set_connect_result( OSAL_ERROR );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_ap_name( "APK", 3 ), "set ap name for failure" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_connect(), "connect accepted (fail path)" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_ev_failed, 3000 ), "CONNECT_FAILED event fired" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_CONNECT_FAILED, g_ev_failed.evt, "failed event type correct" );
+  TEST_ASSERT_EQUAL_PTR_MESSAGE( &g_ev_failed, g_ev_failed.ctx, "failed event context correct" );
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after connect failure" );
+
+  /* --- Unsubscribed callbacks are not invoked --- */
+  _reset_event( &g_ev_unsub );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_SCAN_COMPLETED, _record_event, &g_ev_unsub ),
+                           "sub unsub SCAN_COMPLETED" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_unsubscribe( WIFI_MGMT_EVENT_SCAN_COMPLETED, _record_event, &g_ev_unsub ),
+                           "unsubscribe SCAN_COMPLETED" );
+  TEST_ASSERT_TRUE( wifi_mgmt_start_scan() );
+  osal_task_delay_ms( 200 );
+  TEST_ASSERT_FALSE_MESSAGE( g_ev_unsub.fired, "unsubscribed callback not called" );
+
+  /* The still-subscribed scan recorder keeps receiving the event. */
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_SCAN_COMPLETED, g_ev_scan.evt, "still-subscribed scan event" );
+}
+
+/* ============================================================================
+ * Test 13: Focused state-machine event emission
+ *
+ * Verifies the typed state-machine events are emitted exactly once per state
+ * transition and that the emitted event observes the *updated* state snapshot
+ * (scan records published before SCAN_COMPLETED, IP state published before
+ * CONNECTED, torn-down state before DISCONNECTED).  Also verifies callbacks are
+ * invoked without holding an internal Wi-Fi mutex by re-entering the event
+ * subscribe/unsubscribe API from inside a handler.
+ * ========================================================================== */
+static void test_state_machine_event_emission( void )
+{
+  /* Fresh recorders + subscriptions scoped to this test. */
+  _reset_state_event( &g_rec_scan );
+  _reset_state_event( &g_rec_connected );
+  _reset_state_event( &g_rec_disconnected );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_SCAN_COMPLETED,
+                                                 _capture_state_event, &g_rec_scan ),
+                            "focused: sub SCAN_COMPLETED" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED,
+                                                 _capture_state_event, &g_rec_connected ),
+                            "focused: sub CONNECTED" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_DISCONNECTED,
+                                                 _capture_state_event, &g_rec_disconnected ),
+                            "focused: sub DISCONNECTED" );
+
+  /* --- SCAN_COMPLETED fires after scan records are published --- */
+  wifi_hal_ap_record_t mock_aps[2];
+  memset( mock_aps, 0, sizeof( mock_aps ) );
+  strncpy( mock_aps[0].ssid, "EmitA", WIFI_HAL_SSID_MAX_LEN );
+  mock_aps[0].channel  = 1;
+  mock_aps[0].rssi     = -40;
+  mock_aps[0].authmode = 3;
+  strncpy( mock_aps[1].ssid, "EmitB", WIFI_HAL_SSID_MAX_LEN );
+  mock_aps[1].channel  = 6;
+  mock_aps[1].rssi     = -60;
+  mock_aps[1].authmode = 4;
+  wifi_hal_mock_set_scan_list( mock_aps, 2 );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_start_scan(), "focused: scan start" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_state_event( &g_rec_scan, 2000 ), "SCAN_COMPLETED fired" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_SCAN_COMPLETED, g_rec_scan.evt, "scan event type correct" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1, (int) g_rec_scan.count, "SCAN_COMPLETED emitted exactly once" );
+  TEST_ASSERT_EQUAL_MESSAGE( 2, (int) g_rec_scan.scan_count_at_cb, "scan records published before event" );
+  TEST_ASSERT_TRUE_MESSAGE( g_rec_scan.reentered_api, "no lock held during scan callback" );
+
+  /* --- CONNECTED fires after station IP info is updated --- */
+  _reset_state_event( &g_rec_connected );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_ap_name( "EmitAP", 6 ), "focused: set ap name" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_password( "EmitPass", 8 ), "focused: set password" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_connect(), "focused: connect accepted" );
+
+  wifi_hal_event_data_t evt_data = { 0 };
+  strncpy( evt_data.ip_info.ip, "192.20.30.40", sizeof( evt_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+
+  TEST_ASSERT_TRUE_MESSAGE( _wait_state_event( &g_rec_connected, 3000 ), "CONNECTED fired" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_CONNECTED, g_rec_connected.evt, "connected event type correct" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1, (int) g_rec_connected.count, "CONNECTED emitted exactly once" );
+  TEST_ASSERT_TRUE_MESSAGE( g_rec_connected.connected_at_cb, "management reports connected before CONNECTED" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, (int) g_rec_connected.ip_urc_at_cb, "ip snapshot shows connected (urc=0) before CONNECTED" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "EmitAP", (char*) g_rec_connected.ip_ssid_at_cb,
+                                    "ip ssid snapshot matches before CONNECTED" );
+  TEST_ASSERT_TRUE_MESSAGE( g_rec_connected.reentered_api, "no lock held during connected callback" );
+
+  /* --- DISCONNECTED emitted after the disconnect state is published --- */
+  _reset_state_event( &g_rec_disconnected );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_disconnect(), "focused: disconnect accepted" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_state_event( &g_rec_disconnected, 3000 ), "DISCONNECTED fired" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_DISCONNECTED, g_rec_disconnected.evt, "disconnected event type correct" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1, (int) g_rec_disconnected.count, "DISCONNECTED emitted exactly once" );
+  TEST_ASSERT_FALSE_MESSAGE( g_rec_disconnected.connected_at_cb,
+                             "is_connected already false when DISCONNECTED delivered" );
+  TEST_ASSERT_EQUAL_MESSAGE( 2, (int) g_rec_disconnected.ip_urc_at_cb,
+                             "ip snapshot reports user disconnect before DISCONNECTED" );
+  TEST_ASSERT_TRUE_MESSAGE( g_rec_disconnected.reentered_api, "no lock held during disconnect callback" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after disconnect" );
+
+  /* --- CONNECT_FAILED fires after a credential attempt is exhausted, and does
+        not emit DISCONNECTED (the station was never connected) --- */
+  _reset_state_event( &g_rec_failed );
+  _reset_state_event( &g_rec_disconnected );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECT_FAILED,
+                                                 _capture_state_event, &g_rec_failed ),
+                            "focused: sub CONNECT_FAILED" );
+
+  wifi_hal_mock_set_connect_result( OSAL_ERROR );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_ap_name( "FailAP", 6 ), "focused: set fail ap name" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_connect(), "focused: connect accepted (fail path)" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_state_event( &g_rec_failed, 4000 ), "CONNECT_FAILED fired after attempts exhausted" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_CONNECT_FAILED, g_rec_failed.evt, "failed event type correct" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1, (int) g_rec_failed.count, "CONNECT_FAILED emitted exactly once" );
+  TEST_ASSERT_FALSE_MESSAGE( g_rec_failed.connected_at_cb, "station never seen connected on failed path" );
+  TEST_ASSERT_TRUE_MESSAGE( g_rec_failed.reentered_api, "no lock held during failed callback" );
+  /* No DISCONNECTED may accompany a failed-before-connect transition. */
+  TEST_ASSERT_EQUAL_MESSAGE( 0, (int) g_rec_disconnected.count,
+                             "no DISCONNECTED emitted on connect-fail path" );
+
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle after connect failure" );
+}
+/* ============================================================================
+ * Test 14: Access-point snapshot getters are consistent across a scan
+ *
+ * Simulates reads from another task (e.g. the Mongoose task) before, during,
+ * and after scan completion.  The scan snapshot and generation number must at
+ * all times expose a self-consistent view — never a partially written record.
+ * ========================================================================== */
+static bool _ap_list_valid( const wifi_mgmt_ap_list_t* list )
+{
+  if ( !list || list->count > WIFI_DRV_MAX_SCAN_AP )
+  {
+    return false;
+  }
+  for ( uint16_t i = 0; i < list->count; ++i )
+  {
+    if ( list->items[i].ssid[0] == '\0' )
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+static void test_scan_snapshot_getters( void )
+{
+  /* Prepare fresh mock APs that the next scan completion will publish. */
+  wifi_hal_ap_record_t mock_aps[4];
+  memset( mock_aps, 0, sizeof( mock_aps ) );
+  strncpy( mock_aps[0].ssid, "SnapA", WIFI_HAL_SSID_MAX_LEN );
+  mock_aps[0].channel = 1; mock_aps[0].rssi = -41; mock_aps[0].authmode = 3;
+  strncpy( mock_aps[1].ssid, "SnapB", WIFI_HAL_SSID_MAX_LEN );
+  mock_aps[1].channel = 6; mock_aps[1].rssi = -55; mock_aps[1].authmode = 4;
+  strncpy( mock_aps[2].ssid, "SnapC", WIFI_HAL_SSID_MAX_LEN );
+  mock_aps[2].channel = 11; mock_aps[2].rssi = -70; mock_aps[2].authmode = 0;
+  strncpy( mock_aps[3].ssid, "SnapD", WIFI_HAL_SSID_MAX_LEN );
+  mock_aps[3].channel = 3; mock_aps[3].rssi = -80; mock_aps[3].authmode = 3;
+  wifi_hal_mock_set_scan_list( mock_aps, 4 );
+
+  /* Before scan: not active, generation stable, snapshot internally valid. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_scan_active(), "no scan active before start" );
+  uint32_t gen_before = wifi_mgmt_get_scan_generation();
+
+  wifi_mgmt_ap_list_t list_before = { 0 };
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_get_access_points( &list_before ), "pre-scan snapshot read" );
+  TEST_ASSERT_TRUE_MESSAGE( _ap_list_valid( &list_before ), "pre-scan snapshot consistent" );
+
+  /* Hold SCAN_DONE so the test can observe the in-flight window. */
+  wifi_hal_mock_set_scan_done_hold( true );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_start_scan_no_block(), "start non-blocking scan" );
+
+  /* During scan: active flag set, generation unchanged, snapshot unchanged. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_scan_active(), "scan is active while in flight" );
+  TEST_ASSERT_EQUAL_MESSAGE( gen_before, (unsigned) wifi_mgmt_get_scan_generation(),
+                             "generation unchanged during scan" );
+  wifi_mgmt_ap_list_t list_during = { 0 };
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_get_access_points( &list_during ), "mid-scan snapshot read" );
+  TEST_ASSERT_TRUE_MESSAGE( _ap_list_valid( &list_during ), "mid-scan snapshot consistent" );
+  TEST_ASSERT_EQUAL_MESSAGE( list_before.count, list_during.count, "mid-scan count unchanged" );
+
+  /* Complete the scan and verify the post-completion view. */
+  wifi_hal_mock_set_scan_done_hold( false );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_SCAN_DONE, NULL );
+
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_scan_active(), "scan inactive after completion" );
+  TEST_ASSERT_EQUAL_MESSAGE( gen_before + 1, (unsigned) wifi_mgmt_get_scan_generation(),
+                             "generation advanced by one" );
+
+  wifi_mgmt_ap_list_t list_after = { 0 };
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_get_access_points( &list_after ), "post-scan snapshot read" );
+  TEST_ASSERT_TRUE_MESSAGE( _ap_list_valid( &list_after ), "post-scan snapshot consistent" );
+  TEST_ASSERT_EQUAL_MESSAGE( 4, list_after.count, "post-scan count is 4" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "SnapA", list_after.items[0].ssid, "post-scan first AP" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1, (int) list_after.items[0].chan, "post-scan first AP channel" );
+  TEST_ASSERT_EQUAL_MESSAGE( -41, list_after.items[0].rssi, "post-scan first AP rssi" );
+}
+
+/* ============================================================================
+ * Test 15: IP + connection snapshots stay consistent during connect/disconnect
+ *
+ * Drives connect and disconnect transitions while repeatedly reading IP and
+ * connection state, as a Mongoose task would, and asserts every snapshot is
+ * self-consistent (valid reason code, no torn-down struct).
+ * ========================================================================== */
+static void test_ip_conn_snapshot_events( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before connect snapshot test" );
+
+  /* Make the mock return a deterministic, known IP for this connect. */
+  wifi_hal_ip_info_t ip = { 0 };
+  strncpy( ip.ip, "192.168.90.30", sizeof( ip.ip ) - 1 );
+  strncpy( ip.netmask, "255.255.255.0", sizeof( ip.netmask ) - 1 );
+  strncpy( ip.gw, "192.168.90.1", sizeof( ip.gw ) - 1 );
+  wifi_hal_mock_set_ip_info( &ip );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_ap_name( "SnapAP", 6 ), "set snap ap name" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_password( "SnapPass", 8 ), "set snap password" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_connect(), "connect accepted" );
+
+  wifi_hal_event_data_t evt_data = { 0 };
+  strncpy( evt_data.ip_info.ip, "192.168.90.30", sizeof( evt_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+
+  /* Read snapshots during the connect transition until connected. */
+  bool connected = false;
+  uint32_t elapsed = 0;
+  while ( !connected && elapsed < 3000 )
+  {
+    wifi_mgmt_ip_info_t info = { 0 };
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_get_ip_info( &info ), "ip snapshot during connect" );
+    TEST_ASSERT_TRUE_MESSAGE( info.urc >= 0 && info.urc <= 3, "valid urc during connect" );
+    if ( info.urc == 0 )
+    {
+      TEST_ASSERT_EQUAL_STRING_MESSAGE( "SnapAP", info.ssid, "ssid matches when connected" );
+      TEST_ASSERT_EQUAL_STRING_MESSAGE( "192.168.90.30", info.ip, "ip matches GOT_IP" );
+    }
+    connected = wifi_mgmt_is_connected();
+    osal_task_delay_ms( 50 );
+    elapsed += 50;
+  }
+  TEST_ASSERT_TRUE_MESSAGE( connected, "reached connected during snapshot test" );
+
+  /* Final connected snapshot is self-consistent. */
+  wifi_mgmt_ip_info_t info = { 0 };
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_get_ip_info( &info ), "get connected ip snapshot" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, info.urc, "connected urc == 0" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "SnapAP", info.ssid, "connected ssid" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "192.168.90.30", info.ip, "connected ip" );
+
+  /* Read snapshots during the disconnect transition until torn down. */
+  TEST_ASSERT_TRUE( wifi_mgmt_disconnect() );
+  bool disconnected = false;
+  elapsed = 0;
+  while ( !disconnected && elapsed < 3000 )
+  {
+    wifi_mgmt_ip_info_t snap = { 0 };
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_get_ip_info( &snap ), "ip snapshot during disconnect" );
+    TEST_ASSERT_TRUE_MESSAGE( snap.urc >= 0 && snap.urc <= 3, "valid urc during disconnect" );
+    disconnected = !wifi_mgmt_is_connected();
+    osal_task_delay_ms( 50 );
+    elapsed += 50;
+  }
+  TEST_ASSERT_TRUE_MESSAGE( disconnected, "disconnected during snapshot test" );
+
+  /* Final disconnected snapshot reflects the user-disconnect reason. */
+  wifi_mgmt_ip_info_t fin = { 0 };
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_get_ip_info( &fin ), "get post-disconnect ip snapshot" );
+  TEST_ASSERT_EQUAL_MESSAGE( 2, fin.urc, "user-disconnect urc == 2" );
+}
+
+/* ============================================================================
+ * Test 16: Asynchronous mode request STA -> AP+STA
+ *
+ * Verifies wifi_mgmt_request_mode() serializes the transition through the
+ * worker task, changes the live HAL mode in place, and emits
+ * MODE_CHANGED only after the transition succeeds. A repeated request for the
+ * current mode must be harmless (no HAL cycle, no event).
+ * ========================================================================== */
+static void test_request_mode_sta_to_apsta( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before STA->AP+STA mode test" );
+
+  /* Guarantee we start from station-only mode. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLIENT ), "ensure STA mode" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle in STA mode" );
+
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  const uint32_t start_before = ms.start_count;
+  const uint32_t stop_before  = ms.stop_count;
+
+  _reset_event( &g_ev_mode );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
+                            "request STA->AP+STA accepted" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_mode_for_count( 1, 3000 ),
+                            "MODE_CHANGED fired for AP+STA transition" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE( WIFI_MGMT_EVENT_MODE_CHANGED, g_ev_mode.evt,
+                                 "mode event type correct" );
+
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_APSTA, (int) ms.mode,
+                             "HAL in APSTA after transition" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL remains started in APSTA" );
+  TEST_ASSERT_EQUAL_MESSAGE( start_before, ms.start_count,
+                             "mode transition does not restart HAL" );
+  TEST_ASSERT_EQUAL_MESSAGE( stop_before, ms.stop_count,
+                             "mode transition does not stop HAL" );
+
+  /* Repeated request for the current mode is a harmless no-op. */
+  _reset_event( &g_ev_mode );
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  const uint32_t start_now = ms.start_count;
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
+                            "repeat current-mode request accepted" );
+  osal_task_delay_ms( 200 );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, (int) g_ev_mode.count,
+                             "no MODE_CHANGED on repeated current mode" );
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( start_now, ms.start_count,
+                             "no HAL restart on repeated current mode" );
+}
+
+/* ============================================================================
+ * Test 17: Asynchronous mode request AP+STA -> STA preserves credentials
+ *
+ * Verifies a transition back to station-only keeps the configured station
+ * credentials (SSID + password) intact.
+ * ========================================================================== */
+static void test_request_mode_apsta_to_sta( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before AP+STA->STA mode test" );
+
+  /* Currently in AP+STA (from previous test). Install station credentials. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_ap_name( "KeepAP", 6 ), "set creds ssid" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_password( "KeepPass", 8 ), "set creds pass" );
+
+  _reset_event( &g_ev_mode );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLIENT ),
+                            "request AP+STA->STA accepted" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_mode_for_count( 1, 3000 ),
+                            "MODE_CHANGED fired for STA transition" );
+
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_STA, (int) ms.mode,
+                             "HAL in STA after transition" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started, "HAL started in STA" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "KeepAP", ms.sta_cfg.ssid,
+                                    "station SSID preserved through mode change" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "KeepPass", ms.sta_cfg.password,
+                                    "station password preserved through mode change" );
+}
+
+/* ============================================================================
+ * Test 18: HAL start failure leaves a defined recoverable state
+ *
+ * A failed in-place mode change must not emit MODE_CHANGED, must leave the HAL
+ * running in its prior mode, and must allow a later retry to
+ * succeed without blocking the caller.
+ * ========================================================================== */
+static void test_request_mode_failure_recovery( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 2000 ), "idle before failure-recovery test" );
+
+  /* Sabotage the HAL start while requesting a mode transition. */
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  const uint32_t start_before = ms.start_count;
+  wifi_hal_mock_set_start_result( OSAL_ERROR );
+
+  _reset_event( &g_ev_mode );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
+                            "request accepted despite failing HAL" );
+  osal_task_delay_ms( 300 ); /* give the worker time to attempt + fail */
+
+  TEST_ASSERT_EQUAL_MESSAGE( 0, (int) g_ev_mode.count,
+                             "no MODE_CHANGED emitted on failed start" );
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( start_before, ms.start_count,
+                             "failed mode transition does not restart HAL" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started,
+                            "HAL remains started after failed mode change" );
+
+  /* Defined recoverable state: worker alive, machine idle, retry possible. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_idle(), "machine idle after HAL failure" );
+
+  /* Retry with a healthy HAL succeeds and then emits MODE_CHANGED. */
+  wifi_hal_mock_set_start_result( OSAL_SUCCESS );
+  _reset_event( &g_ev_mode );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
+                            "retry request accepted" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_mode_for_count( 1, 3000 ),
+                            "MODE_CHANGED fired on successful retry" );
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_MESSAGE( WIFI_HAL_MODE_APSTA, (int) ms.mode,
+                             "HAL in APSTA after retry" );
+  TEST_ASSERT_TRUE_MESSAGE( ms.started,
+                            "HAL started after retry" );
+
+  /* Restore station-only mode so the shutdown path is symmetric. */
+  _reset_event( &g_ev_mode );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_request_mode( T_WIFI_TYPE_CLIENT ),
+                            "restore STA mode" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_mode_for_count( 1, 3000 ),
+                            "MODE_CHANGED fired for restore" );
+}
+
+/* Focused acknowledged-stop coverage using B2 result setters/snapshots. */
+static void test_stop_before_init( void )
+{
+  wifi_hal_mock_lifecycle_t snapshot;
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &snapshot ) );
+  TEST_ASSERT_EQUAL_UINT32( 0, snapshot.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( 0, snapshot.deinit_count );
+}
+
+static void test_stop_restart_cycle( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+  wifi_hal_mock_lifecycle_t after;
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 1, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 1, after.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE( wifi_mgmt_wait_ready( 3000 ) );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+static void test_repeated_clean_stop( void )
+{
+  wifi_hal_mock_lifecycle_t first;
+  wifi_hal_mock_lifecycle_t repeat;
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &first ) );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &repeat ) );
+  TEST_ASSERT_EQUAL_UINT32( first.stop_count, repeat.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( first.deinit_count, repeat.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE( wifi_mgmt_wait_ready( 3000 ) );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+static void test_stop_hal_failure_retry( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+  wifi_hal_mock_lifecycle_t after;
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+  wifi_hal_mock_set_stop_result( OSAL_ERROR );
+  TEST_ASSERT_FALSE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 1, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 1, after.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_FALSE( wifi_mgmt_wait_ready( 100 ) );
+  wifi_hal_mock_set_stop_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 2, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 2, after.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE( wifi_mgmt_wait_ready( 3000 ) );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+static void test_stop_deinit_failure_retry( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+  wifi_hal_mock_lifecycle_t after;
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+  wifi_hal_mock_set_deinit_result( OSAL_ERROR );
+  TEST_ASSERT_FALSE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 1, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 1, after.deinit_count );
+  wifi_mgmt_start();
+  TEST_ASSERT_FALSE( wifi_mgmt_wait_ready( 100 ) );
+  wifi_hal_mock_set_deinit_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE( wifi_mgmt_stop() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 2, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 2, after.deinit_count );
+  TEST_ASSERT_FALSE( after.initialized );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE( wifi_mgmt_wait_ready( 3000 ) );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+/* ============================================================================
+ * TASK-135D  Deterministic stop budget expiry while _state_init() is parked
+ *
+ * Holds a fresh wifi_hal_init() round so the worker is parked inside
+ * _state_init().  A single serialized stop must then exhaust its wall-clock
+ * budget without any HAL stop/deinit being reached.  Once the parked init is
+ * released, the persistent request must reach worker-owned stop/deinit, but
+ * restart must stay blocked because this caller timed out.  Only a fresh stop
+ * generation, performing a further worker teardown round and returning true,
+ * authorizes restart.
+ * ========================================================================== */
+static void test_stop_timeout_with_init_parked( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+  wifi_hal_mock_lifecycle_t after;
+
+  /* Bring the module to a clean DISABLE boundary before the fresh round. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop to a clean DISABLE boundary" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module disabled before fresh round" );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+
+  /* Park a fresh wifi_hal_init() round inside _state_init(). */
+  wifi_hal_mock_set_init_hold( true );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_init_entered_level( before.init_count + 1, 3000 ),
+    "worker entered and parked inside a fresh wifi_hal_init" );
+
+  /* Issue the single stop from the serialized lifecycle owner; it must exhaust
+   * its single bounded budget while _state_init() remains parked. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_stop(),
+                             "single stop budget expires while _state_init is parked" );
+
+  /* Prove the budget expired without the worker reaching stop/deinit. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "still INIT (not running) while _state_init parked" );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count, after.deinit_count );
+
+  /* Release the parked init; the persistent request must reach the worker. */
+  wifi_hal_mock_set_init_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_entered_level( before.stop_count + 1, 5000 ),
+    "persistent stop reaches worker stop after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_completed_level( before.stop_count + 1, 5000 ),
+    "worker stop completed after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_entered_level( before.deinit_count + 1, 5000 ),
+    "persistent stop reaches worker deinit after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 1, 5000 ),
+    "worker deinit completed after init release" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(),
+                             "module DISABLE after the timed-out stop completes" );
+
+  /* The timed-out caller must not authorize restart. */
+  wifi_mgmt_start();
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_wait_ready( 200 ),
+                             "restart blocked because the caller timed out" );
+
+  /* A fresh, successful stop generation is required before restart. */
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "fresh stop generation succeeds" );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &after ) );
+  TEST_ASSERT_EQUAL_UINT32( before.stop_count + 1, after.stop_count );
+  TEST_ASSERT_EQUAL_UINT32( before.deinit_count + 1, after.deinit_count );
+
+  /* With restart authorized, a real restart completes. */
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "restart completes after the fresh stop generation" );
+  TEST_ASSERT_TRUE( _wait_idle( 2000 ) );
+}
+
+/* ============================================================================
+ * TASK-135D  Stale-token stop regression
+ *
+ * A dedicated owner helper (stop_owner_ctx_t) executes one stop command at a
+ * time.  Round-1 deinit is held; stop 1 (accepted, mock round-1 entered) times
+ * out and returns false by its real bounded timeout.  Only then is stop 2
+ * commanded; once accepted, exactly the parked round-1 deinit is released.
+ * The worker picks up the still-pending stop 2 and parks at round-2 deinit.
+ * While round-2 is held, round-1's late completion must NOT realize a
+ * command-done for stop 2 (a stale token can never satisfy a fresh serialized
+ * stop).  Releasing round-2 lets stop 2 succeed only after its own held HAL
+ * teardown round completes.
+ * ========================================================================== */
+static void test_stale_token_stop_regression( void )
+{
+  wifi_hal_mock_lifecycle_t before;
+
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+
+  /* One dedicated owner helper, semaphore-controlled. */
+  stop_owner_ctx_t ctx;
+  bool             owner_result = false;
+  ctx.cmd_sem    = NULL;
+  ctx.accept_sem = NULL;
+  ctx.done_sem   = NULL;
+  ctx.result     = &owner_result;
+
+  TEST_ASSERT_TRUE_MESSAGE(
+    osal_bin_sem_create( &ctx.cmd_sem, "owner_cmd", OSAL_SEM_EMPTY ) == OSAL_SUCCESS &&
+    osal_bin_sem_create( &ctx.accept_sem, "owner_accept", OSAL_SEM_EMPTY ) == OSAL_SUCCESS &&
+    osal_bin_sem_create( &ctx.done_sem, "owner_done", OSAL_SEM_EMPTY ) == OSAL_SUCCESS,
+    "owner helper semaphores created" );
+
+  osal_task_id_t owner_id = 0;
+  TEST_ASSERT_TRUE_MESSAGE(
+    osal_task_create( &owner_id, "stop_owner", _stop_owner_task, &ctx, NULL,
+                      OSAL_TASK_MIN_STACK_SIZE * 4, 10, NULL ) == OSAL_SUCCESS,
+    "owner helper task created" );
+
+  /* Hold the round-1 deinit so the worker parks before completing stop 1. */
+  wifi_hal_mock_set_deinit_hold( true );
+
+  /* ---- command stop 1 ---- */
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_give( ctx.cmd_sem ) == OSAL_SUCCESS,
+                            "command stop 1 posted" );
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.accept_sem, 2000 ) == OSAL_SUCCESS,
+                            "stop 1 accepted by the owner helper" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_entered_level( before.stop_count + 1, 5000 ),
+    "mock round-1 stop entered" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_entered_level( before.deinit_count + 1, 5000 ),
+    "mock round-1 deinit entered and parked" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 1, 0 ),
+    "round-1 deinit still held" );
+
+  /* Stop 1 returns false by its real bounded timeout while round-1 is parked. */
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.done_sem, 6000 ) == OSAL_SUCCESS,
+                            "stop 1 completed by its bounded timeout" );
+  TEST_ASSERT_FALSE_MESSAGE( owner_result, "stop 1 timed out (false)" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 1, 0 ),
+    "round-1 deinit still parked after stop 1 timed out" );
+
+  /* ---- Command stop 2 ---- */
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_give( ctx.cmd_sem ) == OSAL_SUCCESS,
+                            "command stop 2 posted" );
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.accept_sem, 2000 ) == OSAL_SUCCESS,
+                            "stop 2 accepted by the owner helper" );
+
+  /* Release exactly the parked round-1 deinit; the still-pending stop 2 then
+   * drives the worker into a fresh round-2 stop/deinit (which re-parks). */
+  wifi_hal_mock_release_deinit_hold();
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_entered_level( before.stop_count + 2, 5000 ),
+    "mock round-2 stop entered" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_entered_level( before.deinit_count + 2, 5000 ),
+    "mock round-2 deinit entered and parked" );
+
+  /* Round-1's late completion must NOT satisfy the fresh stop while round-2 is
+   * still held: no command-done may be produced and round-2 deinit has not
+   * completed. */
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.done_sem, 0 ) != OSAL_SUCCESS,
+                            "stale round-1 completion does not satisfy stop 2" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 2, 0 ),
+    "round-2 deinit still held" );
+
+  /* Release round-2; only then does stop 2 succeed on its own generation. */
+  wifi_hal_mock_release_deinit_hold();
+  wifi_hal_mock_set_deinit_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE( osal_bin_sem_timed_wait( ctx.done_sem, 6000 ) == OSAL_SUCCESS,
+                            "stop 2 completed after its own teardown round" );
+  TEST_ASSERT_TRUE_MESSAGE( owner_result, "stop 2 succeeded (true)" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_running(), "module DISABLE after stop 2" );
+
+  /* Clean up local helper synchronization; never touch the persistent worker. */
+  (void) osal_task_delete( owner_id );
+  (void) osal_bin_sem_delete( ctx.cmd_sem );
+  (void) osal_bin_sem_delete( ctx.accept_sem );
+  (void) osal_bin_sem_delete( ctx.done_sem );
+}
+/* ============================================================================
+ * TASK-135A  Repeated successful init is a no-op
+ *
+ * Calling wifi_mgmt_init() again after a successful init must be idempotent:
+ * it must neither spawn a second worker nor tear down (and then rebuild) the
+ * live module.  Worker-count observability is intentionally deferred to
+ * TASK-135C, so this regression observes the no-op contract through the
+ * management subscription storage: a temporary typed subscription registered
+ * before the repeated init must survive it. A naive re-init would wipe that
+ * storage (and clear any callbacks), so the duplicate-rejection and
+ * unsubscribe checks below prove the no-op path was taken.
+ * ========================================================================== */
+static void test_repeated_init_is_noop( void )
+{
+  const wifi_mgmt_event_t evt = WIFI_MGMT_EVENT_MODE_CHANGED;
+
+  _reset_event( &g_ev_repeat_init );
+
+  /* Establish the temporary subscription before the repeated init. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_subscribe( evt, _record_event, &g_ev_repeat_init ),
+                            "temp subscription registered before repeat init" );
+
+  /* Repeat successful init: idempotent, must not clear subscription storage. */
+  wifi_mgmt_init();
+
+  /* The temp entry must still occupy its slot (duplicate rejected) and remain
+   * removable, proving the init was a genuine no-op over the live module. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_subscribe( evt, _record_event, &g_ev_repeat_init ),
+                             "duplicate subscription still rejected after repeat init" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_unsubscribe( evt, _record_event, &g_ev_repeat_init ),
+                            "subscription survived the repeated init" );
+
+  _reset_event( &g_ev_repeat_init );
+}
+/* ============================================================================
+ * TASK-135C  Deterministic Wi-Fi lifecycle regression
+ *
+ * Runs full management lifetimes (init -> init -> start -> ready -> stop ->
+ * start -> ready -> deinit -> deinit) and observes them through the test-only
+ * snapshot API (WIFI_MGMT_TEST_OBSERVABILITY) exposed by wifi_managment.c/h.
+ * All synchronization is inherited from the TASK-134B acknowledged lifecycle
+ * rounds and TASK-134B2 snapshots; no unsynchronized volatile completion flag
+ * or helper-task sleep ordering is introduced here.
+ * ========================================================================== */
+
+static event_rec_t         g_lifecycle_typed;
+static volatile bool       g_lifecycle_legacy_fired = false;
+
+static void _lifecycle_legacy_cb( void )
+{
+  g_lifecycle_legacy_fired = true;
+}
+
+static void _lifecycle_snap( wifi_mgmt_test_snapshot_t* snap )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_test_snapshot( snap ),
+                            "management test snapshot is readable" );
+}
+
+/* Assert a fully released module: no worker and no live management object. */
+static void _lifecycle_assert_empty( const char* where )
+{
+  wifi_mgmt_test_snapshot_t snap = { 0 };
+  _lifecycle_snap( &snap );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( 0, snap.worker_live, where );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( 0, snap.objects_mask, where );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( 0, snap.object_count, where );
+}
+
+/* Assert a fully initialized module: exactly one worker and every object. */
+static void _lifecycle_assert_full( const char* where )
+{
+  wifi_mgmt_test_snapshot_t snap = { 0 };
+  _lifecycle_snap( &snap );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( 1, snap.worker_live, where );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( WIFI_MGMT_TEST_OBJ_ALL_MASK, snap.objects_mask,
+                                    where );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( WIFI_MGMT_TEST_OBJ_ALL_COUNT, snap.object_count,
+                                    where );
+}
+
+/* Build a fresh ready module: mock reset, type, init, start, await ready.  Must
+ * only be called from a clean (uninitialized) boundary so the mock reset can
+ * never race a live management worker's lifecycle invocation. */
+static void _lifecycle_build_ready( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_hal_mock_reset(), "mock reset succeeds" );
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module becomes ready" );
+}
+
+/* Drive the station connect flow and inject GOT_IP (mirrors the existing
+ * connect test's deterministic sequence). */
+static void _lifecycle_connect_flow( void )
+{
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_ap_name( "TestAP", 6 ),
+                            "set_ap_name succeeds" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_set_password( "TestPass", 8 ),
+                            "set_password succeeds" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_connect(), "connect request accepted" );
+  osal_task_delay_ms( 300 );
+  wifi_hal_event_data_t evt_data = { 0 };
+  strncpy( evt_data.ip_info.ip, "192.168.1.10", sizeof( evt_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+}
+
+/* ============================================================================
+ * Repeated init -> init -> start -> ready -> stop -> start -> ready -> deinit
+ * -> deinit cycles.
+ *
+ * Each new cycle starts from a never-initialized boundary and ends fully
+ * deinitialized.  Across stop/start the same single worker and the same
+ * lifecycle generation are retained; after each reinit a fresh lifecycle
+ * generation is published; after each successful deinit there are zero live
+ * workers and zero live management objects (never by comparing allocator
+ * handle values).
+ * ========================================================================== */
+static void test_lifecycle_repeated_cycles( void )
+{
+  ( void ) wifi_mgmt_deinit(); /* Clean baseline from an earlier target. */
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  wifi_hal_mock_reset();
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+
+  uint32_t prev_generation = 0;
+
+  for ( int cycle = 0; cycle < 3; ++cycle )
+  {
+    wifi_mgmt_test_snapshot_t snap = { 0 };
+
+    /* Cycle top: never-initialized boundary. */
+    _lifecycle_assert_empty( "uninitialized cycle boundary" );
+
+    /* init (first): one worker, every object live, a fresh generation. */
+    wifi_mgmt_init();
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( WIFI_MGMT_TEST_OBJ_ALL_MASK, snap.objects_mask );
+    TEST_ASSERT_EQUAL_UINT32( WIFI_MGMT_TEST_OBJ_ALL_COUNT, snap.object_count );
+    if ( cycle > 0 )
+    {
+      TEST_ASSERT_GREATER_THAN_MESSAGE( prev_generation, snap.lifecycle_generation,
+                                        "reinit publishes a new lifecycle generation" );
+    }
+    const uint32_t gen_init = snap.lifecycle_generation;
+
+    /* init (repeat) is a no-op: still one worker and the same generation. */
+    wifi_mgmt_init();
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( gen_init, snap.lifecycle_generation );
+
+    /* start -> ready. */
+    wifi_mgmt_start();
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module becomes ready" );
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( gen_init, snap.lifecycle_generation );
+
+    /* stop retains the worker and the same lifecycle generation. */
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "clean stop acknowledged" );
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( gen_init, snap.lifecycle_generation );
+    TEST_ASSERT_EQUAL_UINT32( WIFI_MGMT_TEST_OBJ_ALL_MASK, snap.objects_mask );
+
+    /* start -> ready again: the same worker generation survives stop/start. */
+    wifi_mgmt_start();
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready again" );
+    _lifecycle_snap( &snap );
+    TEST_ASSERT_EQUAL_UINT32( 1, snap.worker_live );
+    TEST_ASSERT_EQUAL_UINT32( gen_init, snap.lifecycle_generation );
+
+    /* deinit -> deinit: zero live workers and zero live objects. */
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "first deinit succeeds" );
+    TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "repeat deinit is idempotent" );
+    _lifecycle_assert_empty( "after successful deinit" );
+
+    prev_generation = gen_init;
+  }
+}
+
+/* ============================================================================
+ * Event injection after deinit cannot call management.
+ *
+ * Before deinit a GOT_IP injection is delivered through the registered HAL
+ * callback (observed by the mock delivery counter).  After deinit the HAL
+ * callback registration is dropped and the delivered-event counter is frozen:
+ * injecting GOT_IP / DISCONNECTED / SCAN_DONE after deinit cannot reach the
+ * management layer, because no callback is registered and no object is live.
+ * ========================================================================== */
+static void test_lifecycle_event_after_deinit_is_inert( void )
+{
+  ( void ) wifi_mgmt_deinit();
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  _lifecycle_build_ready();
+
+  /* A real HAL event reaches management before deinit. */
+  const uint32_t delivered_before = wifi_hal_mock_get_delivered_event_count();
+  wifi_hal_event_data_t evt = { 0 };
+  strncpy( evt.ip_info.ip, "192.168.1.10", sizeof( evt.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt );
+  TEST_ASSERT_GREATER_THAN_MESSAGE( delivered_before,
+                                    wifi_hal_mock_get_delivered_event_count(),
+                                    "pre-deinit injection reaches the callback" );
+
+  /* Deinit drops the HAL callback and releases every management object. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit succeeds" );
+  wifi_hal_mock_lifecycle_t hl = { 0 };
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &hl ) );
+  TEST_ASSERT_FALSE_MESSAGE( hl.event_cb_registered,
+                             "HAL callback registration dropped after deinit" );
+  TEST_ASSERT_FALSE_MESSAGE( hl.user_data_registered,
+                             "HAL user data dropped after deinit" );
+  _lifecycle_assert_empty( "module uninitialized after deinit" );
+
+  /* Post-deinit injections cannot call management (delivery counter frozen). */
+  const uint32_t after_deinit = wifi_hal_mock_get_delivered_event_count();
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_DISCONNECTED, NULL );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_SCAN_DONE, NULL );
+  TEST_ASSERT_EQUAL_UINT32_MESSAGE( after_deinit,
+                                    wifi_hal_mock_get_delivered_event_count(),
+                                    "post-deinit injections reach no callback" );
+}
+
+/* ============================================================================
+ * A successful reboot auto-connect must not promote and rewrite the already
+ * persisted last-used credential. New or fallback credentials are covered by
+ * the normal connect flow; this test isolates the unchanged restart path.
+ * ========================================================================== */
+static void test_restart_autoconnect_does_not_resave_credential( void )
+{
+  wifi_config_list_t seeded = { 0 };
+  wifi_config_list_t loaded = { 0 };
+  wifi_hal_event_data_t event_data = { 0 };
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "clean baseline before restart test" );
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  seeded.count = 1;
+  seeded.last_use = 2;
+  seeded.entries[0].nb = 2;
+  strncpy( seeded.entries[0].ssid, "SavedNet",
+           sizeof( seeded.entries[0].ssid ) - 1 );
+  strncpy( seeded.entries[0].password, "SavedPass",
+           sizeof( seeded.entries[0].password ) - 1 );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_save( &seeded ) );
+
+  TEST_ASSERT_TRUE( wifi_hal_mock_reset() );
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ),
+                            "restart Wi-Fi becomes ready" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_connect_completed_level( 1, 3000 ),
+    "saved credential reaches auto-connect" );
+  _reset_event( &g_ev_connected );
+  TEST_ASSERT_TRUE( wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED,
+                                         _record_event, &g_ev_connected ) );
+
+  strncpy( event_data.ip_info.ip, "192.168.1.10",
+           sizeof( event_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &event_data );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_ev_connected, 3000 ),
+                            "saved credential auto-connect succeeds" );
+
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_load( &loaded ) );
+  TEST_ASSERT_EQUAL_UINT8_MESSAGE( 2, loaded.last_use,
+                                   "restart does not advance last_use" );
+  TEST_ASSERT_EQUAL_UINT8( 2, loaded.entries[0].nb );
+  TEST_ASSERT_EQUAL_STRING( "SavedNet", loaded.entries[0].ssid );
+  TEST_ASSERT_EQUAL_STRING( "SavedPass", loaded.entries[0].password );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "restart module deinitializes" );
+}
+
+/* ============================================================================
+ * Typed and legacy registrations do not survive reinit.
+ *
+ * Module #1 takes a legacy connect callback and a typed CONNECTED subscription
+ * and both demonstrably fire.  After deinit + reinit the same legacy callback
+ * and the same typed event recorder must NOT fire during a fresh connect flow,
+ * the typed subscription slot is free again (the identical subscription is
+ * accepted, not rejected as a duplicate), and fresh registrations work.
+ * ========================================================================== */
+static void test_lifecycle_registrations_do_not_survive_reinit( void )
+{
+  ( void ) wifi_mgmt_deinit();
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  /* ---- Module #1: live legacy + typed registrations ---- */
+  _lifecycle_build_ready();
+  _reset_event( &g_lifecycle_typed );
+  g_lifecycle_legacy_fired = false;
+  wifi_mgmt_register_connect_cb( _lifecycle_legacy_cb );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED, _record_event, &g_lifecycle_typed ),
+    "typed subscription registered in module #1" );
+
+  _lifecycle_connect_flow();
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_lifecycle_typed, 3000 ),
+                            "typed CONNECTED fired in module #1" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_for( &g_lifecycle_legacy_fired, 3000 ),
+                            "legacy connect callback fired in module #1" );
+
+  /* ---- Module #2: same boundary, reinitialized ---- */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "module #1 deinitialized" );
+  _lifecycle_build_ready();
+
+  _reset_event( &g_lifecycle_typed );
+  g_lifecycle_legacy_fired = false;
+  _lifecycle_connect_flow();
+  /* Give an erroneous callback a bounded chance to fire; none may. */
+  osal_task_delay_ms( 500 );
+  TEST_ASSERT_FALSE_MESSAGE( g_lifecycle_legacy_fired,
+                             "legacy registration did not survive reinit" );
+  TEST_ASSERT_FALSE_MESSAGE( g_lifecycle_typed.fired,
+                             "typed registration did not survive reinit" );
+
+  /* The identical typed subscription is accepted again: storage was cleared. */
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_subscribe( WIFI_MGMT_EVENT_CONNECTED, _record_event, &g_lifecycle_typed ),
+    "typed subscription accepted after reinit (slot was cleared)" );
+
+  /* Fresh registrations work: disconnect and re-connect in module #2. */
+  _reset_event( &g_lifecycle_typed );
+  g_lifecycle_legacy_fired = false;
+  wifi_mgmt_register_connect_cb( _lifecycle_legacy_cb );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_disconnect(), "disconnect request accepted" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_idle( 3000 ), "module returns to idle" );
+  _lifecycle_connect_flow();
+  TEST_ASSERT_TRUE_MESSAGE( _wait_event( &g_lifecycle_typed, 3000 ),
+                            "fresh typed CONNECTED fired in module #2" );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_for( &g_lifecycle_legacy_fired, 3000 ),
+                            "fresh legacy connect callback fired in module #2" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "module #2 deinitialized" );
+  _lifecycle_assert_empty( "after module #2 deinit" );
+}
+
+/* ============================================================================
+ * Failed and timed-out deinit retain exactly the resources needed for retry.
+ *
+ * A worker-owned HAL stop error, a worker HAL deinit error, and a deinit whose
+ * stop round times out (worker parked inside a fresh init round) must all make
+ * wifi_mgmt_deinit() return false while keeping the worker and the full
+ * management object mask live.  After the failure is repaired, a serialized
+ * deinit retry releases everything.
+ * ========================================================================== */
+static void test_lifecycle_failed_deinit_retains_objects( void )
+{
+  ( void ) wifi_mgmt_deinit();
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  /* ---- Worker HAL stop error ---- */
+  _lifecycle_build_ready();
+  wifi_hal_mock_set_stop_result( OSAL_ERROR );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_deinit(),
+                             "deinit false when the worker stop errors" );
+  _lifecycle_assert_full( "objects retained after stop-error deinit" );
+
+  wifi_hal_mock_set_stop_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit retry succeeds" );
+  _lifecycle_assert_empty( "all objects released after retry" );
+
+  /* ---- Worker HAL deinit error ---- */
+  _lifecycle_build_ready();
+  wifi_hal_mock_set_deinit_result( OSAL_ERROR );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_deinit(),
+                             "deinit false when the worker HAL deinit errors" );
+  _lifecycle_assert_full( "objects retained after HAL-deinit-error deinit" );
+
+  wifi_hal_mock_set_deinit_result( OSAL_SUCCESS );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit retry succeeds" );
+  _lifecycle_assert_empty( "all objects released after retry" );
+}
+
+static void test_lifecycle_timed_out_deinit_retains_objects( void )
+{
+  ( void ) wifi_mgmt_deinit();
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+
+  _lifecycle_build_ready();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop to a clean DISABLE boundary" );
+
+  wifi_hal_mock_lifecycle_t before = { 0 };
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_lifecycle( &before ) );
+
+  /* Park a fresh init round so the worker cannot service the stop request that
+   * deinit issues first; that stop exhausts its wall-clock budget and deinit
+   * must return false with every object retained. */
+  wifi_hal_mock_set_init_hold( true );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_init_entered_level( before.init_count + 1, 3000 ),
+    "worker parked inside the fresh wifi_hal_init round" );
+
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_deinit(),
+                             "deinit stop round times out while init is parked" );
+  _lifecycle_assert_full( "objects retained after timed-out deinit" );
+
+  /* Repair: release the parked init; the pending stop round completes. */
+  wifi_hal_mock_set_init_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_entered_level( before.stop_count + 1, 5000 ),
+    "pending stop reaches the worker after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_stop_completed_level( before.stop_count + 1, 5000 ),
+    "pending stop completed after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_entered_level( before.deinit_count + 1, 5000 ),
+    "pending worker deinit entered after init release" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_deinit_completed_level( before.deinit_count + 1, 5000 ),
+    "pending worker deinit completed after init release" );
+
+  /* A serialized deinit retry releases everything. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit retry succeeds" );
+  _lifecycle_assert_empty( "all objects released after timed-out deinit retry" );
+}
 
 /* ============================================================================
  * Runner
@@ -357,6 +1907,8 @@ void wifi_mgmt_tests_run( void )
   strncpy( ip.gw, "192.168.1.1", sizeof( ip.gw ) - 1 );
   wifi_hal_mock_set_ip_info( &ip );
 
+  RUN_TEST( test_stop_before_init );
+
   g_connect_cb_fired    = false;
   g_disconnect_cb_fired = false;
 
@@ -364,9 +1916,18 @@ void wifi_mgmt_tests_run( void )
   wifi_mgmt_init();
   wifi_mgmt_register_connect_cb( _on_connect );
   wifi_mgmt_register_disconnect_cb( _on_disconnect );
-  wifi_mgmt_start();
+  /* NOTE: the very first wifi_mgmt_start() is performed inside
+   * test_wait_ready_held_at_callback_barrier, which parks the HAL init at the
+   * mock barrier and proves readiness is not reported before the callback is
+   * installed. */
+
+  /* TASK-135A: a repeat of a successful init must be an idempotent no-op. */
+  RUN_TEST( test_repeated_init_is_noop );
 
   /* --- Run all tests sequentially (single lifecycle) --- */
+  RUN_TEST( test_wait_ready_held_at_callback_barrier );
+  RUN_TEST( test_startup_failure_is_deterministic );
+  RUN_TEST( test_startup_init_failure_is_deterministic );
   RUN_TEST( test_init_reaches_idle );
   RUN_TEST( test_set_ap_password_validation );
   RUN_TEST( test_scan_predefined_list );
@@ -378,10 +1939,36 @@ void wifi_mgmt_tests_run( void )
   RUN_TEST( test_power_save );
   RUN_TEST( test_client_count );
   RUN_TEST( test_is_read_data );
+  RUN_TEST( test_event_subscriptions );
+  RUN_TEST( test_state_machine_event_emission );
+  RUN_TEST( test_scan_snapshot_getters );
+  RUN_TEST( test_ip_conn_snapshot_events );
+  RUN_TEST( test_request_mode_sta_to_apsta );
+  RUN_TEST( test_request_mode_apsta_to_sta );
+  RUN_TEST( test_request_mode_failure_recovery );
+  RUN_TEST( test_stop_restart_cycle );
+  RUN_TEST( test_repeated_clean_stop );
+  RUN_TEST( test_stop_hal_failure_retry );
+  RUN_TEST( test_stop_deinit_failure_retry );
+  RUN_TEST( test_stop_timeout_with_init_parked );
+  RUN_TEST( test_stale_token_stop_regression );
 
   /* --- One-time stop --- */
   wifi_mgmt_stop();
   osal_task_delay_ms( 300 );
+
+  /* --- TASK-135C: deterministic lifecycle regression (isolated lifetimes) ---
+   * Each lifecycle test deinitializes the single-lifecycle module above and
+   * runs its own full init/stop/deinit lifetimes from a clean boundary, so it
+   * never races the state-machine tests.  They leave the module either cleanly
+   * deinitialized or stopped; the deinit test target re-establishes its own
+   * baseline. */
+  RUN_TEST( test_lifecycle_repeated_cycles );
+  RUN_TEST( test_lifecycle_event_after_deinit_is_inert );
+  RUN_TEST( test_restart_autoconnect_does_not_resave_credential );
+  RUN_TEST( test_lifecycle_registrations_do_not_survive_reinit );
+  RUN_TEST( test_lifecycle_failed_deinit_retains_objects );
+  RUN_TEST( test_lifecycle_timed_out_deinit_retains_objects );
 
   cleanup_fs();
 }

@@ -567,3 +567,56 @@ target_link_libraries(thingboard_tls_demo
 set_target_properties(thingboard_tls_demo PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
+
+# -- wifi_provisioning_demo example --
+# POSIX Wi-Fi provisioning demo running against the simulated Wi-Fi HAL.
+# Brings the layered runtime up in ownership order (OSAL -> Mongoose ->
+# Wi-Fi management -> provisioning) and tears it down in reverse order.
+# Serves the provisioning portal on http://127.0.0.1:8080 and the captive
+# DNS responder on udp://127.0.0.1:10053.
+# Only built when the optional provisioning component is enabled.
+if(CONFIG_WIFI_HTTP_PROVISIONING)
+  add_executable(wifi_provisioning_demo
+    ${CMAKE_CURRENT_LIST_DIR}/../common/wifi_provisioning_demo.c
+  )
+
+  target_include_directories(wifi_provisioning_demo
+    PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/wifi_provisioning
+    PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/wifi
+    PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/mongoose
+    PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/include
+    PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/osal/posix
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_link_libraries(wifi_provisioning_demo
+    hq_wifi_provisioning
+    hq_wifi
+    hq_mongoose
+    hq_osal
+    pthread
+  )
+
+  set_target_properties(wifi_provisioning_demo PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+  )
+
+  # TASK-130 smoke test: launches the built demo against the simulated Wi-Fi
+  # HAL, exercises the portal HTTP workflows and the captive DNS responder,
+  # then triggers a clean shutdown (SIGTERM) and proves both listener ports
+  # (8080 TCP, 10053 UDP) are released. Runs under the unit label so the
+  # standard `ctest -L unit` invocation also covers the demo.
+  if(HQ_BUILD_TESTS AND CONFIG_HQ_PLATFORM_POSIX)
+    find_program(HQ_PYTHON3_EXECUTABLE python3)
+    if(HQ_PYTHON3_EXECUTABLE)
+      add_test(NAME wifi_provisioning_demo_smoke_test
+        COMMAND ${HQ_PYTHON3_EXECUTABLE}
+                ${CMAKE_CURRENT_LIST_DIR}/../../tests/wifi_provisioning/wifi_provisioning_demo_smoke_test.py
+                $<TARGET_FILE:wifi_provisioning_demo>)
+      set_tests_properties(wifi_provisioning_demo_smoke_test PROPERTIES
+        LABELS "unit;wifi_provisioning"
+        TIMEOUT 120)
+      message(STATUS "Examples: wifi_provisioning_demo smoke test registered")
+    endif()
+  endif()
+endif()

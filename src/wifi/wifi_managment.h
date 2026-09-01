@@ -95,8 +95,25 @@ typedef struct
   wifi_mgmt_ap_info_t items[WIFI_DRV_MAX_SCAN_AP]; /**< AP record array.         */
 } wifi_mgmt_ap_list_t;
 
-/** @brief Prototype for connect/disconnect event callbacks. */
+/** @brief Prototype for connect/disconnect event callbacks (legacy API). */
 typedef void ( *wifi_mgmt_callback_t )( void );
+
+/** @brief Typed Wi-Fi management events delivered to subscribers. */
+typedef enum
+{
+  WIFI_MGMT_EVENT_CONNECTED      = 0, /**< Station connected and obtained IP.   */
+  WIFI_MGMT_EVENT_DISCONNECTED   = 1, /**< Station disconnected (user or lost). */
+  WIFI_MGMT_EVENT_CONNECT_FAILED = 2, /**< Connect attempt failed.              */
+  WIFI_MGMT_EVENT_SCAN_COMPLETED = 3, /**< Scan finished; results are available. */
+  WIFI_MGMT_EVENT_MODE_CHANGED   = 4, /**< Driver operating mode changed.       */
+} wifi_mgmt_event_t;
+
+/**
+ * @brief Prototype for typed event subscribers.
+ * @param [in] event     - event that triggered the callback
+ * @param [in] user_data - user context supplied at subscription time
+ */
+typedef void ( *wifi_mgmt_event_cb_t )( wifi_mgmt_event_t event, void* user_data );
 
 /* Public functions ----------------------------------------------------------*/
 
@@ -104,26 +121,125 @@ typedef void ( *wifi_mgmt_callback_t )( void );
  * @brief   Set the operating role before calling @c wifi_mgmt_init.
  * @param   [in] type - @c T_WIFI_TYPE_SERVER, @c T_WIFI_TYPE_CLIENT,
  *                      or @c T_WIFI_TYPE_CLI_SER
+ * @note    Applies the mode change synchronously. Prefer
+ *          @c wifi_mgmt_request_mode for runtime transitions.
  */
 void wifi_mgmt_set_wifi_type( wifi_type_t type );
 
 /**
+ * @brief   Asynchronously request a runtime transition to @p type.
+ *
+ * @details The requested mode is serialized inside the Wi-Fi worker task so
+ *          multiple transitions are applied one at a time. The HAL is stopped
+ *          and restarted only when @p type differs from the current mode, and
+ *          @c WIFI_MGMT_EVENT_MODE_CHANGED is emitted only after the HAL
+ *          transition succeeds.
+ *
+ * @param   [in] type - @c T_WIFI_TYPE_SERVER, @c T_WIFI_TYPE_CLIENT,
+ *                      or @c T_WIFI_TYPE_CLI_SER
+ * @return  true if the request was accepted (or @p type already equals the
+ *          current mode), false if @p type is invalid.
+ * @note    This call never blocks on the transition result; a HAL start
+ *          failure leaves the worker in a defined, recoverable state.
+ */
+bool wifi_mgmt_request_mode( wifi_type_t type );
+
+/**
  * @brief   Initialize the Wi-Fi management module and spawn the worker task.
- * @note    Call @c wifi_mgmt_set_wifi_type before this function.
+ *
+ * @details Initialization is transactional: every mutex, semaphore, task
+ *          attribute and the single worker task must be created successfully
+ *          before the module is published as initialized. The worker is created
+ *          last so a failed init can never run a task against a partially built
+ *          module. On any creation failure, partially created objects are
+ *          deleted in exact reverse order and the module is left
+ *          indistinguishable from never initialized.
+ *
+ * @note    A single lifecycle owner must serialize init/start/stop calls.
+ *          Calling this function again after a successful init is a no-op.
+ *          Call @c wifi_mgmt_set_wifi_type before this function.
  */
 void wifi_mgmt_init( void );
 
 /**
- * @brief   Stop the Wi-Fi driver and release HAL resources.
- * @note    Blocks until the internal task reaches the disabled state.
+ * @brief   Request an acknowledged, restartable Wi-Fi stop.
+ *
+ * @details One lifecycle owner must serialize init/start/stop calls. Two
+ *          simultaneous stop callers and arbitrary init/start/stop races are
+ *          unsupported. There is currently no wifi_mgmt_deinit() API; final
+ *          manager teardown remains a later task.
+ *
+ *          A non-fast-path call allocates a fresh request generation and waits
+ *          for the persistent Wi-Fi worker to call wifi_hal_stop(), then
+ *          wifi_hal_deinit(), and publish WIFI_APP_DISABLE. The return value
+ *          belongs to this call's exact generation: true means both worker-
+ *          owned HAL calls succeeded and the disabled state was published.
+ *          A timeout or HAL error returns false and requires a fresh,
+ *          serialized stop before restart.
+ *
+ * @return  true when this call's exact stop generation completed cleanly;
+ *          false on timeout or either HAL error.
+ * @note    Stop-before-init and repeated stop after an acknowledged clean stop
+ *          return true without a fresh HAL round.
  */
-void wifi_mgmt_stop( void );
+bool wifi_mgmt_stop( void );
+
+/**
+ * @brief   Final deinitialization: join the Wi-Fi worker and release every
+ *          management synchronization object.
+ *
+ * @details Bounded, owner-driven teardown that builds on the restartable
+ *          @c wifi_mgmt_stop() protocol and the transactional init from
+ *          TASK-135A.  Dependents must unsubscribe and cease all Wi-Fi
+ *          management calls before calling this; deinit does not race
+ *          arbitrary published entry points.
+ *
+ *          If the worker-owned HAL teardown is not already acknowledged
+ *          successful, @c wifi_mgmt_stop() is first invoked and joined (an
+ *          owner-thread HAL fallback is never used).  A separate terminate
+ *          request is then queued for the worker.  On observing it the worker
+ *          leaves its state loop holding no management mutex, publishes the
+ *          captured quiesced generation, signals quiescence, and parks until
+ *          the owner calls osal_task_delete().  Only after the task is deleted
+ *          and the HAL callback is quiescent are typed subscriptions and
+ *          legacy callback lists cleared and ip_sem, scan_sem, ready/stop/quit
+ *          semaphores, event_mutex, and state_mutex released in one documented
+ *          reverse-reachability order.  The module is only published as
+ *          uninitialized after every release.
+ *
+ * @return  true when called before init or after a successful deinit (a
+ *          deinit-before-init is a no-op).  Returns false on stop
+ *          timeout/HAL error, quiescence timeout, or task deletion failure.
+ * @note    On failure every live object and state needed for a safe serialized
+ *          retry is retained; a parked worker after a failed task deletion
+ *          remains represented as live and retryable.
+ */
+bool wifi_mgmt_deinit( void );
 
 /**
  * @brief   Start the Wi-Fi management state machine.
  * @note    Has no effect if already started.
  */
 void wifi_mgmt_start( void );
+
+/**
+ * @brief   Wait until Wi-Fi startup completes.
+ *
+ * @details Blocks the calling task until the Wi-Fi worker has finished
+ *          bringing the stack up: the HAL event callback is installed, the
+ *          requested HAL mode has been started successfully, the initial
+ *          snapshots (IP state, mode event) are published, and the machine
+ *          reached the idle or ready state.  The readiness signal is emitted
+ *          synchronously from the init transition, so callers may rely on it
+ *          to distinguish "worker task created" from "Wi-Fi initialized".
+ *
+ * @param   [in] timeout_ms - maximum time to wait, in milliseconds
+ * @return  true if startup completed successfully, false if the wait timed
+ *          out or if HAL initialization / mode startup failed.
+ * @note    When the module has not been started, or after @c wifi_mgmt_stop,
+ *          the call returns false once @p timeout_ms elapses.
+ */
+bool wifi_mgmt_wait_ready( uint32_t timeout_ms );
 
 /**
  * @brief   Select the station to connect to from the last scan result.
@@ -206,6 +322,25 @@ bool wifi_mgmt_get_name_from_scanned_list( uint8_t number, char* name );
 void wifi_mgmt_get_scan_result( uint16_t* ap_count );
 
 /**
+ * @brief   Check whether a Wi-Fi scan is currently in progress.
+ * @return  true if a scan is active, otherwise false
+ * @note    Thread-safe; safe to call from the Mongoose task while the Wi-Fi
+ *          worker task updates scan state.
+ */
+bool wifi_mgmt_is_scan_active( void );
+
+/**
+ * @brief   Get the scan generation number.
+ *
+ * @details The generation counter increments each time a scan completes so
+ *          callers can detect that a fresh scan snapshot is available.
+ * @return  current scan generation value
+ * @note    Thread-safe; safe to call from the Mongoose task while the Wi-Fi
+ *          worker task updates scan state.
+ */
+uint32_t wifi_mgmt_get_scan_generation( void );
+
+/**
  * @brief   Get the last measured RSSI of the current connection.
  * @return  RSSI value in dBm
  */
@@ -216,6 +351,18 @@ int wifi_mgmt_get_rssi( void );
  * @return  true if credentials were read from persistent storage, otherwise false
  */
 bool wifi_mgmt_is_read_data( void );
+
+/**
+ * @brief   Check whether the Wi-Fi management module is running.
+ * @return  true once startup has completed (state @c WIFI_APP_IDLE or beyond),
+ *          false while the module is still initializing (@c WIFI_APP_INIT), is
+ *          being stopped (@c WIFI_APP_DEINIT), or has not been started
+ *          (@c WIFI_APP_DISABLE) — i.e. the worker task existing alone does
+ *          not make the module "running".
+ * @note    Prefer @c wifi_mgmt_wait_ready over polling this function when the
+ *          caller needs to distinguish task creation from completed init.
+ */
+bool wifi_mgmt_is_running( void );
 
 /**
  * @brief   Check whether the driver is in the idle state.
@@ -242,14 +389,36 @@ bool wifi_mgmt_is_ready_to_scan( void );
 void wifi_mgmt_power_save( bool state );
 
 /**
- * @brief   Register a callback invoked after a successful connection.
+ * @brief   Subscribe to a typed Wi-Fi management event.
+ * @param   [in] event     - event to subscribe to
+ * @param   [in] cb        - callback invoked when @p event fires
+ * @param   [in] user_data - user context passed to @p cb
+ * @return  true on success, false on null callback or duplicate registration
+ */
+bool wifi_mgmt_subscribe( wifi_mgmt_event_t event, wifi_mgmt_event_cb_t cb, void* user_data );
+
+/**
+ * @brief   Remove a previously registered typed event subscription.
+ * @param   [in] event     - event the subscription belongs to
+ * @param   [in] cb        - callback registered for @p event
+ * @param   [in] user_data - user context supplied at subscription time
+ * @return  true if the subscription was found and removed, otherwise false
+ */
+bool wifi_mgmt_unsubscribe( wifi_mgmt_event_t event, wifi_mgmt_event_cb_t cb, void* user_data );
+
+/**
+ * @brief   Register a callback of the successful connect.
  * @param   [in] cb - callback function pointer
+ * @note    Compatibility wrapper around the typed event subscription,
+ *          equivalent to subscribing to @c WIFI_MGMT_EVENT_CONNECTED.
  */
 void wifi_mgmt_register_connect_cb( wifi_mgmt_callback_t cb );
 
 /**
- * @brief   Register a callback invoked after disconnection.
+ * @brief   Register a callback of the disconnected event.
  * @param   [in] cb - callback function pointer
+ * @note    Compatibility wrapper around the typed event subscription,
+ *          equivalent to subscribing to @c WIFI_MGMT_EVENT_DISCONNECTED.
  */
 void wifi_mgmt_register_disconnect_cb( wifi_mgmt_callback_t cb );
 
@@ -280,5 +449,74 @@ bool wifi_mgmt_get_ip_info( wifi_mgmt_ip_info_t* info );
  * @return  true if success, otherwise false
  */
 bool wifi_mgmt_get_access_points( wifi_mgmt_ap_list_t* list );
+
+/* ----------------------------------------------------------------------------
+ * Test-only lifecycle observability (TASK-135C).
+ *
+ * Declared/defined exclusively behind WIFI_MGMT_TEST_OBSERVABILITY.  A normal
+ * production build never defines this macro, so none of the symbols in this
+ * section is present in it; this is not a production public diagnostic API.
+ * It exists only for the deterministic Wi-Fi lifecycle regression tests, which
+ * observe the live worker count, the lifecycle generation, and a management
+ * object mask/counters without comparing allocator handle values.
+ * ------------------------------------------------------------------------- */
+#ifdef WIFI_MGMT_TEST_OBSERVABILITY
+
+#define WIFI_MGMT_TEST_OBJ_IP_SEM      (1u << 0)
+#define WIFI_MGMT_TEST_OBJ_SCAN_SEM    (1u << 1)
+#define WIFI_MGMT_TEST_OBJ_READY_SEM   (1u << 2)
+#define WIFI_MGMT_TEST_OBJ_STOP_SEM    (1u << 3)
+#define WIFI_MGMT_TEST_OBJ_QUIT_SEM    (1u << 4)
+#define WIFI_MGMT_TEST_OBJ_EVENT_MUTEX (1u << 5)
+#define WIFI_MGMT_TEST_OBJ_STATE_MUTEX (1u << 6)
+#define WIFI_MGMT_TEST_OBJ_WORKER_TASK (1u << 7)
+
+/** Mask with every success-critical synchronization object. */
+#define WIFI_MGMT_TEST_OBJ_SYNC_MASK ( WIFI_MGMT_TEST_OBJ_IP_SEM      | \
+                                       WIFI_MGMT_TEST_OBJ_SCAN_SEM     | \
+                                       WIFI_MGMT_TEST_OBJ_READY_SEM    | \
+                                       WIFI_MGMT_TEST_OBJ_STOP_SEM     | \
+                                       WIFI_MGMT_TEST_OBJ_QUIT_SEM     | \
+                                       WIFI_MGMT_TEST_OBJ_EVENT_MUTEX  | \
+                                       WIFI_MGMT_TEST_OBJ_STATE_MUTEX )
+
+/** Mask of every live object including the worker task. */
+#define WIFI_MGMT_TEST_OBJ_ALL_MASK  ( WIFI_MGMT_TEST_OBJ_SYNC_MASK | \
+                                       WIFI_MGMT_TEST_OBJ_WORKER_TASK )
+
+/** The number of live objects reported by a fully-initialized module. */
+#define WIFI_MGMT_TEST_OBJ_ALL_COUNT 8U
+
+/**
+ * @brief   Test-only synchronized lifecycle snapshot (TASK-135C).
+ *
+ * @details Exposes the live worker count (0 or one), the lifecycle generation
+ *          (unchanged across stop/start, new after a reinit), and a management
+ *          object mask/count.  It never returns or compares allocator handle
+ *          values; a pristine (never initialized) module reports zero worker,
+ *          zero mask and zero count.
+ */
+typedef struct
+{
+  uint32_t lifecycle_generation; /**< Incremented by each successful init. */
+  uint32_t worker_live;          /**< 1 when the Wi-Fi worker task exists. */
+  uint32_t objects_mask;         /**< Bitmask of live management objects.  */
+  uint32_t object_count;         /**< Number of live management objects.   */
+} wifi_mgmt_test_snapshot_t;
+
+/**
+ * @brief   Copy a synchronized test-only lifecycle snapshot.
+ *
+ * @details The destination is zeroed first.  Lifecycle fields are read under
+ *          the state lock while the module is initialized; when the module is
+ *          uninitialized (no state mutex exists) the snapshot holds the
+ *          pristine zero/worker-less values without touching a released handle.
+ *
+ * @param   [out] out - destination for the snapshot
+ * @return  true on success, false when @p out is NULL.
+ */
+bool wifi_mgmt_test_snapshot( wifi_mgmt_test_snapshot_t* out );
+
+#endif /* WIFI_MGMT_TEST_OBSERVABILITY */
 
 #endif
