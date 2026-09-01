@@ -19,6 +19,31 @@ if(NOT ESP_PLATFORM)
   set(HQ_SANITIZE_RUNTIME_DIR "" CACHE STRING
       "Optional dir with sanitizer runtime libs (libasan.so, libubsan.so, libtsan.so + SONAME links)")
 
+  # ---- HAL public API contract tests (TASK-004) ----
+  # Header-only contract test.  The public HAL API is the normative contract
+  # for the GPIO/PWM backends (TASK-005..TASK-010), which do not exist yet,
+  # so this target compiles the public headers standalone on the host
+  # (proving they are self-contained, valid C and free of target-specific
+  # includes) and validates the documented portable types and constants.
+  add_executable(hal_api_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_api_test.c
+  )
+
+  target_include_directories(hal_api_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+  )
+
+  target_compile_options(hal_api_tests PRIVATE -Wall -Wextra -Werror -Wpedantic)
+
+  target_link_libraries(hal_api_tests
+    unity
+  )
+
+  add_test(NAME hal_api_tests COMMAND hal_api_tests)
+  set_tests_properties(hal_api_tests PROPERTIES LABELS "unit;hal")
+
+  message(STATUS "Tests: Building HAL API contract test (hal_api_tests)")
+
   # POSIX platform: unified test application
   add_executable(osal_tests
     ${HQ_COMMON_TEST_RUNNER}
