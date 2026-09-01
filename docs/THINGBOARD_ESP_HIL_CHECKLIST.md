@@ -22,6 +22,11 @@ Validate:
 - Serial logging captured during every scenario
 - Test notes captured with firmware version, board, date, and operator
 
+For the sole development board (`/dev/ttyUSB1`), do not enable hardware Secure
+Boot, flash-encryption Release mode, or anti-rollback. Safe signed-OTA tests run
+first. Flash-encryption Development mode requires the gated workflow in
+`scripts/esp_flash_encryption_dev_hil.sh` and permanent eFuse acknowledgement.
+
 ## Wi-Fi Loss
 
 1. Boot device and verify initial Wi-Fi association succeeds.
@@ -66,12 +71,17 @@ Validate:
 
 ## Secure Boot
 
+Run this section only on disposable or production-intended hardware.
+
 1. Build and flash a release image with Secure Boot enabled.
 2. Verify signed image boots successfully.
 3. Attempt to boot tampered or unsigned image.
 4. Verify device rejects it and does not enter normal application flow.
 
 ## Flash Encryption
+
+On `/dev/ttyUSB1`, run Development mode only through the gated HIL script.
+Release-mode checks require additional hardware.
 
 1. Build and flash a release image with Flash Encryption enabled.
 2. Verify normal boot and MQTT operation.

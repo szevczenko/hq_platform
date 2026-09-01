@@ -1,0 +1,25 @@
+release 0.1.0:
+
+release 0.1.x:
+1. esp wifi_hal_driver _admit_operation overcomplicate. I think it could replace by semaphore
+2. refactoring wifi_hal_driver
+3. Similar fucntion in captive_dns_server
+4. Analyze if in wifi_managment.c require all semaphores. Probably it AI mistake. Its try to implement event Freertos features where each bit it look like semaphore. Needed refactoring
+5. Wifi managment iplement goto intead before retur call every time _unlock_state
+6. refactor wifi_managment.c. I think semaphore could be replaced by state enum and one semaphore
+7. Remove all tasks like "TASK-135B" in code and comments
+8. wifi_managment.c refactor bool ctx variables. Is to much. I think most of all could be replaced by status or state
+9. wifi_managment.h separate to 2 header files. And move test definition to anothe header
+10. create utils module and place all function like conversion big endian to little endian or prov_lower, ...
+11. Analyze if wifi_http_provisioning are needed s_mutex and s_lifecycle_mutex
+12. If inside several modules we have s_mutex and s_lifecycle_mutex, maybe create utils for them. Probably in big project it resolved more 'readable'
+13. Is wifi_rpovisioning.c needed?
+14. wifi_provisioning_controller.c. Timer has grace_timer_active, grace_timer_ready. Why delete didn't stop? Maybe implement in osal layer: delete -> stop -> callback with delete info -> delete
+15. wifi_provisioning_controller.c to much bool variables. Maybe could be replaced by status or state
+16. for all files run clang-format
+17. add gi commit hook with clang-format
+18. add unit test with chaecking clang-format
+
+release x.x.x
+1. support for ipv6
+2. support wifi power save

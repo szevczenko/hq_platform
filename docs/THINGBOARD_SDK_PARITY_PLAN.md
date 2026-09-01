@@ -18,21 +18,20 @@ device-client capability.
 
 ### P0 - Firmware Trust And Recovery
 
-- [ ] **Require a firmware signature in addition to the checksum.**
+- [ ] **Require vendor-native signed firmware images.**
   - A checksum detects accidental corruption but does not authenticate a
-    firmware publisher.
-  - Define project-owned shared attributes such as `fw_signature`,
-    `fw_signature_algorithm`, and `fw_signing_key_id`; ThingsBoard's standard
-    firmware metadata does not provide a universal image-signature contract.
-  - Verify a detached signature over the final image digest with a public key
-    compiled into the firmware or stored in protected key storage. Prefer
-    ECDSA P-256 or Ed25519 if the chosen ESP-IDF/crypto configuration supports
-    it; document the selected algorithm and key-rotation format.
-  - Treat a checksum as an integrity check and the signature as the
-    authenticity check. Both must pass before `osal_ota_finish(true)`.
-  - Unit tests: correct signature; modified payload; wrong public key; unknown
-    key ID; malformed signature; signature verification failure must leave the
-    active boot partition unchanged.
+    firmware publisher. It remains a transport-integrity check over the exact
+    signed artifact uploaded to ThingsBoard.
+  - ESP uses the Secure Boot v2 application signature validated by
+    `esp_ota_end()`/`esp_ota_set_boot_partition()`. Future Zephyr support uses
+    the MCUboot image signature. Do not create a second mandatory signature
+    format with a separate root of trust.
+  - Reserved attributes `fw_signature`, `fw_signature_algorithm`, and
+    `fw_signing_key_id` remain optional for a future authenticated envelope or
+    metadata policy.
+  - Tests: valid signed image; modified payload; wrong key; unsigned image;
+    malformed native image; validation failure must leave the active boot
+    partition unchanged.
 
 - [ ] **Enable and validate ESP Secure Boot and Flash Encryption for release
   builds.**

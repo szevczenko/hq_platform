@@ -58,7 +58,7 @@ typedef struct {
  *         `kind` tells how to answer, `txn_id` holds the preserved transaction
  *         ID, and `qlen` is the encoded question length for the response.
  */
-captive_dns_query_t CaptiveDns_ParseQuery(const uint8_t *buf, size_t len);
+captive_dns_query_t captive_dns_parse_query(const uint8_t *buf, size_t len);
 
 /**
  * @brief Build a captive DNS response for a received query.
@@ -77,7 +77,7 @@ captive_dns_query_t CaptiveDns_ParseQuery(const uint8_t *buf, size_t len);
  *         produced (malformed/truncated/oversized/multi-question/unsupported
  *         opcode input, or an output buffer that is too small).
  */
-size_t CaptiveDns_BuildResponse(const uint8_t *query, size_t len,
+size_t captive_dns_build_response(const uint8_t *query, size_t len,
                                 const uint8_t ip4[4], uint8_t *out,
                                 size_t out_cap);
 

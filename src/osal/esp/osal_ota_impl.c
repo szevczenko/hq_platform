@@ -4,15 +4,24 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "esp_app_desc.h"
+#include "esp_app_format.h"
+#include "esp_efuse.h"
+#include "esp_flash_encrypt.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_secure_boot.h"
 #include "esp_system.h"
+#include "bootloader_common.h"
 
 #include "mongoose.h"
 #include "osal_log.h"
 
 #define OSAL_OTA_SHA256_DIGEST_LEN 32U
 #define OSAL_OTA_SHA256_HEX_LEN    (OSAL_OTA_SHA256_DIGEST_LEN * 2U)
+#define OSAL_OTA_PREFLIGHT_SIZE \
+    (sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + \
+     sizeof(esp_app_desc_t))
 
 typedef struct {
     bool active;
@@ -21,12 +30,17 @@ typedef struct {
     const esp_partition_t *update_partition;
     size_t total_size;
     size_t written_size;
+    size_t preflight_size;
     uint8_t expected_digest[OSAL_OTA_SHA256_DIGEST_LEN];
+    uint8_t preflight[OSAL_OTA_PREFLIGHT_SIZE];
+    bool preflight_complete;
     mg_sha256_ctx sha256_ctx;
 } osal_ota_ctx_t;
 
 static osal_ota_ctx_t s_ota_ctx;
 static bool s_running_image_pending_confirmation;
+static osal_ota_boot_state_t s_running_image_boot_state =
+    OSAL_OTA_BOOT_STATE_UNKNOWN;
 
 static const char *osal_ota_state_to_string(esp_ota_img_states_t state)
 {
@@ -61,7 +75,9 @@ static osal_status_t osal_ota_from_esp_err(esp_err_t err)
     case ESP_ERR_NOT_FOUND:
         return OSAL_ERR_EMPTY_SET;
     case ESP_ERR_OTA_VALIDATE_FAILED:
-        return OSAL_ERROR;
+        return OSAL_ERR_IMAGE_INVALID;
+    case ESP_ERR_OTA_SMALL_SEC_VER:
+        return OSAL_ERR_SECURITY_VERSION;
     case ESP_ERR_OTA_ROLLBACK_INVALID_STATE:
         return OSAL_ERR_INCORRECT_OBJ_STATE;
     default:
@@ -121,8 +137,44 @@ static osal_status_t osal_ota_parse_sha256_checksum(const char *checksum,
     return OSAL_SUCCESS;
 }
 
+static osal_status_t osal_ota_preflight_image(void)
+{
+    const esp_image_header_t *image =
+        (const esp_image_header_t *)s_ota_ctx.preflight;
+    const esp_app_desc_t *app = (const esp_app_desc_t *)(
+        s_ota_ctx.preflight + sizeof(esp_image_header_t) +
+        sizeof(esp_image_segment_header_t));
+
+    if (image->magic != ESP_IMAGE_HEADER_MAGIC ||
+        image->segment_count == 0 ||
+        image->segment_count > ESP_IMAGE_MAX_SEGMENTS ||
+        app->magic_word != ESP_APP_DESC_MAGIC_WORD) {
+        osal_log_error("[osal_ota] Invalid ESP application header");
+        return OSAL_ERR_IMAGE_INVALID;
+    }
+    if (bootloader_common_check_chip_validity(
+            image, ESP_IMAGE_APPLICATION) != ESP_OK) {
+        osal_log_error("[osal_ota] Firmware is incompatible with this chip");
+        return OSAL_ERR_IMAGE_INVALID;
+    }
+#ifdef CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK
+    if (!esp_efuse_check_secure_version(app->secure_version)) {
+        osal_log_error("[osal_ota] Security version rejected: %" PRIu32,
+                       app->secure_version);
+        return OSAL_ERR_SECURITY_VERSION;
+    }
+#endif
+
+    osal_log_info("[osal_ota] Image preflight: project=%.32s version=%.32s security=%" PRIu32,
+                  app->project_name, app->version, app->secure_version);
+    return OSAL_SUCCESS;
+}
+
 osal_status_t osal_ota_init(void)
 {
+    s_running_image_pending_confirmation = false;
+    s_running_image_boot_state = OSAL_OTA_BOOT_STATE_UNKNOWN;
+
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running == NULL) {
         osal_log_warning("[osal_ota] Cannot get running partition");
@@ -135,6 +187,7 @@ osal_status_t osal_ota_init(void)
         osal_log_info("[osal_ota] No OTA state for running partition subtype=0x%02x (%s)",
                       running->subtype, esp_err_to_name(err));
         /* Not an OTA slot state (for example factory app) or rollback not used. */
+        s_running_image_boot_state = OSAL_OTA_BOOT_STATE_VALID;
         return OSAL_SUCCESS;
     }
     if (err != ESP_OK) {
@@ -150,6 +203,16 @@ osal_status_t osal_ota_init(void)
 
     s_running_image_pending_confirmation =
         (ota_state == ESP_OTA_IMG_PENDING_VERIFY);
+    if (ota_state == ESP_OTA_IMG_PENDING_VERIFY ||
+        ota_state == ESP_OTA_IMG_NEW) {
+        s_running_image_boot_state =
+            OSAL_OTA_BOOT_STATE_PENDING_CONFIRMATION;
+    } else if (ota_state == ESP_OTA_IMG_INVALID ||
+               ota_state == ESP_OTA_IMG_ABORTED) {
+        s_running_image_boot_state = OSAL_OTA_BOOT_STATE_INVALID;
+    } else {
+        s_running_image_boot_state = OSAL_OTA_BOOT_STATE_VALID;
+    }
     if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
         osal_log_warning("[osal_ota] Running OTA image pending verification");
     } else {
@@ -157,6 +220,25 @@ osal_status_t osal_ota_init(void)
                       osal_ota_state_to_string(ota_state));
     }
 
+    return OSAL_SUCCESS;
+}
+
+osal_status_t osal_ota_get_security_info(osal_ota_security_info_t *info)
+{
+    if (info == NULL) {
+        return OSAL_INVALID_POINTER;
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->secure_boot_enforced = esp_secure_boot_enabled();
+    info->flash_encryption_enabled = esp_flash_encryption_enabled();
+#ifdef CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+    info->rollback_enabled = true;
+#endif
+#ifdef CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK
+    info->anti_rollback_enabled = true;
+#endif
+    info->boot_state = s_running_image_boot_state;
     return OSAL_SUCCESS;
 }
 
@@ -171,6 +253,9 @@ osal_status_t osal_ota_begin(const osal_ota_descriptor_t *descriptor)
     }
     if (descriptor->total_size == 0) {
         return OSAL_ERR_INVALID_SIZE;
+    }
+    if (descriptor->total_size < OSAL_OTA_PREFLIGHT_SIZE) {
+        return OSAL_ERR_IMAGE_INVALID;
     }
     if (!osal_ota_is_sha256_algorithm(descriptor->checksum_algorithm)) {
         return OSAL_ERR_INVALID_ARGUMENT;
@@ -216,6 +301,8 @@ osal_status_t osal_ota_begin(const osal_ota_descriptor_t *descriptor)
 
 osal_status_t osal_ota_write(const uint8_t *data, size_t len)
 {
+    size_t staged = 0;
+
     if (!s_ota_ctx.active) {
         return OSAL_ERR_INCORRECT_OBJ_STATE;
     }
@@ -229,7 +316,38 @@ osal_status_t osal_ota_write(const uint8_t *data, size_t len)
         return OSAL_ERR_OUTPUT_TOO_LARGE;
     }
 
-    esp_err_t err = esp_ota_write(s_ota_ctx.handle, data, len);
+    if (!s_ota_ctx.preflight_complete) {
+        size_t needed = OSAL_OTA_PREFLIGHT_SIZE - s_ota_ctx.preflight_size;
+        staged = len < needed ? len : needed;
+        memcpy(s_ota_ctx.preflight + s_ota_ctx.preflight_size, data, staged);
+        s_ota_ctx.preflight_size += staged;
+
+        if (s_ota_ctx.preflight_size < OSAL_OTA_PREFLIGHT_SIZE) {
+            mg_sha256_update(&s_ota_ctx.sha256_ctx, data, len);
+            s_ota_ctx.written_size += len;
+            return OSAL_SUCCESS;
+        }
+
+        osal_status_t status = osal_ota_preflight_image();
+        if (status != OSAL_SUCCESS) {
+            return status;
+        }
+
+        esp_err_t err = esp_ota_write(s_ota_ctx.handle,
+                                      s_ota_ctx.preflight,
+                                      s_ota_ctx.preflight_size);
+        if (err != ESP_OK) {
+            osal_log_error("[osal_ota] preflight write failed: %s",
+                           esp_err_to_name(err));
+            return osal_ota_from_esp_err(err);
+        }
+        s_ota_ctx.preflight_complete = true;
+    }
+
+    esp_err_t err = ESP_OK;
+    if (len > staged) {
+        err = esp_ota_write(s_ota_ctx.handle, data + staged, len - staged);
+    }
     if (err != ESP_OK) {
         osal_log_error("[osal_ota] esp_ota_write failed: %s",
                        esp_err_to_name(err));
@@ -289,6 +407,7 @@ osal_status_t osal_ota_confirm_running_image(void)
     }
 
     s_running_image_pending_confirmation = false;
+    s_running_image_boot_state = OSAL_OTA_BOOT_STATE_VALID;
     osal_log_info("[osal_ota] Running OTA image confirmed");
     return OSAL_SUCCESS;
 }

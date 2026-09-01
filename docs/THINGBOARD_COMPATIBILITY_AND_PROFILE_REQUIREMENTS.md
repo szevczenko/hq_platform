@@ -118,9 +118,17 @@ Recommended state telemetry keys emitted by current implementation:
 - current_fw_title
 - current_fw_version
 
-## Custom OTA Signature Attributes
+## Firmware Authenticity
 
-Signature enforcement is planned but not yet fully implemented as a release requirement. The reserved project-owned attributes are:
+The primary firmware authenticity mechanism is the platform-native signed
+image: ESP Secure Boot application signatures and, in future, MCUboot image
+signatures. `fw_checksum` is calculated over the final signed binary and checks
+transport integrity; it is not an authenticity mechanism.
+
+## Optional Custom OTA Signature Attributes
+
+An additional detached-signature/envelope policy is not currently required.
+The reserved project-owned attributes are:
 
 - fw_signature
 - fw_signature_algorithm

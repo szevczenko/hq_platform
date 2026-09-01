@@ -47,7 +47,9 @@ typedef enum {
     OSAL_ERR_EMPTY_SET               = -44, /**< @brief Lookup returned no results */
     OSAL_FS_ERR_NAME_TOO_LONG        = -45, /**< @brief File name exceeds maximum length */
     OSAL_FS_ERR_PATH_INVALID         = -46, /**< @brief File path is not valid */
-    OSAL_FS_ERR_PATH_TOO_LONG        = -47  /**< @brief File path exceeds maximum length */
+        OSAL_FS_ERR_PATH_TOO_LONG        = -47, /**< @brief File path exceeds maximum length */
+        OSAL_ERR_IMAGE_INVALID            = -48, /**< @brief Firmware image format or native verification failed */
+        OSAL_ERR_SECURITY_VERSION         = -49  /**< @brief Firmware security version is not permitted */
 } osal_status_t;
 
 /**
