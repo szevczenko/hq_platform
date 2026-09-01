@@ -16,13 +16,13 @@ set(HQ_DEFCONFIG "${HQ_REPO_ROOT}/defconfig/esp.defconfig")
 # ESP-IDF only scans the directories listed in EXTRA_COMPONENT_DIRS, so every
 # hq_platform component the application needs — including ones pulled in
 # transitively (osal via wifi/thingsboard, mongoose via osal/thingsboard) —
-# must be listed explicitly.
+# must be listed explicitly.  This fixture does not consume any HAL public
+# API, so src/hal/hq_hal is intentionally not registered here.
 set(EXTRA_COMPONENT_DIRS
   ${HQ_REPO_ROOT}/src/osal
   ${HQ_REPO_ROOT}/src/wifi
   ${HQ_REPO_ROOT}/src/thingsboard
   ${HQ_REPO_ROOT}/src/mongoose
-  ${HQ_REPO_ROOT}/src/hal
 )
 
 include(${HQ_REPO_ROOT}/cmake/configure.cmake)

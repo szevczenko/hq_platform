@@ -1,49 +1,48 @@
-# src/hal/CMakeLists.txt — HAL component (TASK-005)
+# src/hal/CMakeLists.txt — shared HAL build description and host entry point
+# (TASK-005).
 #
-# This is the single build description for the portable HAL.  The same file is
-# consumed directly by ESP-IDF and by the repository's host CMake build.
-# Public headers are target-independent; only one target-specific backend is
-# selected, so host builds never parse ESP-IDF headers and the ESP-IDF public
-# interface never exposes POSIX implementation headers.
+# Collision-free naming: ESP-IDF derives an external component's name from the
+# basename of its component directory.  Registering this `hal` parent directory
+# directly through EXTRA_COMPONENT_DIRS would override the framework `hal`
+# component shipped with ESP-IDF and break its internals, so the ESP-IDF entry
+# point lives in src/hal/hq_hal/, whose basename supplies the collision-free
+# component name `hq_hal`.  That entry point only `include()`s this file, so
+# this description is the single source of truth: one source list, one include
+# list and exactly one registration call; nothing is duplicated in
+# src/hal/hq_hal/CMakeLists.txt.
+#
+# Structure-only scaffold; backend sources are wired by later tasks
+# (TASK-006/TASK-008/TASK-009):
+#   - host/POSIX branch: source-free INTERFACE `hq_hal` target exporting
+#     src/hal/include publicly,
+#   - ESP-IDF branch: source-free, config-only `hq_hal` component exporting
+#     src/hal/include publicly.
+# Only the public include directory is exposed.  Platform-specific backend
+# directories stay private (and are not compiled yet), so host builds never
+# parse ESP-IDF headers and the ESP-IDF public interface never exposes POSIX
+# implementation headers.
 
 set(HAL_PUBLIC_INCLUDES
   ${CMAKE_CURRENT_LIST_DIR}/include
 )
 
 if(ESP_PLATFORM)
-  file(GLOB HAL_PLATFORM_SOURCES
-    ${CMAKE_CURRENT_LIST_DIR}/esp/*.c
-  )
-  set(HAL_PLATFORM_INCLUDES
-    ${CMAKE_CURRENT_LIST_DIR}/esp
-  )
-elseif(CONFIG_HQ_PLATFORM_POSIX)
-  file(GLOB HAL_PLATFORM_SOURCES
-    ${CMAKE_CURRENT_LIST_DIR}/posix/*.c
-  )
-  set(HAL_PLATFORM_INCLUDES
-    ${CMAKE_CURRENT_LIST_DIR}/posix
-  )
-else()
-  message(FATAL_ERROR
-    "HAL: unsupported build configuration. Select CONFIG_HQ_PLATFORM_POSIX "
-    "for host/POSIX builds or build through ESP-IDF (ESP_PLATFORM).")
-endif()
-
-if(ESP_PLATFORM)
-  # The directory name intentionally defines the ESP-IDF component name as
-  # `hal`.  This is the only idf_component_register() call for this component.
+  # ESP-IDF branch.  This file is `include()`d by
+  # src/hal/hq_hal/CMakeLists.txt, so the component name comes from the
+  # hq_hal/ directory basename.  The scaffold is source-free/config-only: it
+  # only propagates the public include directory.  The ESP backend and its
+  # driver dependency are wired in TASK-008/TASK-009.
   idf_component_register(
-    SRCS ${HAL_PLATFORM_SOURCES}
     INCLUDE_DIRS ${HAL_PUBLIC_INCLUDES}
-    PRIV_INCLUDE_DIRS ${HAL_PLATFORM_INCLUDES}
-    PRIV_REQUIRES driver
   )
 else()
-  # Keep the repository's established host target name and architecture.
-  add_library(hq_hal STATIC ${HAL_PLATFORM_SOURCES})
+  # Host/POSIX branch.  Structure-only scaffold: `hq_hal` is an INTERFACE
+  # library that exports only the public include directory.  It is source-free
+  # so the scaffold configures and builds independently of the backend
+  # implementation; the POSIX backend sources are wired into this target in
+  # TASK-006.
+  add_library(hq_hal INTERFACE)
   target_include_directories(hq_hal
-    PUBLIC ${HAL_PUBLIC_INCLUDES}
-    PRIVATE ${HAL_PLATFORM_INCLUDES}
+    INTERFACE ${HAL_PUBLIC_INCLUDES}
   )
 endif()

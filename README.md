@@ -66,7 +66,11 @@ collection of ESP-IDF components. The components live under `src/`: one
 self-contained ESP-IDF component per subdirectory (`src/osal`, `src/cmd`,
 ...), each registered with `idf_component_register()` from its own
 `CMakeLists.txt`. (`src/protocols/` is not an ESP-IDF component and is not
-part of the build.) Downstream projects point ESP-IDF at those component
+part of the build. `src/hal` is the one exception: because ESP-IDF derives
+the component name from the directory basename and `hal` already names a
+framework component, the HAL's ESP-IDF entry point is the `src/hal/hq_hal/`
+subdirectory, whose basename supplies the collision-free name `hq_hal`.)
+Downstream projects point ESP-IDF at those component
 directories via `EXTRA_COMPONENT_DIRS`; they never copy `hq_platform` source
 files into their own tree.
 
@@ -80,7 +84,7 @@ files into their own tree.
 | `src/wifi` | `wifi` | Wi-Fi management |
 | `src/wifi_provisioning` | `wifi_provisioning` | Wi-Fi HTTP provisioning (optional) |
 | `src/thingsboard` | `thingsboard` | ThingsBoard client |
-| `src/hal` | `hal` | Hardware abstraction layer. On ESP-IDF it is registered directly from `src/hal` as `hal`; on host/POSIX builds it is the `hq_hal` static library from `src/hal`. Public API: `src/hal/include` |
+| `src/hal/hq_hal` | `hq_hal` | Hardware abstraction layer. Public API: `src/hal/include`. The ESP-IDF component entry point is `src/hal/hq_hal/` (its basename supplies the collision-free component name `hq_hal` — registering `src/hal` directly would override the framework `hal` component); on host/POSIX builds the shared `src/hal/CMakeLists.txt` builds the `hq_hal` target |
 | `cmake/configure.cmake` | — | Generates `hq_config.h` / `hq_config.cmake` from Kconfig + defconfig |
 | `cmake/esp.cmake`, `cmake/modules.cmake` | — | ESP platform flags and vendored-library paths |
 | `defconfig/*.defconfig` | — | hq_platform configuration presets |
@@ -173,7 +177,7 @@ set(EXTRA_COMPONENT_DIRS
   ${HQ_REPO_ROOT}/src/wifi             # only if needed
   ${HQ_REPO_ROOT}/src/wifi_provisioning  # only if needed
   ${HQ_REPO_ROOT}/src/thingsboard      # only if needed
-  ${HQ_REPO_ROOT}/src/hal              # only if needed
+  ${HQ_REPO_ROOT}/src/hal/hq_hal       # only if needed
 )
 ```
 
