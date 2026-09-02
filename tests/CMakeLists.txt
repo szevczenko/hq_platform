@@ -19,6 +19,142 @@ if(NOT ESP_PLATFORM)
   set(HQ_SANITIZE_RUNTIME_DIR "" CACHE STRING
       "Optional dir with sanitizer runtime libs (libasan.so, libubsan.so, libtsan.so + SONAME links)")
 
+  # ---- HAL public API contract tests (TASK-004) ----
+  # Header-only contract test.  The public HAL API is the normative contract
+  # for the GPIO/PWM backends (TASK-005..TASK-010), which do not exist yet,
+  # so this target compiles the public headers standalone on the host
+  # (proving they are self-contained, valid C and free of target-specific
+  # includes) and validates the documented portable types and constants.
+  add_executable(hal_api_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_api_test.c
+  )
+
+  target_include_directories(hal_api_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+  )
+
+  target_compile_options(hal_api_tests PRIVATE -Wall -Wextra -Werror -Wpedantic)
+
+  target_link_libraries(hal_api_tests
+    unity
+  )
+
+  add_test(NAME hal_api_tests COMMAND hal_api_tests)
+  set_tests_properties(hal_api_tests PROPERTIES LABELS "unit;hal")
+
+  message(STATUS "Tests: Building HAL API contract test (hal_api_tests)")
+
+  # ---- HAL POSIX backend tests (TASK-005/TASK-006) ----
+  # Exercises the real POSIX GPIO/PWM backends (src/hal/posix) against the
+  # portable contract: argument/pin validation, the non-idempotent
+  # init/write/read/deinit lifecycle, logical-value round trips for both
+  # active polarities, and PWM duty-cycle range checks (including NaN/inf).
+  # TASK-006 turned hq_hal into the STATIC host library that compiles the
+  # POSIX backend sources; linking it verifies that the host library is
+  # discovered by the POSIX build, exports src/hal/include as its public
+  # include directory, and provides the portable GPIO/PWM symbols.  The POSIX
+  # backend directory is exposed directly to tests so the host-only inspection
+  # API (hal_posix_inspect.h) can be used to verify backend state.
+  add_executable(hal_posix_backend_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_posix_backend_test.c
+  )
+
+  target_include_directories(hal_posix_backend_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/posix
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_link_libraries(hal_posix_backend_tests
+    hq_hal
+    unity
+  )
+
+  add_test(NAME hal_posix_backend_tests COMMAND hal_posix_backend_tests)
+  set_tests_properties(hal_posix_backend_tests PROPERTIES LABELS "unit;hal")
+
+  message(STATUS "Tests: Building HAL POSIX backend test (hal_posix_backend_tests)")
+
+  # ---- HAL API contract host unit tests (TASK-007) ----
+  # Host unit tests validating the portable HAL contract against the real
+  # POSIX GPIO/PWM backends.  Like hal_posix_backend_tests they link the
+  # static host library `hq_hal` and reach into the POSIX backend directory
+  # for the host/test-only inspection helpers (hal_posix_inspect.h) so the
+  # raw electrical polarity behavior (TASK-004 truth table) can be asserted
+  # directly.  They run entirely on the host and need neither ESP-IDF nor
+  # physical ESP hardware.
+  add_executable(test_hal
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_hal.c
+  )
+
+  target_include_directories(test_hal
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/posix
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_compile_options(test_hal PRIVATE -Wall -Wextra -Werror -Wpedantic)
+
+  target_link_libraries(test_hal
+    hq_hal
+    unity
+  )
+
+  add_test(NAME test_hal COMMAND test_hal)
+  set_tests_properties(test_hal PROPERTIES LABELS "unit;hal")
+
+  message(STATUS "Tests: Building HAL API contract host test (test_hal)")
+
+  # ---- HAL ESP PWM backend tests against an LEDC driver test double (TASK-009) ----
+  # Compiles the real ESP-IDF PWM backend (src/hal/esp/hal_pwm_esp.c) on the
+  # host against a test double of the legacy LEDC/GPIO driver surface
+  # (tests/hal_esp/mock + ledc_mock.c) so the runtime contract of TASK-009
+  # can be verified without ESP hardware.  The same test is built four
+  # times with different simulated ESP-IDF versions (5.0, 5.1, 5.3 and 5.5),
+  # proving that the version guards around
+  # ledc_timer_config_t.deconfigure (ESP-IDF >= 5.2) and
+  # ledc_channel_config_t.sleep_mode (ESP-IDF >= 5.4) compile for every
+  # supported release line, and that the backend never becomes part of the
+  # host `hq_hal` target (it is compiled directly into these test binaries).
+  set(HAL_ESP_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/hal_esp)
+  set(HAL_ESP_MOCK_DIR ${HAL_ESP_TEST_DIR}/mock)
+
+  foreach(idf_version IN ITEMS "5.0" "5.1" "5.3" "5.5")
+    string(REPLACE "." ";" idf_version_parts "${idf_version}")
+    list(GET idf_version_parts 0 idf_major)
+    list(GET idf_version_parts 1 idf_minor)
+    set(test_name "hal_pwm_esp_tests_idf${idf_major}${idf_minor}")
+
+    add_executable(${test_name}
+      ${HAL_ESP_TEST_DIR}/hal_pwm_esp_test.c
+      ${HAL_ESP_TEST_DIR}/ledc_mock.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/esp/hal_pwm_esp.c
+    )
+
+    target_include_directories(${test_name}
+      PRIVATE ${HAL_ESP_MOCK_DIR}
+      PRIVATE ${HAL_ESP_TEST_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+    )
+
+    target_compile_definitions(${test_name} PRIVATE
+      HAL_PWM_MOCK_IDF_MAJOR=${idf_major}
+      HAL_PWM_MOCK_IDF_MINOR=${idf_minor}
+    )
+
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror -Wpedantic)
+
+    target_link_libraries(${test_name}
+      unity
+    )
+
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    set_tests_properties(${test_name} PROPERTIES LABELS "unit;hal")
+
+    message(STATUS "Tests: Building HAL ESP PWM backend test (${test_name}, IDF ${idf_major}.${idf_minor})")
+  endforeach()
+
   # POSIX platform: unified test application
   add_executable(osal_tests
     ${HQ_COMMON_TEST_RUNNER}

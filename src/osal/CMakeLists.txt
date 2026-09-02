@@ -45,9 +45,14 @@ endif()
 set(OSAL_ALL_SOURCES ${OSAL_COMMON_SOURCES} ${OSAL_PLATFORM_SOURCES} ${OSAL_LITTLEFS_SOURCES})
 
 if(ESP_PLATFORM)
+  # The platform implementation headers (osal_impl_*.h) are included from the
+  # public OSAL headers and expose FreeRTOS handle types, so `freertos` is a
+  # public (REQUIRES) dependency.  Everything else is used only by the
+  # implementation and stays private (PRIV_REQUIRES).
   idf_component_register(SRCS ${OSAL_ALL_SOURCES}
                          INCLUDE_DIRS ${OSAL_PUBLIC_INCLUDES} ${OSAL_PLATFORM_INCLUDES}
-                         REQUIRES app_update bootloader_support efuse esp_app_format esp_partition vfs spi_flash mongoose
+                         REQUIRES freertos
+                         PRIV_REQUIRES app_update bootloader_support efuse esp_app_format esp_partition vfs spi_flash mongoose
                          KCONFIG ${COMPONENT_DIR}/esp/littlefs_impl/Kconfig)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE LFS_CONFIG=lfs_config.h)
 else()

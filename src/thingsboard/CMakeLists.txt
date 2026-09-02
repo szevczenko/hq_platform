@@ -13,9 +13,12 @@ set(TB_SOURCES
 )
 
 if(ESP_PLATFORM)
+  # The ThingsBoard public headers expose only opaque handles and standard
+  # types; osal, mongoose and json (cJSON) are used solely by the
+  # implementation, so they are declared as private requirements.
   idf_component_register(SRCS ${TB_SOURCES}
                          INCLUDE_DIRS ${TB_PUBLIC_INCLUDES}
-                         REQUIRES osal mongoose json)
+                         PRIV_REQUIRES osal mongoose json)
 else()
   add_library(hq_thingsboard STATIC ${TB_SOURCES})
 

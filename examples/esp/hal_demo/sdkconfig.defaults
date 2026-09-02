@@ -1,0 +1,6 @@
+# Default pins for the portable HAL demo.  These pads are output-capable and
+# not reserved on the repository's reference ESP32 target; override them with
+# `idf.py menuconfig` ("HAL demo configuration") or in your own
+# sdkconfig.defaults to match your board.
+CONFIG_HAL_DEMO_GPIO_PIN=4
+CONFIG_HAL_DEMO_PWM_PIN=2
