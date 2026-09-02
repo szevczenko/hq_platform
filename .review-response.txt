@@ -1,0 +1,34 @@
+ISSUE 1 (HIGH src/hal/esp/hal_pwm_esp.c:284): The failure path ignores both rollback results and unconditionally marks a freshly configured timer free. If ledc_timer_pause() or the deconfiguration ledc_timer_config() call fails, the LEDC timer remains configured/owned in hardware while the software allocator can reuse it, violating the required failure-atomic initialization and potentially causing later resource conflicts.
+STATUS: FIXED
+COMMENT: The ledc_channel_config() failure path in hal_pwm_init() no longer
+ignores the cleanup results.  It now calls ledc_timer_pause() and then
+ledc_timer_config(deconfigure=true), and checks both return values via a new
+hal_pwm_esp_map_err() helper.  Only when both cleanup steps succeed is the
+fresh timer's allocator record cleared (in_use=false, frequency_hz=0).  If the
+pause or the deconfiguration fails, the rollback is considered incomplete and
+the timer record is preserved as owned (in_use=true, frequency_hz set to the
+requested frequency, which is what the hardware is actually configured to), so
+a later hal_pwm_init() can never reuse a timer the hardware still controls,
+and the mapped rollback error is returned.  The channel record was never
+committed, so no channel is leaked either.
+
+ISSUE 2 (HIGH src/hal/esp/hal_pwm_esp.c:404): The return value of gpio_reset_pin() is discarded. A GPIO reset failure is therefore reported as successful deinitialization, even though the output routing/pin resource was not released, and the HAL does not map this ESP-IDF error to hal_status_t.
+STATUS: FIXED
+COMMENT: hal_pwm_deinit() now checks the gpio_reset_pin() return value and
+maps any failure through hal_pwm_esp_map_err() (HAL_ERR_INTERNAL for
+unexpected failures).  The channel/timer allocator records are only cleared
+after the GPIO reset succeeded: on failure the pin stays initialized and the
+ownership state stays consistent with the hardware, so a later
+hal_pwm_deinit() retry can complete the teardown.
+
+ISSUE 3 (HIGH src/hal/esp/hal_pwm_esp.c:423): When the last channel using a timer is deinitialized, the code only clears its software bookkeeping; it never calls ledc_timer_config() with deconfigure=true. Consequently the LEDC timer and its clock configuration remain allocated/running in the ESP-IDF driver, so hardware resources are not actually released as required.
+STATUS: FIXED
+COMMENT: hal_pwm_deinit() now, after confirming no remaining channel still
+references the timer, pauses the timer with ledc_timer_pause() and then calls
+ledc_timer_config() with deconfigure=true (matching the ESP-IDF requirement
+that a timer must be paused before it can be deconfigured).  Both results are
+checked and mapped through hal_pwm_esp_map_err().  Only after the timer is
+really deconfigured is its allocator record cleared; if the pause or the
+deconfiguration fails, the record is preserved (the timer is still owned by
+the LEDC driver), so a later hal_pwm_init() can never reconfigure a timer the
+hardware still controls.

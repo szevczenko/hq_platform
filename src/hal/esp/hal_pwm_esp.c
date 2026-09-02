@@ -27,7 +27,14 @@
  *   - init/deinit are not idempotent and return the documented errors,
  *   - resource allocation is failure-atomic: no timer or channel is marked
  *     owned until every hardware configuration step has succeeded, and a
- *     failed init rolls back any provisionally configured timer,
+ *     failed init rolls back any provisionally configured timer.  The
+ *     rollback itself is verified: the allocator record is only cleared
+ *     after the timer was really paused and deconfigured, and if the
+ *     rollback cannot complete the timer ownership is preserved so a later
+ *     init can never reuse a timer the hardware still controls,
+ *   - deinit releases every resource: the channel is stopped, the pad is
+ *     reset, and a timer that is no longer referenced by any channel is
+ *     paused and deconfigured before its allocator record is cleared,
  *   - every ESP-IDF esp_err_t result is mapped to the portable hal_status_t
  *     result type.
  *
@@ -158,6 +165,30 @@ static uint32_t hal_pwm_esp_duty_to_ticks(float duty_percent)
                       (float)HAL_PWM_ESP_DUTY_PERIOD);
 }
 
+static hal_status_t hal_pwm_esp_map_err(esp_err_t err)
+{
+    /* Every LEDC/GPIO call below is made against pre-validated allocator
+     * state, so in practice the driver only fails on internal or
+     * environmental problems.  Map the error classes the LEDC driver
+     * documents to the closest portable code and report everything else as
+     * an unexpected backend failure.  In particular ESP_FAIL is what the
+     * LEDC timer configuration returns when no clock source/divider can
+     * produce the requested frequency at the selected duty resolution: the
+     * portable result is HAL_ERR_NOT_SUPPORTED. */
+    switch (err) {
+    case ESP_OK:
+        return HAL_OK;
+    case ESP_ERR_INVALID_ARG:
+        return HAL_ERR_INVALID_ARGUMENT;
+    case ESP_ERR_NOT_SUPPORTED:
+        return HAL_ERR_NOT_SUPPORTED;
+    case ESP_FAIL:
+        return HAL_ERR_NOT_SUPPORTED;
+    default:
+        return HAL_ERR_INTERNAL;
+    }
+}
+
 hal_status_t hal_pwm_init(const hal_pwm_config_t *config)
 {
     hal_pwm_esp_channel_t *ch = NULL;
@@ -244,17 +275,13 @@ hal_status_t hal_pwm_init(const hal_pwm_config_t *config)
 
         err = ledc_timer_config(&timer_conf);
         if (err != ESP_OK) {
-            /* ESP_FAIL means no clock source/divider produces the requested
-             * frequency at the fixed duty resolution: the portable result
-             * is HAL_ERR_NOT_SUPPORTED.  Everything else is unexpected
-             * because every argument was pre-validated. */
-            if (err == ESP_FAIL) {
-                return HAL_ERR_NOT_SUPPORTED;
-            }
-            if (err == ESP_ERR_INVALID_ARG) {
-                return HAL_ERR_INVALID_ARGUMENT;
-            }
-            return HAL_ERR_INTERNAL;
+            /* The realistic failure here is ESP_FAIL, returned when no clock
+             * source/divider produces the requested frequency at the fixed
+             * duty resolution; the mapping helper turns that into
+             * HAL_ERR_NOT_SUPPORTED.  In that case the driver aborts before
+             * configuring the timer hardware, so nothing needs to be rolled
+             * back and the allocator record stays free. */
+            return hal_pwm_esp_map_err(err);
         }
     }
 
@@ -279,19 +306,43 @@ hal_status_t hal_pwm_init(const hal_pwm_config_t *config)
     err = ledc_channel_config(&channel_conf);
     if (err != ESP_OK) {
         if (timer_fresh) {
-            /* Deconfiguring a timer requires it to be paused first, so pause
-             * then deconfigure the provisionally created timer.  Cleanup
-             * errors are ignored because the channel configuration error is
-             * the API failure; importantly, the software allocator is rolled
-             * back either way, so no resource leaks and a later
-             * hal_pwm_init() may reconfigure the same timer. */
-            (void)ledc_timer_pause(HAL_PWM_ESP_SPEED_MODE, timer_num);
-            timer_conf.deconfigure = true;
-            (void)ledc_timer_config(&timer_conf);
+            /* The freshly configured timer must be rolled back before this
+             * init can fail: otherwise the LEDC timer would stay configured
+             * and running in hardware while the software allocator still
+             * considers it free, and a later hal_pwm_init() could reconfigure
+             * it underneath the still-active peripheral.  Deconfiguring an
+             * LEDC timer requires it to be paused first, so pause and then
+             * deconfigure it.  Both cleanup steps must succeed before the
+             * timer is advertised as free; if the rollback cannot complete,
+             * the allocator record is preserved so the resource is never
+             * handed out twice. */
+            hal_status_t rollback_status = HAL_OK;
+            esp_err_t cleanup_err;
+
+            cleanup_err = ledc_timer_pause(HAL_PWM_ESP_SPEED_MODE, timer_num);
+            if (cleanup_err == ESP_OK) {
+                timer_conf.deconfigure = true;
+                cleanup_err = ledc_timer_config(&timer_conf);
+            }
+            if (cleanup_err != ESP_OK) {
+                rollback_status = hal_pwm_esp_map_err(cleanup_err);
+            }
+
+            if (rollback_status != HAL_OK) {
+                /* The timer is still configured in hardware: preserve the
+                 * ownership record with its real frequency so a later
+                 * hal_pwm_init() at the same frequency may still share it,
+                 * and no init can ever reuse a timer the hardware still
+                 * controls. */
+                s_timers[timer_num].in_use = true;
+                s_timers[timer_num].frequency_hz = config->frequency_hz;
+                return rollback_status;
+            }
+
             s_timers[timer_num].in_use = false;
             s_timers[timer_num].frequency_hz = 0U;
         }
-        return HAL_ERR_INTERNAL;
+        return hal_pwm_esp_map_err(err);
     }
 
     /* Commit timer ownership only after the channel has been configured. */
@@ -333,7 +384,7 @@ hal_status_t hal_pwm_set_duty(hal_pin_t pin_id, float duty_percent)
         err = ledc_stop(HAL_PWM_ESP_SPEED_MODE, ch->channel,
                         hal_pwm_esp_active_level(ch));
         if (err != ESP_OK) {
-            return HAL_ERR_INTERNAL;
+            return hal_pwm_esp_map_err(err);
         }
         ch->stopped = true;
         return HAL_OK;
@@ -342,13 +393,13 @@ hal_status_t hal_pwm_set_duty(hal_pin_t pin_id, float duty_percent)
     err = ledc_set_duty(HAL_PWM_ESP_SPEED_MODE, ch->channel,
                         hal_pwm_esp_duty_to_ticks(duty_percent));
     if (err != ESP_OK) {
-        return HAL_ERR_INTERNAL;
+        return hal_pwm_esp_map_err(err);
     }
     /* ledc_update_duty() also re-enables a channel previously stopped by
      * hal_pwm_force_inactive() or the 100% endpoint handling. */
     err = ledc_update_duty(HAL_PWM_ESP_SPEED_MODE, ch->channel);
     if (err != ESP_OK) {
-        return HAL_ERR_INTERNAL;
+        return hal_pwm_esp_map_err(err);
     }
     ch->stopped = false;
 
@@ -373,7 +424,7 @@ hal_status_t hal_pwm_force_inactive(hal_pin_t pin_id)
     err = ledc_stop(HAL_PWM_ESP_SPEED_MODE, ch->channel,
                     hal_pwm_esp_inactive_level(ch));
     if (err != ESP_OK) {
-        return HAL_ERR_INTERNAL;
+        return hal_pwm_esp_map_err(err);
     }
     ch->stopped = true;
 
@@ -383,8 +434,10 @@ hal_status_t hal_pwm_force_inactive(hal_pin_t pin_id)
 hal_status_t hal_pwm_deinit(hal_pin_t pin_id)
 {
     hal_pwm_esp_channel_t *ch;
+    ledc_timer_config_t timer_conf;
     ledc_timer_t timer_num;
     esp_err_t err;
+    bool timer_shared = false;
     size_t i;
 
     if (!hal_pwm_esp_is_valid_pin(pin_id)) {
@@ -395,16 +448,27 @@ hal_status_t hal_pwm_deinit(hal_pin_t pin_id)
         return HAL_ERR_NOT_INITIALIZED;
     }
 
-    /* Stop the channel at the logical INACTIVE level and release the pad. */
+    /* Stop the channel at the logical INACTIVE level.  On failure nothing is
+     * released and the pin stays initialized, so a later hal_pwm_deinit()
+     * retry can complete the teardown. */
     err = ledc_stop(HAL_PWM_ESP_SPEED_MODE, ch->channel,
                     hal_pwm_esp_inactive_level(ch));
     if (err != ESP_OK) {
-        return HAL_ERR_INTERNAL;
+        return hal_pwm_esp_map_err(err);
     }
-    gpio_reset_pin((gpio_num_t)ch->pin);
 
     timer_num = ch->timer;
 
+    /* Release the pad.  The channel/timer allocator records are only cleared
+     * after every hardware cleanup step succeeded: on a GPIO reset failure the
+     * pin stays initialized (and therefore still owned), so the software state
+     * never claims a resource the hardware has not actually released. */
+    err = gpio_reset_pin((gpio_num_t)ch->pin);
+    if (err != ESP_OK) {
+        return hal_pwm_esp_map_err(err);
+    }
+
+    /* The channel resources are released; free the per-channel record. */
     ch->in_use = false;
     ch->pin = HAL_PIN_NONE;
     ch->polarity = HAL_POLARITY_ACTIVE_HIGH;
@@ -413,13 +477,40 @@ hal_status_t hal_pwm_deinit(hal_pin_t pin_id)
     ch->channel = LEDC_CHANNEL_0;
     ch->timer = LEDC_TIMER_0;
 
-    /* Free the timer if no remaining channel still uses it, so a later
-     * hal_pwm_init() with a different frequency can reconfigure it freely. */
+    /* If another channel still uses the timer it must keep running, so only
+     * the channel part is released and the timer record stays untouched. */
     for (i = 0U; i < HAL_PWM_ESP_CHANNEL_COUNT; ++i) {
         if (s_channels[i].in_use && s_channels[i].timer == timer_num) {
-            return HAL_OK; /* timer is still shared */
+            timer_shared = true;
+            break;
         }
     }
+    if (timer_shared) {
+        return HAL_OK;
+    }
+
+    /* The timer is no longer referenced by any channel: pause and deconfigure
+     * it in hardware, and only then clear its allocator record.  If either
+     * step fails the LEDC timer is still configured/owned by the hardware, so
+     * the record is preserved and a later hal_pwm_init() can never reconfigure
+     * a timer that is still controlled by the LEDC driver. */
+    err = ledc_timer_pause(HAL_PWM_ESP_SPEED_MODE, timer_num);
+    if (err != ESP_OK) {
+        return hal_pwm_esp_map_err(err);
+    }
+
+    timer_conf.speed_mode = HAL_PWM_ESP_SPEED_MODE;
+    timer_conf.duty_resolution = HAL_PWM_ESP_DUTY_RESOLUTION;
+    timer_conf.timer_num = timer_num;
+    timer_conf.freq_hz = s_timers[timer_num].frequency_hz;
+    timer_conf.clk_cfg = LEDC_AUTO_CLK;
+    timer_conf.deconfigure = true;
+
+    err = ledc_timer_config(&timer_conf);
+    if (err != ESP_OK) {
+        return hal_pwm_esp_map_err(err);
+    }
+
     s_timers[timer_num].in_use = false;
     s_timers[timer_num].frequency_hz = 0U;
 
