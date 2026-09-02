@@ -21,10 +21,13 @@
  * (logical INACTIVE) and hal_pwm_force_inactive() retains the last duty
  * value so a later hal_pwm_set_duty() resumes normal generation.
  *
- * The host/test-only inspection helper hal_posix_pwm_get_duty() (see
- * hal_posix_inspect.h) exposes the stored normalized duty cycle so unit tests
- * can verify that every public API operation is reflected in the backend
- * state, including the duty value retained across hal_pwm_force_inactive().
+ * The host/test-only inspection helpers (see hal_posix_inspect.h)
+ * hal_posix_pwm_get_duty(), hal_posix_pwm_get_frequency() and
+ * hal_posix_pwm_get_output_state() expose the stored normalized duty cycle
+ * (including the duty value retained across hal_pwm_force_inactive()), the
+ * configured frequency and the driven raw output level / generation state so
+ * unit tests can verify that every public API operation is reflected in the
+ * backend state.
  */
 
 #include <stdbool.h>
@@ -58,6 +61,15 @@ static bool hal_pwm_posix_is_valid_duty(float duty_percent)
     /* NaN fails both comparisons; +-inf fail the upper/lower bound. */
     return (duty_percent >= HAL_PWM_DUTY_MIN_PERCENT) &&
            (duty_percent <= HAL_PWM_DUTY_MAX_PERCENT);
+}
+
+/* Derive the raw electrical level for a logical output state and the given
+ * active polarity (the same TASK-004 conversion the GPIO backend uses). */
+static int hal_pwm_posix_raw_for_logical(hal_polarity_t polarity, bool active)
+{
+    const bool invert = (polarity == HAL_POLARITY_ACTIVE_LOW);
+
+    return (active != invert) ? 1 : 0;
 }
 
 hal_status_t hal_pwm_init(const hal_pwm_config_t *config)
@@ -172,6 +184,55 @@ hal_status_t hal_posix_pwm_get_duty(hal_pin_t pin_id, float *duty_percent)
     }
 
     *duty_percent = pin->duty_percent;
+
+    return HAL_OK;
+}
+
+hal_status_t hal_posix_pwm_get_frequency(hal_pin_t pin_id, uint32_t *frequency_hz)
+{
+    hal_pwm_posix_pin_t *pin;
+
+    if (frequency_hz == NULL) {
+        return HAL_ERR_INVALID_ARGUMENT;
+    }
+    if (!hal_pwm_posix_is_valid_pin(pin_id)) {
+        return HAL_ERR_INVALID_PIN;
+    }
+    pin = &s_pins[pin_id];
+    if (!pin->initialized) {
+        return HAL_ERR_NOT_INITIALIZED;
+    }
+
+    *frequency_hz = pin->frequency_hz;
+
+    return HAL_OK;
+}
+
+hal_status_t hal_posix_pwm_get_output_state(hal_pin_t pin_id, int *raw_level,
+                                            bool *generating)
+{
+    hal_pwm_posix_pin_t *pin;
+    bool active;
+
+    if ((raw_level == NULL) || (generating == NULL)) {
+        return HAL_ERR_INVALID_ARGUMENT;
+    }
+    if (!hal_pwm_posix_is_valid_pin(pin_id)) {
+        return HAL_ERR_INVALID_PIN;
+    }
+    pin = &s_pins[pin_id];
+    if (!pin->initialized) {
+        return HAL_ERR_NOT_INITIALIZED;
+    }
+
+    *generating = !pin->forced_inactive;
+
+    /* While generation is halted (forced inactive) or the duty is 0.0%, the
+     * simulated line is held at the logical INACTIVE level.  With generation
+     * running and a non-zero duty the line is at the logical ACTIVE level
+     * (the active phase of the PWM cycle). */
+    active = (*generating) && (pin->duty_percent > HAL_PWM_DUTY_MIN_PERCENT);
+    *raw_level = hal_pwm_posix_raw_for_logical(pin->polarity, active);
 
     return HAL_OK;
 }

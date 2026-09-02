@@ -236,3 +236,23 @@ hal_status_t hal_posix_gpio_get_raw_state(hal_pin_t pin_id, int *raw_level)
 
     return HAL_OK;
 }
+
+hal_status_t hal_posix_gpio_get_pull(hal_pin_t pin_id, hal_gpio_pull_t *pull)
+{
+    hal_gpio_posix_pin_t *pin;
+
+    if (pull == NULL) {
+        return HAL_ERR_INVALID_ARGUMENT;
+    }
+    if (!hal_gpio_posix_is_valid_pin(pin_id)) {
+        return HAL_ERR_INVALID_PIN;
+    }
+    pin = &s_pins[pin_id];
+    if (!pin->initialized) {
+        return HAL_ERR_NOT_INITIALIZED;
+    }
+
+    *pull = pin->pull;
+
+    return HAL_OK;
+}

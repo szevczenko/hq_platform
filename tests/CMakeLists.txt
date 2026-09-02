@@ -75,6 +75,36 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building HAL POSIX backend test (hal_posix_backend_tests)")
 
+  # ---- HAL API contract host unit tests (TASK-007) ----
+  # Host unit tests validating the portable HAL contract against the real
+  # POSIX GPIO/PWM backends.  Like hal_posix_backend_tests they link the
+  # static host library `hq_hal` and reach into the POSIX backend directory
+  # for the host/test-only inspection helpers (hal_posix_inspect.h) so the
+  # raw electrical polarity behavior (TASK-004 truth table) can be asserted
+  # directly.  They run entirely on the host and need neither ESP-IDF nor
+  # physical ESP hardware.
+  add_executable(test_hal
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_hal.c
+  )
+
+  target_include_directories(test_hal
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/posix
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_compile_options(test_hal PRIVATE -Wall -Wextra -Werror -Wpedantic)
+
+  target_link_libraries(test_hal
+    hq_hal
+    unity
+  )
+
+  add_test(NAME test_hal COMMAND test_hal)
+  set_tests_properties(test_hal PROPERTIES LABELS "unit;hal")
+
+  message(STATUS "Tests: Building HAL API contract host test (test_hal)")
+
   # POSIX platform: unified test application
   add_executable(osal_tests
     ${HQ_COMMON_TEST_RUNNER}
