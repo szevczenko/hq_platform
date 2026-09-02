@@ -46,6 +46,8 @@ jobs:
         idf_target: [esp32]
         project:
           - examples/esp/cmd_demo
+          - examples/esp/external_consumer_demo
+          - examples/esp/hal_demo
           - examples/esp/osal_demo
           - examples/esp/thingboard_attributes_demo
           - examples/esp/thingboard_claim_demo
@@ -55,6 +57,7 @@ jobs:
           - examples/esp/thingboard_rpc_demo
           - examples/esp/thingboard_telemetry_attributes_demo
           - examples/esp/thingboard_tls_demo
+          - examples/esp/wifi_provisioning_demo
           - tests/platform/esp
 
     steps:
