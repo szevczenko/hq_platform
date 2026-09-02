@@ -1,0 +1,24 @@
+menu "HAL demo configuration"
+
+config HAL_DEMO_GPIO_PIN
+    int "GPIO pin driven by the HAL demo"
+    default 4
+    help
+      Physical GPIO pad driven by the demo through the portable HAL GPIO API
+      (hal_gpio_init/hal_gpio_write/hal_gpio_deinit).  The value is the pad
+      number on the target SoC; the portable HAL treats it as an opaque
+      hal_pin_t and never assumes a specific pad.  Select a free pad on your
+      board.  The default targets the repository's reference ESP32 target.
+
+config HAL_DEMO_PWM_PIN
+    int "PWM pin driven by the HAL demo"
+    default 18
+    help
+      Physical pad driven by the demo through the portable HAL PWM API
+      (hal_pwm_init/hal_pwm_set_duty/hal_pwm_force_inactive/hal_pwm_deinit).
+      The value is the pad number on the target SoC; the portable HAL treats
+      it as an opaque hal_pin_t and never assumes a specific pad.  Select a
+      free output-capable pad on your board.  The default targets the
+      repository's reference ESP32 target.
+
+endmenu
