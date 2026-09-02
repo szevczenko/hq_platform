@@ -44,22 +44,24 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building HAL API contract test (hal_api_tests)")
 
-  # ---- HAL POSIX backend tests (TASK-005) ----
+  # ---- HAL POSIX backend tests (TASK-005/TASK-006) ----
   # Exercises the real POSIX GPIO/PWM backends (src/hal/posix) against the
   # portable contract: argument/pin validation, the non-idempotent
   # init/write/read/deinit lifecycle, logical-value round trips for both
   # active polarities, and PWM duty-cycle range checks (including NaN/inf).
-  # TASK-005 keeps the hq_hal component a source-free INTERFACE scaffold
-  # (the POSIX backend is wired back into hq_hal in TASK-006), so the backend
-  # sources are compiled directly into this test executable.  Linking hq_hal
-  # still verifies that the host library is discovered by the POSIX build and
-  # exports src/hal/include as its public include directory.
+  # TASK-006 turned hq_hal into the STATIC host library that compiles the
+  # POSIX backend sources; linking it verifies that the host library is
+  # discovered by the POSIX build, exports src/hal/include as its public
+  # include directory, and provides the portable GPIO/PWM symbols.  The POSIX
+  # backend directory is exposed directly to tests so the host-only inspection
+  # API (hal_posix_inspect.h) can be used to verify backend state.
   add_executable(hal_posix_backend_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/hal/hal_posix_backend_test.c
   )
 
   target_include_directories(hal_posix_backend_tests
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/posix
     PRIVATE ${HQ_CONFIG_DIR}
   )
 
