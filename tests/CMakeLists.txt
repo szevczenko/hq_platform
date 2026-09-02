@@ -105,6 +105,56 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building HAL API contract host test (test_hal)")
 
+  # ---- HAL ESP PWM backend tests against an LEDC driver test double (TASK-009) ----
+  # Compiles the real ESP-IDF PWM backend (src/hal/esp/hal_pwm_esp.c) on the
+  # host against a test double of the legacy LEDC/GPIO driver surface
+  # (tests/hal_esp/mock + ledc_mock.c) so the runtime contract of TASK-009
+  # can be verified without ESP hardware.  The same test is built four
+  # times with different simulated ESP-IDF versions (5.0, 5.1, 5.3 and 5.5),
+  # proving that the version guards around
+  # ledc_timer_config_t.deconfigure (ESP-IDF >= 5.2) and
+  # ledc_channel_config_t.sleep_mode (ESP-IDF >= 5.4) compile for every
+  # supported release line, and that the backend never becomes part of the
+  # host `hq_hal` target (it is compiled directly into these test binaries).
+  set(HAL_ESP_TEST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/hal_esp)
+  set(HAL_ESP_MOCK_DIR ${HAL_ESP_TEST_DIR}/mock)
+
+  foreach(idf_version IN ITEMS "5.0" "5.1" "5.3" "5.5")
+    string(REPLACE "." ";" idf_version_parts "${idf_version}")
+    list(GET idf_version_parts 0 idf_major)
+    list(GET idf_version_parts 1 idf_minor)
+    set(test_name "hal_pwm_esp_tests_idf${idf_major}${idf_minor}")
+
+    add_executable(${test_name}
+      ${HAL_ESP_TEST_DIR}/hal_pwm_esp_test.c
+      ${HAL_ESP_TEST_DIR}/ledc_mock.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/esp/hal_pwm_esp.c
+    )
+
+    target_include_directories(${test_name}
+      PRIVATE ${HAL_ESP_MOCK_DIR}
+      PRIVATE ${HAL_ESP_TEST_DIR}
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/hal/include
+      PRIVATE ${HQ_CONFIG_DIR}
+    )
+
+    target_compile_definitions(${test_name} PRIVATE
+      HAL_PWM_MOCK_IDF_MAJOR=${idf_major}
+      HAL_PWM_MOCK_IDF_MINOR=${idf_minor}
+    )
+
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror -Wpedantic)
+
+    target_link_libraries(${test_name}
+      unity
+    )
+
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    set_tests_properties(${test_name} PROPERTIES LABELS "unit;hal")
+
+    message(STATUS "Tests: Building HAL ESP PWM backend test (${test_name}, IDF ${idf_major}.${idf_minor})")
+  endforeach()
+
   # POSIX platform: unified test application
   add_executable(osal_tests
     ${HQ_COMMON_TEST_RUNNER}
