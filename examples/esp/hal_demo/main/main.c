@@ -36,6 +36,7 @@
 #include "hal_types.h"
 #include "hal_gpio.h"
 #include "hal_pwm.h"
+#include "osal_task.h"
 
 /* Demo frequency for the PWM output.  The hq_hal ESP-IDF PWM backend accepts
  * any frequency the LEDC peripheral can produce at its fixed 13-bit duty
@@ -47,6 +48,7 @@ static int demo_gpio(void)
 {
     hal_gpio_config_t config;
     hal_status_t status;
+    int exit_code = -1;
 
     config.pin = (hal_pin_t)CONFIG_HAL_DEMO_GPIO_PIN;
     config.polarity = HAL_POLARITY_ACTIVE_HIGH;
@@ -60,7 +62,6 @@ static int demo_gpio(void)
     }
     printf("hal_demo: GPIO pin %lu initialized as output\n",
            (unsigned long)config.pin);
-
     /* Drive the logical ACTIVE state through the portable API. */
     status = hal_gpio_write(config.pin, true);
     if (status != HAL_OK) {
@@ -68,7 +69,7 @@ static int demo_gpio(void)
         goto fail;
     }
     printf("hal_demo: GPIO pin %lu driven ACTIVE\n", (unsigned long)config.pin);
-
+    osal_task_delay_ms(1000);
     /* Drive the logical INACTIVE state through the portable API. */
     status = hal_gpio_write(config.pin, false);
     if (status != HAL_OK) {
@@ -76,7 +77,7 @@ static int demo_gpio(void)
         goto fail;
     }
     printf("hal_demo: GPIO pin %lu driven INACTIVE\n", (unsigned long)config.pin);
-
+    osal_task_delay_ms(1000);
     status = hal_gpio_deinit(config.pin);
     if (status != HAL_OK) {
         printf("hal_demo: hal_gpio_deinit failed (%d)\n", (int)status);
@@ -84,17 +85,18 @@ static int demo_gpio(void)
     }
     printf("hal_demo: GPIO pin %lu deinitialized\n", (unsigned long)config.pin);
 
-    return 0;
+    exit_code = 0;
 
 fail:
     hal_gpio_deinit(config.pin);
-    return -1;
+    return exit_code;
 }
 
 static int demo_pwm(void)
 {
     hal_pwm_config_t config;
     hal_status_t status;
+    int exit_code = -1;
 
     config.pin = (hal_pin_t)CONFIG_HAL_DEMO_PWM_PIN;
     config.frequency_hz = HAL_DEMO_PWM_FREQUENCY_HZ;
@@ -116,6 +118,8 @@ static int demo_pwm(void)
     }
     printf("hal_demo: PWM pin %lu duty 50%%\n", (unsigned long)config.pin);
 
+    osal_task_delay_ms(1000);
+
     /* Second, different duty-cycle value. */
     status = hal_pwm_set_duty(config.pin, 25.0f);
     if (status != HAL_OK) {
@@ -124,6 +128,8 @@ static int demo_pwm(void)
     }
     printf("hal_demo: PWM pin %lu duty 25%%\n", (unsigned long)config.pin);
 
+    osal_task_delay_ms(1000);
+
     /* Force the output to its logical INACTIVE state. */
     status = hal_pwm_force_inactive(config.pin);
     if (status != HAL_OK) {
@@ -131,7 +137,7 @@ static int demo_pwm(void)
         goto fail;
     }
     printf("hal_demo: PWM pin %lu forced inactive\n", (unsigned long)config.pin);
-
+    osal_task_delay_ms(1000);
     status = hal_pwm_deinit(config.pin);
     if (status != HAL_OK) {
         printf("hal_demo: hal_pwm_deinit failed (%d)\n", (int)status);
@@ -139,11 +145,11 @@ static int demo_pwm(void)
     }
     printf("hal_demo: PWM pin %lu deinitialized\n", (unsigned long)config.pin);
 
-    return 0;
+    exit_code = 0;
 
 fail:
     hal_pwm_deinit(config.pin);
-    return -1;
+    return exit_code;
 }
 
 void app_main(void)
@@ -159,5 +165,18 @@ void app_main(void)
         return;
     }
 
-    printf("hal_demo: portable HAL demo finished successfully\n");
+    while (1) {
+        if (demo_gpio() != 0) {
+            printf("hal_demo: GPIO step failed\n");
+            return;
+        }
+        osal_task_delay_ms(1000);
+        if (demo_pwm() != 0) {
+            printf("hal_demo: PWM step failed\n");
+            return;
+        }
+        osal_task_delay_ms(1000);
+    }
+
+    printf("hal_demo: portable HAL demo finished\n");
 }

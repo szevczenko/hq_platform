@@ -24,6 +24,8 @@ set(HQ_DEFCONFIG "${HQ_REPO_ROOT}/defconfig/esp.defconfig")
 # Register the portable HAL as an external ESP-IDF component.
 set(EXTRA_COMPONENT_DIRS
   ${HQ_REPO_ROOT}/src/hal/hq_hal
+  ${HQ_REPO_ROOT}/src/osal
+  ${HQ_REPO_ROOT}/src/mongoose
 )
 
 include(${HQ_REPO_ROOT}/cmake/configure.cmake)

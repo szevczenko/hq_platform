@@ -1,3 +1,0 @@
-ec3b48c TASK-007: Add host unit tests for HAL API contract
-0ad5057 TASK-006: Implement deterministic POSIX HAL backend
-5e6eed5 TASK-005: Create collision-free HAL CMake scaffold
