@@ -1,29 +1,39 @@
 /**
  * @file hal_pwm_esp.c
- * @brief ESP-IDF PWM HAL backend (TASK-005)
+ * @brief ESP-IDF PWM HAL backend (TASK-009)
  *
- * Real PWM backend for ESP-IDF builds.  It drives the ESP32 LEDC peripheral
- * through the legacy `driver/ledc.h` API and implements the portable
- * contract from hal_pwm.h:
+ * Real PWM backend for ESP-IDF builds.  It drives the ESP32-family LEDC
+ * peripheral through the legacy `driver/ledc.h` API (available on every
+ * supported ESP SoC: ESP32, ESP32-S3 and ESP32-C6) and implements the
+ * portable contract from hal_pwm.h:
  *
  *   - one LEDC channel is allocated per initialized pin; channels share an
  *     LEDC timer only while the requested frequency is identical (the duty
- *     resolution and speed mode are fixed for the whole backend), so a new
- *     pin never changes the frequency of an already-initialized pin,
+ *     resolution, speed mode and clock source are fixed for the whole
+ *     backend), so a new pin never changes the frequency of an
+ *     already-initialized pin,
+ *   - the duty cycle is normalized percent and is translated linearly to
+ *     LEDC duty ticks of the fixed 13-bit resolution: 0.0% maps to 0 ticks,
+ *     50.0% to exactly half of the period and 100.0% to a permanently
+ *     active output,
  *   - the active polarity is applied through the LEDC pad output inversion
- *     (output_invert): with HAL_POLARITY_ACTIVE_LOW the inverted pad level
- *     makes the duty portion of every period physical LOW, matching the
- *     portable "active" semantics for all duty cycles,
- *   - the duty cycle is normalized percent and is translated to LEDC duty
- *     ticks of the fixed 13-bit resolution,
+ *     (output_invert): with HAL_POLARITY_ACTIVE_LOW the duty portion of
+ *     every period is physical LOW, matching the portable "active"
+ *     semantics for all duty cycles,
  *   - the output starts in the logical INACTIVE state (duty 0.0%),
  *   - hal_pwm_force_inactive() halts the channel at the logical INACTIVE
  *     level and retains the last duty; a later hal_pwm_set_duty() resumes
  *     generation,
- *   - init/deinit are not idempotent and return the documented errors.
+ *   - init/deinit are not idempotent and return the documented errors,
+ *   - resource allocation is failure-atomic: no timer or channel is marked
+ *     owned until every hardware configuration step has succeeded, and a
+ *     failed init rolls back any provisionally configured timer,
+ *   - every ESP-IDF esp_err_t result is mapped to the portable hal_status_t
+ *     result type.
  *
  * The public HAL headers themselves are pure C99 and include no ESP-IDF
- * headers; all target-specific types stay inside this backend source.
+ * headers; all target-specific types (LEDC timers, channels and
+ * resolutions) stay inside this backend source.
  */
 
 #include <stdbool.h>
@@ -34,18 +44,30 @@
 #include "driver/ledc.h"
 #include "hal_pwm.h"
 
+/* Every supported ESP target (ESP32, ESP32-S3, ESP32-C6) provides the LEDC
+ * peripheral; this backend is only compiled for targets where it exists. */
+#if !SOC_LEDC_SUPPORTED
+#error "hal_pwm_esp.c requires a target with the LEDC peripheral"
+#endif
+
 #define HAL_PWM_ESP_CHANNEL_COUNT  LEDC_CHANNEL_MAX
 #define HAL_PWM_ESP_TIMER_COUNT    LEDC_TIMER_MAX
 
+/* Fixed 13-bit duty resolution.  The LEDC timer bit width is at least 14 on
+ * every supported SoC (ESP32: 20, ESP32-S3: 14, ESP32-C6: 20), so the same
+ * resolution works everywhere and keeps timer sharing simple.  Duty values
+ * are scaled linearly over the 2**13 ticks of one period.  The full-period
+ * endpoint 2**13 is deliberately not programmed for normal PWM operation:
+ * 100% duty is instead represented by stopping the channel at its logical
+ * ACTIVE level, which sidesteps per-target behavior at the resolution
+ * boundary. */
 #define HAL_PWM_ESP_DUTY_RESOLUTION LEDC_TIMER_13_BIT
-/* LEDC accepts duty values through 2**resolution.  The endpoint value is
- * deliberately not used for normal PWM operation because some ESP targets
- * overflow at the maximum resolution; 100% is represented by stopping the
- * channel at its logical ACTIVE level instead. */
-#define HAL_PWM_ESP_DUTY_MAX        ((1U << 13U) - 1U)
+#define HAL_PWM_ESP_DUTY_BITS        13U
+#define HAL_PWM_ESP_DUTY_PERIOD      (1U << HAL_PWM_ESP_DUTY_BITS)
 
 /* Low-speed mode is available on every ESP32-family target that has LEDC;
- * high-speed mode exists only on the classic ESP32. */
+ * high-speed mode exists only on the classic ESP32, so the backend always
+ * uses the low-speed group for uniform behavior across targets. */
 #define HAL_PWM_ESP_SPEED_MODE LEDC_LOW_SPEED_MODE
 
 typedef struct hal_pwm_esp_channel {
@@ -72,7 +94,10 @@ static hal_pwm_esp_timer_t s_timers[HAL_PWM_ESP_TIMER_COUNT];
 
 static bool hal_pwm_esp_is_valid_pin(hal_pin_t pin)
 {
-    return (pin != HAL_PIN_NONE) && (pin < GPIO_NUM_MAX);
+    /* The < GPIO_NUM_MAX bound must be checked before the SoC mask macro,
+     * whose shift operand is only defined for the numbered pads. */
+    return (pin != HAL_PIN_NONE) && (pin < GPIO_NUM_MAX) &&
+           GPIO_IS_VALID_GPIO((gpio_num_t)pin);
 }
 
 static bool hal_pwm_esp_is_valid_duty(float duty_percent)
@@ -125,10 +150,12 @@ static uint32_t hal_pwm_esp_active_level(const hal_pwm_esp_channel_t *ch)
 
 static uint32_t hal_pwm_esp_duty_to_ticks(float duty_percent)
 {
-    /* This helper is only used for values below 100%.  Keeping the maximum
-     * at 2**resolution - 1 avoids the endpoint overflow on affected chips. */
+    /* Linear percent -> ticks over the 2**13 period: 0.0% maps to 0 ticks
+     * and 50.0% to exactly half of the period.  This helper is only used
+     * for duty below 100%, so the result stays below 2**13 (the
+     * full-period endpoint is handled by hal_pwm_set_duty() instead). */
     return (uint32_t)((duty_percent / HAL_PWM_DUTY_MAX_PERCENT) *
-                      (float)HAL_PWM_ESP_DUTY_MAX);
+                      (float)HAL_PWM_ESP_DUTY_PERIOD);
 }
 
 hal_status_t hal_pwm_init(const hal_pwm_config_t *config)
@@ -155,6 +182,14 @@ hal_status_t hal_pwm_init(const hal_pwm_config_t *config)
     }
     if (!hal_pwm_esp_is_valid_pin(config->pin)) {
         return HAL_ERR_INVALID_PIN;
+    }
+    /* Input-only pads (for example GPIO 34..39 on the classic ESP32) have
+     * no output driver and cannot produce a PWM waveform.  Reject them
+     * before touching any timer/channel resource so a failed init never
+     * needs a hardware rollback and the portable result reports the
+     * unsupported configuration. */
+    if (!GPIO_IS_VALID_OUTPUT_GPIO((gpio_num_t)config->pin)) {
+        return HAL_ERR_NOT_SUPPORTED;
     }
     if (hal_pwm_esp_find_channel(config->pin) != NULL) {
         return HAL_ERR_ALREADY_INITIALIZED;
@@ -209,7 +244,17 @@ hal_status_t hal_pwm_init(const hal_pwm_config_t *config)
 
         err = ledc_timer_config(&timer_conf);
         if (err != ESP_OK) {
-            return HAL_ERR_NOT_SUPPORTED;
+            /* ESP_FAIL means no clock source/divider produces the requested
+             * frequency at the fixed duty resolution: the portable result
+             * is HAL_ERR_NOT_SUPPORTED.  Everything else is unexpected
+             * because every argument was pre-validated. */
+            if (err == ESP_FAIL) {
+                return HAL_ERR_NOT_SUPPORTED;
+            }
+            if (err == ESP_ERR_INVALID_ARG) {
+                return HAL_ERR_INVALID_ARGUMENT;
+            }
+            return HAL_ERR_INTERNAL;
         }
     }
 
@@ -234,10 +279,12 @@ hal_status_t hal_pwm_init(const hal_pwm_config_t *config)
     err = ledc_channel_config(&channel_conf);
     if (err != ESP_OK) {
         if (timer_fresh) {
-            /* A newly configured timer is running, while ledc_timer_del()
-             * requires it to be paused.  Ignore cleanup errors here because
-             * the channel configuration error is the API failure; importantly,
-             * the software allocator remains rolled back either way. */
+            /* Deconfiguring a timer requires it to be paused first, so pause
+             * then deconfigure the provisionally created timer.  Cleanup
+             * errors are ignored because the channel configuration error is
+             * the API failure; importantly, the software allocator is rolled
+             * back either way, so no resource leaks and a later
+             * hal_pwm_init() may reconfigure the same timer. */
             (void)ledc_timer_pause(HAL_PWM_ESP_SPEED_MODE, timer_num);
             timer_conf.deconfigure = true;
             (void)ledc_timer_config(&timer_conf);

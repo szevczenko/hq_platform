@@ -19,10 +19,11 @@
 #     hal_posix_inspect.h, which must never become part of the public
 #     interface); tests reach it directly through their own include path.
 #   - ESP-IDF branch: `hq_hal` component compiling the ESP-IDF GPIO backend
-#     (src/hal/esp/hal_gpio_esp.c; TASK-008) and exporting src/hal/include
+#     (src/hal/esp/hal_gpio_esp.c; TASK-008) and the ESP-IDF PWM backend
+#     (src/hal/esp/hal_pwm_esp.c; TASK-009), and exporting src/hal/include
 #     publicly.  It intentionally does not reference any POSIX source or
-#     header; the ESP-IDF GPIO driver is an implementation-private
-#     dependency.  TASK-009 adds the PWM backend source.
+#     header; the ESP-IDF `driver` dependency (GPIO and LEDC) is an
+#     implementation-private dependency.
 # Only the public include directory is ever exposed publicly, so host builds
 # never parse ESP-IDF headers and the ESP-IDF public interface never exposes
 # POSIX implementation headers.
@@ -35,14 +36,16 @@ if(ESP_PLATFORM)
   # ESP-IDF branch.  This file is `include()`d by
   # src/hal/hq_hal/CMakeLists.txt, so the component name comes from the
   # hq_hal/ directory basename.  The component compiles exactly the ESP-IDF
-  # GPIO backend (src/hal/esp/hal_gpio_esp.c) and exports only the public
+  # GPIO backend (src/hal/esp/hal_gpio_esp.c) and the ESP-IDF PWM backend
+  # (src/hal/esp/hal_pwm_esp.c; TASK-009) and exports only the public
   # include directory; it never compiles any POSIX source.  The dependency
-  # on the ESP-IDF GPIO driver (`driver`) is implementation-private
-  # (PRIV_REQUIRES): it is required to compile the backend source but must
-  # never leak into the public interface, which stays pure C99.  TASK-009
-  # wires the PWM backend source into this branch.
+  # on the ESP-IDF `driver` component (GPIO + LEDC) is implementation-private
+  # (PRIV_REQUIRES): it is required to compile the backend sources but must
+  # never leak into the public interface, which stays pure C99.
   idf_component_register(
-    SRCS ${CMAKE_CURRENT_LIST_DIR}/esp/hal_gpio_esp.c
+    SRCS
+      ${CMAKE_CURRENT_LIST_DIR}/esp/hal_gpio_esp.c
+      ${CMAKE_CURRENT_LIST_DIR}/esp/hal_pwm_esp.c
     INCLUDE_DIRS ${HAL_PUBLIC_INCLUDES}
     PRIV_REQUIRES driver
   )
