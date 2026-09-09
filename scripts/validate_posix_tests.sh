@@ -29,7 +29,7 @@ TESTS_DIR="$BUILD_DIR/tests"
 # Expected Unity summary counts captured from the TASK-506..TASK-524 test
 # registrations (RUN_TEST entries) in each aggregated test binary.
 declare -A EXPECTED=(
-  [osal_tests]=37
+  [osal_tests]=39
   [wifi_tests]=28
   [mqtt_tests]=6
   [tb_tests]=52

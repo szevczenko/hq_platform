@@ -49,6 +49,15 @@ int32_t osal_mkfs(char *address, const char *devname, const char *volname, size_
  *
  * Mounts a file system or block device at the given mount point.
  *
+ * @note No format on mount failure (TASK-118 guarantee): if the filesystem is
+ *       missing or corrupt, osal_mount() reports OSAL_ERROR and leaves the
+ *       partition contents completely untouched.  The backend never formats
+ *       the volume as an automatic reaction to a mount error.  Formatting is
+ *       available only through the explicit entry points (osal_mkfs(),
+ *       osal_rmfs(), osal_initfs() and provisioning flows), so credentials
+ *       and manufacturing state can never be silently destroyed by an
+ *       ordinary boot-time mount failure.
+ *
  * @param[in] devname      The name of the drive to mount, as used by osal_mkfs @nonnull
  * @param[in] mount_point  The mount point name @nonnull
  *
@@ -56,7 +65,8 @@ int32_t osal_mkfs(char *address, const char *devname, const char *volname, size_
  * @retval OSAL_SUCCESS on success
  * @retval OSAL_INVALID_POINTER if any argument is NULL
  * @retval OSAL_FS_ERR_PATH_TOO_LONG if the mount point string is too long
- * @retval OSAL_ERROR if an unexpected OS error occurs
+ * @retval OSAL_ERROR if an unexpected OS error occurs; the partition contents
+ *         are left intact (no implicit format/recovery is performed)
  */
 int32_t osal_mount(const char *devname, const char *mount_point);
 
