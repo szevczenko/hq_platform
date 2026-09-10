@@ -297,6 +297,33 @@ if(NOT ESP_PLATFORM)
 
   message(STATUS "Tests: Building MQTT test application (mqtt_tests)")
 
+  # ---- MQTT safety observer + configuration gate tests (TASK-121) ----
+  # Exercises the real mqtt_app transport against an in-process mongoose MQTT
+  # broker: observer fan-out (safety + client callbacks both fire), the
+  # configuration-owner validation gate (rejected apply-config leaves the
+  # transport disconnected and never reconnects) and the skip-verify /
+  # SSL-off / raw-cert refusal cases.  POSIX only; no external broker needed.
+  add_executable(mqtt_safety_tests
+    ${CMAKE_CURRENT_SOURCE_DIR}/mqtt/mqtt_safety_gate_test.c
+  )
+
+  target_include_directories(mqtt_safety_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
+    PRIVATE ${HQ_CONFIG_DIR}
+  )
+
+  target_link_libraries(mqtt_safety_tests
+    hq_mongoose
+    unity
+    pthread
+  )
+
+  add_test(NAME mqtt_safety_tests COMMAND mqtt_safety_tests)
+  set_tests_properties(mqtt_safety_tests PROPERTIES LABELS "unit;mqtt")
+
+  message(STATUS "Tests: Building MQTT safety gate test application (mqtt_safety_tests)")
+
   add_executable(mqtt_functional_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/mqtt/mqtt_functional_test.c
   )

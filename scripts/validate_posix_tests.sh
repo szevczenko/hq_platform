@@ -2,9 +2,9 @@
 #
 # TASK-528 — Validate self-contained POSIX test executables
 #
-# Builds and runs the four unit-test executables that do NOT require an
-# external broker:
-#   osal_tests, wifi_tests, mqtt_tests, tb_tests
+# Builds and runs the unit-test executables that do NOT require an external
+# broker:
+#   osal_tests, wifi_tests, mqtt_tests, mqtt_safety_tests, tb_tests
 #
 # For each binary it asserts:
 #   * the process exits 0,
@@ -30,8 +30,9 @@ TESTS_DIR="$BUILD_DIR/tests"
 # registrations (RUN_TEST entries) in each aggregated test binary.
 declare -A EXPECTED=(
   [osal_tests]=39
-  [wifi_tests]=28
+  [wifi_tests]=80
   [mqtt_tests]=6
+  [mqtt_safety_tests]=4
   [tb_tests]=52
 )
 
@@ -53,7 +54,7 @@ cmake -B "$BUILD_DIR" \
 cmake --build "$BUILD_DIR"
 
 # ---- Validate each self-contained binary -----------------------------------
-for bin in osal_tests wifi_tests mqtt_tests tb_tests; do
+for bin in osal_tests wifi_tests mqtt_tests mqtt_safety_tests tb_tests; do
   expected="${EXPECTED[$bin]:-}"
   exe="$TESTS_DIR/$bin"
   log="$BUILD_DIR/$bin.log"
