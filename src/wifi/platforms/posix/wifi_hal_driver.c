@@ -1453,7 +1453,8 @@ osal_status_t wifi_hal_set_sta_config( const wifi_hal_sta_config_t* config )
   pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.sta_cfg = *config;
   pthread_mutex_unlock( &g_sim.state_mutex );
-  osal_log_debug( "[wifi-sim] STA config: ssid=\"%s\"", config->ssid );
+  /* TASK-120: the station SSID/password is a credential — never logged. */
+  osal_log_debug( "[wifi-sim] STA config updated (credentials not logged)" );
 
   _release_operation();
   return OSAL_SUCCESS;
@@ -1473,7 +1474,8 @@ osal_status_t wifi_hal_set_ap_config( const wifi_hal_ap_config_t* config )
   pthread_mutex_lock( &g_sim.state_mutex );
   g_sim.ap_cfg = *config;
   pthread_mutex_unlock( &g_sim.state_mutex );
-  osal_log_debug( "[wifi-sim] AP config: ssid=\"%s\"", config->ssid );
+  /* TASK-120: the AP SSID/password is a credential — never logged. */
+  osal_log_debug( "[wifi-sim] AP config updated (credentials not logged)" );
 
   _release_operation();
   return OSAL_SUCCESS;
@@ -1506,24 +1508,28 @@ osal_status_t wifi_hal_connect( void )
   const sim_ap_t* ap = _find_ap( ssid_local );
   if ( !ap )
   {
-    osal_log_warning( "[wifi-sim] SSID \"%s\" not found in simulated environment",
-                      ssid_local );
+    /* TASK-120: the requested SSID is a station credential — never logged. */
+    osal_log_warning( "[wifi-sim] configured SSID not found in simulated environment" );
     goto out;
   }
 
-  osal_log_info( "[wifi-sim] connecting to \"%s\" (behaviour=%d) ...",
-                 ap->ssid, (int) ap->behaviour );
+  osal_log_info( "[wifi-sim] connecting (behaviour=%d) ...",
+                 (int) ap->behaviour );
 
   switch ( ap->behaviour )
   {
     case AP_BEHAV_REJECT:
-      osal_log_info( "[wifi-sim] \"%s\" — connection REJECTED", ap->ssid );
+      osal_log_info( "[wifi-sim] connection REJECTED (behaviour=%d)",
+                     (int) ap->behaviour );
       break;
 
     case AP_BEHAV_WRONG_PASSWORD:
       if ( strncmp( pass_local, ap->password, WIFI_HAL_PASSWORD_MAX_LEN ) != 0 )
       {
-        osal_log_info( "[wifi-sim] \"%s\" — wrong password", ap->ssid );
+        /* TASK-120: authentication results are logged without SSID — the
+         * failure class (wrong password) carries no credential value. */
+        osal_log_info( "[wifi-sim] wrong password (behaviour=%d)",
+                       (int) ap->behaviour );
         break;
       }
       /* Correct password — fall through to normal connect. */
@@ -1541,7 +1547,7 @@ osal_status_t wifi_hal_connect( void )
       strncpy( evt.ip_info.netmask, SIM_NETMASK, sizeof( evt.ip_info.netmask ) - 1 );
       strncpy( evt.ip_info.gw,      SIM_GATEWAY, sizeof( evt.ip_info.gw ) - 1 );
 
-      osal_log_info( "[wifi-sim] \"%s\" — connected, IP=%s", ap->ssid, SIM_IP );
+      osal_log_info( "[wifi-sim] connected, IP=%s", SIM_IP );
       _fire_event( WIFI_HAL_EVT_STA_GOT_IP, &evt );
       rc = OSAL_SUCCESS;
       break;
@@ -1559,8 +1565,8 @@ osal_status_t wifi_hal_connect( void )
       strncpy( evt.ip_info.netmask, SIM_NETMASK, sizeof( evt.ip_info.netmask ) - 1 );
       strncpy( evt.ip_info.gw,      SIM_GATEWAY, sizeof( evt.ip_info.gw ) - 1 );
 
-      osal_log_info( "[wifi-sim] \"%s\" — connected, will disconnect in %u ms",
-                     ap->ssid, (unsigned) ap->param_ms );
+      osal_log_info( "[wifi-sim] connected, will disconnect in %u ms",
+                     (unsigned) ap->param_ms );
       _fire_event( WIFI_HAL_EVT_STA_GOT_IP, &evt );
 
       /* Start background thread that will fire DISCONNECTED. */
@@ -1574,8 +1580,8 @@ osal_status_t wifi_hal_connect( void )
       g_sim.active_ap = ap;
       pthread_mutex_unlock( &g_sim.state_mutex );
 
-      osal_log_info( "[wifi-sim] \"%s\" — slow connect, IP in %u ms",
-                     ap->ssid, (unsigned) ap->param_ms );
+      osal_log_info( "[wifi-sim] slow connect, IP in %u ms",
+                     (unsigned) ap->param_ms );
 
       /* GOT_IP will be fired asynchronously after the delay. */
       rc = _start_slow_connect( ap->param_ms );
@@ -1604,11 +1610,11 @@ osal_status_t wifi_hal_disconnect( void )
 
   pthread_mutex_lock( &g_sim.state_mutex );
   bool was_connected = g_sim.connected;
-  const sim_ap_t* was_ap = g_sim.active_ap;
   if ( was_connected )
   {
-    osal_log_info( "[wifi-sim] disconnected from \"%s\"",
-                   was_ap ? was_ap->ssid : "?" );
+    /* TASK-120: the associated AP SSID equals the station credential SSID —
+     * connection state changes are logged without it. */
+    osal_log_info( "[wifi-sim] disconnected" );
   }
   g_sim.connected = false;
   g_sim.active_ap = NULL;
