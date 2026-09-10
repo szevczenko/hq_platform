@@ -400,6 +400,7 @@ static void mqtt_snapshot_from_candidate(mqtt_config_snapshot_t *snapshot,
 {
 	memset(snapshot, 0, sizeof(*snapshot));
 	snapshot->address = cand->address;
+	snapshot->client_id = cand->client_id;
 	snapshot->ssl_enabled = cand->ssl_enabled;
 	snapshot->skip_verify = cand->skip_verify;
 	snapshot->cert_source = cand->cert_source;

@@ -43,8 +43,9 @@ typedef void (*mqtt_connect_failure_callback_t)(
  * The snapshot is captured immediately before the reconnect decision and is
  * passed to the configuration-owner validation callback (see
  * mqtt_app_set_config_validation_callback()).  It contains owned copies of
- * the exact values the reconnect would use: the broker address, the SSL
- * flag, skip-verify, and the certificate sources/values (a file path for
+ * the exact values the reconnect would use: the broker address and client
+ * identifier, the SSL flag, skip-verify, and the certificate sources/values
+ * (a file path for
  * MQTT_CERT_SOURCE_FILE_PATH or the raw PEM text for MQTT_CERT_SOURCE_RAW).
  *
  * The platform guarantees that a reconnect approved through this gate uses
@@ -55,6 +56,7 @@ typedef void (*mqtt_connect_failure_callback_t)(
  */
 typedef struct {
 	const char *address;
+	const char *client_id;
 	bool ssl_enabled;
 	bool skip_verify;
 	mqtt_cert_source_t cert_source;
