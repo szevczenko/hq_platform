@@ -99,6 +99,29 @@
 static osal_bin_sem_id_t s_connected_sem    = NULL;
 static osal_bin_sem_id_t s_mode_changed_sem = NULL;
 
+/* Deferred-apply witness records (TASK-012): the controller's test-apply hook
+ * is invoked by the deferred worker immediately before applying each item, so
+ * the recorded sequence proves the worker applies a burst in arrival order and
+ * never witnesses (or applies) an item superseded by a later session. */
+#define DEFER_WITNESS_MAX 16
+static wifi_provisioning_controller_test_deferred_t s_defer_applied[DEFER_WITNESS_MAX];
+static int s_defer_apply_count = 0;
+
+static void record_deferred_apply(
+    const wifi_provisioning_controller_test_deferred_t *applied, void *user_ctx )
+{
+  ( void ) user_ctx;
+  if ( s_defer_apply_count < DEFER_WITNESS_MAX )
+  {
+    s_defer_applied[ s_defer_apply_count++ ] = *applied;
+  }
+}
+
+static void reset_defer_records( void )
+{
+  s_defer_apply_count = 0;
+}
+
 static void on_connected_event( wifi_mgmt_event_t event, void * user_data )
 {
   ( void ) event;
@@ -185,6 +208,10 @@ void tearDown( void )
   wifi_hal_mock_set_deinit_hold( false );
   wifi_hal_mock_set_got_ip_hold( false );
   wifi_hal_mock_set_scan_done_hold( false );
+  /* Release a test-held deferred worker and clear the apply observer so the
+   * controller-owned worker is never parked across teardown. */
+  wifi_provisioning_controller_test_set_defer_hold( false );
+  wifi_provisioning_controller_test_set_apply_hook( NULL, NULL );
 
   /* Pair the controller-owned reverse-order cleanup with the guarded fixture:
    * provisioning listeners close first (Mongoose is still alive), then the
@@ -471,6 +498,11 @@ static void complete_station_connection( const char * ip )
 
   TEST_ASSERT_TRUE_MESSAGE( wait_semaphore( s_connected_sem, EVENT_WAIT_MS ),
                             "GOT_IP must complete the station connection" );
+  /* The controller's event callback only queues the CONNECTED; the policy
+   * transition to GRACE is committed by the controller-owned deferred worker.
+   * Wait until the worker is idle before asserting the resulting state. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_test_wait_idle( EVENT_WAIT_MS ),
+                            "deferred controller worker must apply the CONNECTED" );
   TEST_ASSERT_TRUE( wifi_mgmt_is_connected() );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_GRACE,
                          wifi_provisioning_controller_get_state() );
@@ -573,6 +605,11 @@ static void test_automatic_fallback_flow( void )
                               "transition must complete within the grace budget" );
   }
 
+  /* The MODE_CHANGED completion above is observed at dispatch time; the
+   * controller's own RETIRING_AP -> ONLINE commit runs on its deferred worker,
+   * so wait for the worker to drain before asserting the final state. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_test_wait_idle( EVENT_WAIT_MS ),
+                            "deferred controller worker must commit ONLINE" );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_ONLINE,
                          wifi_provisioning_controller_get_state() );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
@@ -647,8 +684,11 @@ static void test_stale_grace_expiry_cannot_retire_next_session( void )
                          wifi_http_provisioning_get_state() );
 
   /* Inject the cancelled generation's expiry synchronously. Generation and
-   * state validation must reject it without retiring the fresh session. */
+   * state validation must reject it without retiring the fresh session; the
+   * fired expiry only posts (if at all) to the deferred queue. */
   wifi_provisioning_controller_test_fire_grace_expiry();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_test_wait_idle( EVENT_WAIT_MS ),
+                            "deferred worker must drain after the stale expiry" );
 
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
                          wifi_provisioning_controller_get_state() );
@@ -659,6 +699,157 @@ static void test_stale_grace_expiry_cannot_retire_next_session( void )
   TEST_ASSERT_TRUE( wifi_hal_mock_get_state( &mock ) );
   TEST_ASSERT_EQUAL_INT( WIFI_HAL_MODE_APSTA, mock.mode );
   printf( "PASS: stale grace expiry could not retire the next session\n" );
+}
+
+/* ------------------------------------------------------------------ */
+/*  TASK-012 - controller policy actions run on the deferred worker,  */
+/*  never on the Wi-Fi event thread.                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Proves the deferred-policy contract end to end:
+ *  1. A real Wi-Fi event is delivered through the mock HAL boundary while the
+ *     controller's deferred worker is parked. The typed CONNECTED is observed
+ *     by the test's own subscriber (registered after the controller, so the
+ *     controller's event callback has already returned), yet no provisioning
+ *     call has been made: the controller state and the provisioning listener
+ *     state are untouched and the apply witness has not fired.
+ *  2. Releasing the park applies the queued CONNECTED in order (GRACE).
+ *  3. A synthetic burst injected while parked is applied strictly in arrival
+ *     order (DISCONNECTED aborts GRACE, CONNECTED re-opens it -> GRACE), so a
+ *     CONNECTED queued during a pending earlier action cannot be lost.
+ *  4. An item queued in a session that deinit supersedes is dropped, never
+ *     applied: deinit drains the parked worker deterministically, the fresh
+ *     session stays PROVISIONING and the witness count is unchanged.
+ */
+static void test_controller_defers_policy_off_wifi_worker( void )
+{
+  char                  http_url[64], dns_url[64];
+  int                   http_port, dns_port;
+  wifi_hal_mock_state_t mock;
+
+  start_wifi_ready();
+  reserve_listeners( &http_port, &dns_port, http_url, sizeof( http_url ),
+                     dns_url, sizeof( dns_url ) );
+
+  /* A long grace keeps the real success-grace timer quiet for the whole
+   * scenario, so the deferred ordering is observed without a racing expiry. */
+  wifi_provisioning_controller_set_success_grace_ms( 60000u );
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                         wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
+                         wifi_http_provisioning_get_state() );
+
+  /* Register the test's own event observers and the apply witness.  The test
+   * observers are registered after the controller subscribed at init, so on
+   * dispatch the controller's event callback runs - and returns - before the
+   * test's observer fires. */
+  subscribe_test_events();
+  reset_defer_records();
+  wifi_provisioning_controller_test_set_apply_hook( record_deferred_apply, NULL );
+  wifi_provisioning_controller_test_set_defer_hold( true );
+
+  /* --- Phase 1: the Wi-Fi event callback returns while the worker is held. */
+  TEST_ASSERT_TRUE( wifi_mgmt_set_ap_name( "testnet", ( size_t ) 7 ) );
+  TEST_ASSERT_TRUE( wifi_mgmt_set_password( "pw", ( size_t ) 2 ) );
+  TEST_ASSERT_TRUE( wifi_mgmt_connect() );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_connect_call_level( 1, CONNECT_WAIT_MS ),
+    "station must reach the Wi-Fi connect call" );
+  {
+    wifi_hal_ip_info_t    ip_info;
+    wifi_hal_event_data_t evt;
+
+    memset( &ip_info, 0, sizeof( ip_info ) );
+    strncpy( ip_info.ip,      "10.170.0.50", sizeof( ip_info.ip ) - 1 );
+    strncpy( ip_info.netmask, "255.255.255.0", sizeof( ip_info.netmask ) - 1 );
+    strncpy( ip_info.gw,      "10.170.0.1",    sizeof( ip_info.gw ) - 1 );
+    wifi_hal_mock_set_ip_info( &ip_info );
+    memset( &evt, 0, sizeof( evt ) );
+    evt.ip_info = ip_info;
+    wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt );
+  }
+
+  /* The CONNECTED dispatch reached the test observer (registered after the
+   * controller, so the controller's own callback has returned by now) but the
+   * deferred worker is parked: no provisioning or mode call may have run. */
+  TEST_ASSERT_TRUE_MESSAGE( wait_semaphore( s_connected_sem, EVENT_WAIT_MS ),
+                            "CONNECTED must be dispatched to subscribers" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_connected(),
+                            "station must be connected at the HAL boundary" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+    0, s_defer_apply_count,
+    "no deferred action may be applied while the worker is held" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+    WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+    wifi_provisioning_controller_get_state(),
+    "controller must not transition until the deferred worker applies the event" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+    WIFI_PROVISIONING_RUNNING,
+    wifi_http_provisioning_get_state(),
+    "no provisioning call may run from the Wi-Fi event callback" );
+
+  /* --- Phase 2: release; the queued CONNECTED is applied in order. */
+  wifi_provisioning_controller_test_set_defer_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_test_wait_idle( EVENT_WAIT_MS ),
+                            "deferred worker must drain after the release" );
+  TEST_ASSERT_EQUAL_INT( 1, s_defer_apply_count );
+  TEST_ASSERT_EQUAL_INT( WIFI_MGMT_EVENT_CONNECTED, s_defer_applied[0].event );
+  TEST_ASSERT_TRUE_MESSAGE( s_defer_applied[0].session != 0u,
+                            "deferred items must carry the lifecycle token" );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_GRACE,
+                         wifi_provisioning_controller_get_state() );
+
+  /* --- Phase 3: a synthetic burst is applied strictly in arrival order. */
+  wifi_provisioning_controller_test_set_defer_hold( true );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_provisioning_controller_test_inject_event( WIFI_MGMT_EVENT_DISCONNECTED ),
+    "burst DISCONNECTED must enter the deferred queue" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_provisioning_controller_test_inject_event( WIFI_MGMT_EVENT_CONNECTED ),
+    "burst CONNECTED must enter the deferred queue behind the disconnect" );
+  wifi_provisioning_controller_test_set_defer_hold( false );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_test_wait_idle( EVENT_WAIT_MS ),
+                            "deferred worker must drain the burst" );
+
+  TEST_ASSERT_EQUAL_INT( 3, s_defer_apply_count );
+  TEST_ASSERT_EQUAL_INT( WIFI_MGMT_EVENT_DISCONNECTED, s_defer_applied[1].event );
+  TEST_ASSERT_EQUAL_INT( WIFI_MGMT_EVENT_CONNECTED,    s_defer_applied[2].event );
+  /* Applied in order: DISCONNECTED aborts the grace window (-> PROVISIONING)
+   * and CONNECTED re-opens it (-> GRACE).  Applied out of order the pair would
+   * leave the controller in PROVISIONING, so the final GRACE proves FIFO. */
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_GRACE,
+                         wifi_provisioning_controller_get_state() );
+  printf( "PASS: deferred worker applied the synthetic burst in FIFO order\n" );
+
+  /* --- Phase 4: an item superseded by deinit is dropped, never applied. --- */
+  wifi_provisioning_controller_test_set_defer_hold( true );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_provisioning_controller_test_inject_event( WIFI_MGMT_EVENT_DISCONNECTED ),
+    "pre-deinit DISCONNECTED must enter the deferred queue" );
+
+  /* deinit invalidates the session and releases the test hold inside
+   * _deferred_work_stop, so the parked worker drains the stale item (dropped
+   * by the session check) and observes the QUIT marker instead of being
+   * cancelled - teardown returns promptly. */
+  wifi_provisioning_controller_deinit();
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_DISABLED,
+                         wifi_provisioning_controller_get_state() );
+
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_test_wait_idle( EVENT_WAIT_MS ),
+                            "fresh deferred worker must reach idle" );
+  TEST_ASSERT_EQUAL_INT_MESSAGE(
+    3, s_defer_apply_count,
+    "an item superseded by deinit must be dropped, never applied" );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                         wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
+                         wifi_http_provisioning_get_state() );
+  TEST_ASSERT_TRUE( wifi_hal_mock_get_state( &mock ) );
+  TEST_ASSERT_EQUAL_INT( WIFI_HAL_MODE_APSTA, mock.mode );
+  printf( "PASS: deferred item superseded by deinit was dropped, never applied\n" );
 }
 
 /* ------------------------------------------------------------------ */
@@ -678,6 +869,7 @@ int main( void )
 
   RUN_TEST( test_automatic_fallback_flow );
   RUN_TEST( test_stale_grace_expiry_cannot_retire_next_session );
+  RUN_TEST( test_controller_defers_policy_off_wifi_worker );
 
   rc = UNITY_END();
   return rc;

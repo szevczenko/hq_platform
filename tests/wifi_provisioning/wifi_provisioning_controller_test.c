@@ -39,7 +39,10 @@
 #include <string.h>
 
 #include "unity.h"
+#include "osal_bin_sem.h"
 #include "osal_mutex.h"
+#include "osal_queue.h"
+#include "osal_task.h"
 #include "osal_timer.h"
 #include "wifi_http_provisioning.h"
 #include "wifi_managment.h"
@@ -253,6 +256,159 @@ bool osal_timer_is_active( osal_timer_id_t timer_id )
   return s_timer_active;
 }
 
+/* --- OSAL binary semaphore mocks (single-threaded controller test) ------- */
+/* The controller creates process-lifetime semaphores (worker-exit signal,
+ * test-hold channel) and only uses them from the deferred worker and deinit.
+ * Under this single-threaded mock every wait succeeds immediately and every
+ * give is a no-op. */
+osal_status_t osal_bin_sem_create( osal_bin_sem_id_t *sem_id, const char *name,
+                                   uint32_t initial_value )
+{
+  (void) name;
+  (void) initial_value;
+  if ( sem_id == NULL ) return OSAL_INVALID_POINTER;
+  *sem_id = (osal_bin_sem_id_t) 0x1;    /* any non-NULL opaque handle. */
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_bin_sem_delete( osal_bin_sem_id_t sem_id )
+{
+  (void) sem_id;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_bin_sem_give( osal_bin_sem_id_t sem_id )
+{
+  (void) sem_id;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_bin_sem_timed_wait( osal_bin_sem_id_t sem_id, uint32_t timeout_ms )
+{
+  (void) sem_id;
+  (void) timeout_ms;
+  return OSAL_SUCCESS;
+}
+
+/* --- OSAL task mocks ----------------------------------------------------- */
+/* osal_task_create records the deferred worker routine instead of spawning a
+ * thread; the test drains the queue synchronously by invoking the routine. On
+ * an empty queue the mock receive fails immediately, so one invocation of the
+ * routine applies every queued item in FIFO order and returns. */
+static void (*s_task_routine)(void *) = NULL;
+static void  *s_task_arg              = NULL;
+
+osal_status_t osal_task_create( osal_task_id_t *task_id, const char *task_name,
+                                void (*routine)(void *), void *arg,
+                                osal_stackptr_t stack_pointer, size_t stack_size,
+                                osal_priority_t priority, const osal_task_attr_t *attr )
+{
+  (void) task_name;
+  (void) stack_pointer;
+  (void) stack_size;
+  (void) priority;
+  (void) attr;
+  if ( task_id == NULL || routine == NULL ) return OSAL_INVALID_POINTER;
+  s_task_routine = routine;
+  s_task_arg     = arg;
+  *task_id       = (osal_task_id_t) 0x1;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_task_delete( osal_task_id_t task_id )
+{
+  (void) task_id;
+  return OSAL_SUCCESS;
+}
+
+uint32_t osal_task_get_time_ms( void )
+{
+  return 0u;
+}
+
+osal_status_t osal_task_delay_ms( uint32_t milliseconds )
+{
+  (void) milliseconds;
+  return OSAL_SUCCESS;
+}
+
+/* --- OSAL queue mocks ---------------------------------------------------- */
+/* Opaque FIFO item store big enough for the controller's private deferred
+ * item (action + event + session). At most one controller queue exists at a
+ * time, so a single global mock queue is sufficient. */
+#define MOCK_QUEUE_MAX_ITEMS 16u
+#define MOCK_QUEUE_ITEM_SIZE 64u
+
+typedef struct
+{
+  uint8_t  items[MOCK_QUEUE_MAX_ITEMS][MOCK_QUEUE_ITEM_SIZE];
+  uint32_t item_size;
+  uint32_t count;
+  uint32_t head;
+} mock_queue_t;
+
+static mock_queue_t s_mock_queue;
+
+static void mock_queue_reset( void )
+{
+  s_mock_queue.item_size = 0u;
+  s_mock_queue.count     = 0u;
+  s_mock_queue.head      = 0u;
+}
+
+osal_status_t osal_queue_create( osal_queue_id_t *queue_id, const char *name,
+                                 uint32_t max_items, uint32_t item_size )
+{
+  (void) name;
+  if ( queue_id == NULL ) return OSAL_INVALID_POINTER;
+  if ( max_items == 0u || item_size == 0u ) return OSAL_QUEUE_INVALID_SIZE;
+  s_mock_queue.item_size =
+    item_size < MOCK_QUEUE_ITEM_SIZE ? item_size : MOCK_QUEUE_ITEM_SIZE;
+  s_mock_queue.count = 0u;
+  s_mock_queue.head  = 0u;
+  *queue_id          = (osal_queue_id_t) 0x1;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_queue_send( osal_queue_id_t queue_id, const void *item,
+                               uint32_t timeout_ms )
+{
+  uint32_t tail;
+
+  (void) queue_id;
+  (void) timeout_ms;
+  if ( s_mock_queue.count >= MOCK_QUEUE_MAX_ITEMS ) return OSAL_QUEUE_FULL;
+  tail = ( s_mock_queue.head + s_mock_queue.count ) % MOCK_QUEUE_MAX_ITEMS;
+  memcpy( s_mock_queue.items[tail], item, s_mock_queue.item_size );
+  ++s_mock_queue.count;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_queue_receive( osal_queue_id_t queue_id, void *buffer,
+                                  uint32_t timeout_ms )
+{
+  (void) queue_id;
+  (void) timeout_ms;
+  if ( s_mock_queue.count == 0u ) return OSAL_QUEUE_EMPTY;
+  memcpy( buffer, s_mock_queue.items[s_mock_queue.head], s_mock_queue.item_size );
+  s_mock_queue.head = ( s_mock_queue.head + 1u ) % MOCK_QUEUE_MAX_ITEMS;
+  --s_mock_queue.count;
+  return OSAL_SUCCESS;
+}
+
+osal_status_t osal_queue_delete( osal_queue_id_t queue_id )
+{
+  (void) queue_id;
+  mock_queue_reset();
+  return OSAL_SUCCESS;
+}
+
+uint32_t osal_queue_get_count( osal_queue_id_t queue_id )
+{
+  (void) queue_id;
+  return s_mock_queue.count;
+}
+
 /* Helpers ---------------------------------------------------------------- */
 
 static int sub_count_for( wifi_mgmt_event_t event )
@@ -260,6 +416,16 @@ static int sub_count_for( wifi_mgmt_event_t event )
   int n = 0, i;
   for ( i = 0; i < s_sub_count; ++i ) if ( s_subs[ i ].event == event ) ++n;
   return n;
+}
+
+/* Run the recorded deferred worker routine once. Under the task mock the
+ * worker is never spawned as a real thread; the queue mock makes an empty
+ * receive fail immediately, so one invocation drains every queued item in
+ * FIFO order and returns. Initially the routine may not be recorded (before
+ * init), in which case there is nothing to drain. */
+static void drain_deferred( void )
+{
+  if ( s_task_routine != NULL ) s_task_routine( s_task_arg );
 }
 
 static void fire( wifi_mgmt_event_t event )
@@ -271,14 +437,19 @@ static void fire( wifi_mgmt_event_t event )
     if ( s_subs[ i ].event == event ) snapshot[ n++ ] = s_subs[ i ];
   }
   for ( i = 0; i < n; ++i ) snapshot[ i ].cb( event, snapshot[ i ].user_data );
+  /* The event callback only posts to the deferred queue; apply the queued
+   * item(s) synchronously so the caller can assert the resulting state. */
+  drain_deferred();
 }
 
 /* Simulate the one-shot grace timer expiring. As with a real timer, expiry
- * first makes the timer dormant, then the expiry callback runs. */
+ * first makes the timer dormant, then the expiry callback runs (which posts
+ * the grace-expiry to the deferred queue, then drained below). */
 static void fire_grace_expiry( void )
 {
   s_timer_active = false;
   if ( s_timer_cb != NULL ) s_timer_cb( &s_mock_timer );
+  drain_deferred();
 }
 
 static void reset_mocks( void )
@@ -300,6 +471,9 @@ static void reset_mocks( void )
   s_timer_active          = false;
   s_timer_period          = 0u;
   s_timer_change_count    = 0u;
+  s_task_routine          = NULL;
+  s_task_arg              = NULL;
+  mock_queue_reset();
   s_action_log_len        = 0;
   memset( s_action_log, 0, sizeof( s_action_log ) );
 }

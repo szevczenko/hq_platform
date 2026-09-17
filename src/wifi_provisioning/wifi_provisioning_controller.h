@@ -24,18 +24,26 @@
  * controller in an explicit recoverable state instead of reporting ONLINE.
  *
  * All controller state is guarded by an internal OSAL mutex shared by the API,
- * the Wi-Fi callback and the timer callback paths; blocking calls (provisioning
- * lifecycle, Wi-Fi mode requests, OSAL timer control) are always issued after
- * the lock has been released. A session/generation token makes a stale grace
- * expiry from a cancelled or prior grace window a no-op.
+ * the deferred worker and the timer callback paths. Policy work triggered by a
+ * Wi-Fi event or the grace timer is never executed on the Wi-Fi worker (or
+ * timer) thread: those callbacks only post a small work item to a queue owned
+ * by the controller, and a dedicated controller-owned worker task applies the
+ * items in FIFO order. Blocking calls (provisioning lifecycle, Wi-Fi mode
+ * requests, OSAL timer control) are therefore always issued after the lock has
+ * been released and always on the deferred worker (or the API caller) thread.
+ * Every deferred item carries the session/generation token of the lifecycle in
+ * which it was posted and is dropped - never applied - once that session has
+ * been superseded, so a stale grace expiry or event from a cancelled or prior
+ * window is a no-op.
  *
  * The controller subscribes once per lifetime and starts provisioning at most
  * once per qualifying fallback (guarded by a per-session flag). An explicit
  * wifi_provisioning_controller_stop() overrides the pending grace timer and
  * shuts the portal down immediately. Init and deinit are idempotent; deinit
- * unsubscribes every callback the controller registered, cancels/deletes the
- * grace timer synchronously and waits out any active expiry callback before
- * clearing controller state.
+ * unsubscribes every callback the controller registered, invalidates the
+ * session, cancels/deletes the grace timer synchronously, drops any pending
+ * deferred work and joins the deferred worker so no notification or lifecycle
+ * callback can run after deinit returns.
  */
 
 #ifndef WIFI_PROVISIONING_CONTROLLER_H
@@ -93,16 +101,19 @@ typedef enum
  *                     @c wifi_provisioning_controller_config_t.
  *
  * @par Execution context
- * Transitions driven by a Wi-Fi event or by the grace timer are delivered on
- * the Wi-Fi management event thread or the OSAL timer callback context,
- * respectively. Transitions initiated synchronously by the public API -
- * @c wifi_provisioning_controller_init_with_config() (DISABLED ->
- * AWAITING_CONNECT and the immediate fallback entry into PROVISIONING),
- * @c wifi_provisioning_controller_stop() (-> RETIRING_AP or DISABLED) and
- * @c wifi_provisioning_controller_deinit() (-> DISABLED) - are delivered on
- * the thread that called that API, which must itself honor the rules below.
- * In every case the callback runs on the thread that committed the transition
- * and it must therefore:
+ * Transitions driven by a Wi-Fi event or by the grace timer are delivered from
+ * the controller's deferred worker task: the Wi-Fi event callback and the
+ * grace timer callback only queue the transition, and the worker applies the
+ * queued transitions in arrival order on a controller-owned thread, never on
+ * the Wi-Fi worker or timer thread. Transitions initiated synchronously by
+ * the public API - @c wifi_provisioning_controller_init_with_config()
+ * (DISABLED -> AWAITING_CONNECT and the immediate fallback entry into
+ * PROVISIONING), @c wifi_provisioning_controller_stop() (-> RETIRING_AP or
+ * DISABLED) and @c wifi_provisioning_controller_deinit() (-> DISABLED) - are
+ * delivered on the thread that called that API, which must itself honor the
+ * rules below. In every case the callback runs on the thread that committed
+ * the transition (always a controller-owned or API caller thread) and it must
+ * therefore:
  *   - not block: no mutexes, semaphores, long loops, network or file I/O;
  *   - not call back into the controller
  *     (@c wifi_provisioning_controller_* APIs). The controller is
@@ -159,9 +170,10 @@ typedef struct
  * and the controller enters @c PROVISIONING. A success-grace override applied
  * before init is preserved.
  *
- * @return true always; repeated calls while already initialized are safe
- *         no-ops that do not re-subscribe or restart the provisioning
- *         application.
+ * @return true when initialized; false when the controller's deferred policy
+ *         worker (queue + task) could not be created (a rare resource
+ *         failure). Repeated calls while already initialized are safe no-ops
+ *         that do not re-subscribe or restart the provisioning application.
  */
 bool wifi_provisioning_controller_init( void );
 
@@ -184,11 +196,13 @@ bool wifi_provisioning_controller_init( void );
  *                   The structure is copied at init time; its storage need not
  *                   outlive the call.
  *
- * @return true always; repeated calls while already initialized are safe
- *         no-ops that do not re-subscribe, restart the provisioning
- *         application or replace an already installed callback. A fresh
- *         lifecycle started with @c wifi_provisioning_controller_deinit()
- *         followed by this function applies the new configuration.
+ * @return true when initialized; false when the controller's deferred policy
+ *         worker (queue + task) could not be created (a rare resource
+ *         failure). Repeated calls while already initialized are safe no-ops
+ *         that do not re-subscribe, restart the provisioning application or
+ *         replace an already installed callback. A fresh lifecycle started
+ *         with @c wifi_provisioning_controller_deinit() followed by this
+ *         function applies the new configuration.
  */
 bool wifi_provisioning_controller_init_with_config(
     const wifi_provisioning_controller_config_t *config );
@@ -198,8 +212,11 @@ bool wifi_provisioning_controller_init_with_config(
  *
  * Unsubscribes every typed Wi-Fi event callback the controller registered,
  * cancels and deletes the grace timer synchronously (waiting out any active
- * timer callback), invalidates the controller session and returns to
- * @c DISABLED. Calling while already deinitialized is a safe no-op.
+ * timer callback), invalidates the controller session, drops any pending
+ * deferred work and joins the controller's deferred worker task, so no
+ * notification or lifecycle callback can run after this function returns, and
+ * returns to @c DISABLED. Calling while already deinitialized is a safe
+ * no-op.
  */
 void wifi_provisioning_controller_deinit( void );
 
@@ -245,6 +262,48 @@ void wifi_provisioning_controller_set_success_grace_ms( uint32_t grace_ms );
 wifi_provisioning_controller_state_t wifi_provisioning_controller_get_state( void );
 
 #ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+#include "wifi_managment.h"
+
+/**
+ * @brief Test-observability surface (test builds only).
+ *
+ * Lets a platform test prove that Wi-Fi event callbacks defer their policy
+ * work to the controller-owned worker: nothing is applied while the worker is
+ * held, and a burst of deferred actions is applied in the order it was
+ * queued.
+ */
+
+/** One deferred work item the controller worker is about to apply. */
+typedef struct
+{
+  bool              is_grace_expiry; /**< true: grace-timer expiry; false: mgmt event. */
+  wifi_mgmt_event_t event;           /**< Raw event (valid when @p is_grace_expiry is false). */
+  uint32_t          session;         /**< Lifecycle generation captured when the item was queued. */
+} wifi_provisioning_controller_test_deferred_t;
+
+/** Observer invoked by the deferred worker immediately before applying an item. */
+typedef void ( *wifi_provisioning_controller_test_apply_cb_t )(
+    const wifi_provisioning_controller_test_deferred_t *applied,
+    void                                               *user_ctx );
+
+/** Install/clear the apply observer (pass NULL to clear). */
+void wifi_provisioning_controller_test_set_apply_hook(
+    wifi_provisioning_controller_test_apply_cb_t cb, void *user_ctx );
+
+/** Park the deferred worker so queued items are never applied while held.
+ *  Passing false releases it; the worker then applies everything in FIFO
+ *  order. */
+void wifi_provisioning_controller_test_set_defer_hold( bool hold );
+
+/** Queue a synthetic Wi-Fi management event through the exact same deferred
+ *  path the real event callback uses (session snapshot + FIFO post). */
+bool wifi_provisioning_controller_test_inject_event( wifi_mgmt_event_t event );
+
+/** Wait until the deferred queue is empty and the worker is idle (nothing
+ *  pending and nothing being applied). Returns false on timeout. */
+bool wifi_provisioning_controller_test_wait_idle( uint32_t timeout_ms );
+
+/** Fire the grace-timer expiry callback as if the real timer had expired. */
 void wifi_provisioning_controller_test_fire_grace_expiry( void );
 #endif
 
