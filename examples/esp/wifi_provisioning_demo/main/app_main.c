@@ -71,8 +71,30 @@ static const char *demo_controller_state_name( wifi_provisioning_controller_stat
     case WIFI_PROVISIONING_CONTROLLER_ONLINE:           return "online";
     case WIFI_PROVISIONING_CONTROLLER_PROVISIONING:     return "provisioning";
     case WIFI_PROVISIONING_CONTROLLER_GRACE:            return "grace";
+    case WIFI_PROVISIONING_CONTROLLER_RETIRING_AP:      return "retiring_ap";
     default:                                            return "unknown";
   }
+}
+
+/* Opt-in state-change notification hook (see the controller header for the
+ * callback contract: it is delivered on the thread that committed the
+ * transition - the Wi-Fi/timer callback context for event-driven transitions,
+ * the calling thread for init/stop/deinit - and must not block or call back
+ * into the controller API). The demo mirrors the controller lifecycle in its
+ * own state machine by logging every transition, including the
+ * session/generation token used to discard stale notifications from an earlier
+ * controller lifecycle. */
+static void demo_on_controller_state_changed(
+    wifi_provisioning_controller_state_t previous,
+    wifi_provisioning_controller_state_t current,
+    uint32_t session,
+    void *user_ctx )
+{
+  (void) user_ctx;
+  printf( "[demo] controller state: %s -> %s (session %u)\n",
+          demo_controller_state_name( previous ),
+          demo_controller_state_name( current ),
+          (unsigned) session );
 }
 
 /* ------------------------------------------------------------------ */
@@ -165,8 +187,14 @@ static int demo_init_provisioning( void )
   }
 
   /* Automatic fallback: starts provisioning now when wifi_ap.json does not
-   * exist yet and reopens it when saved credentials are exhausted. */
-  if ( !wifi_provisioning_controller_init() )
+   * exist yet and reopens it when saved credentials are exhausted. The opt-in
+   * state-change hook lets the demo's own state machine mirror the controller
+   * lifecycle without polling. */
+  const wifi_provisioning_controller_config_t ctrl_cfg = {
+    .on_state_changed = demo_on_controller_state_changed,
+    .user_ctx         = NULL,
+  };
+  if ( !wifi_provisioning_controller_init_with_config( &ctrl_cfg ) )
   {
     printf( "[demo] ERROR: provisioning fallback controller failed\n" );
     return -1;

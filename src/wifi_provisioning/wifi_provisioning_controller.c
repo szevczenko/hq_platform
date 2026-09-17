@@ -64,6 +64,8 @@ typedef struct
   uint32_t                             session;            /* Lifecycle generation. */
   uint32_t                             grace_armed_session;/* Session that armed the timer. */
   bool                                 retire_online;      /* Retire target: ONLINE (grace) vs DISABLED (stop). */
+  wifi_provisioning_controller_state_cb_t notify_cb;      /* Optional state-change hook (init-time). */
+  void                                 *notify_user_ctx;  /* Hook user context. */
 } wifi_controller_ctx_t;
 
 static wifi_controller_ctx_t s_ctx = {
@@ -76,7 +78,9 @@ static wifi_controller_ctx_t s_ctx = {
   false,                                             /* grace_timer_active */
   0u,                                                /* session */
   0u,                                                /* grace_armed_session */
-  false                                              /* retire_online */
+  false,                                             /* retire_online */
+  NULL,                                              /* notify_cb */
+  NULL                                               /* notify_user_ctx */
 };
 
 /* Latched when an explicit success-grace override is installed.  It lets an
@@ -132,6 +136,43 @@ static void _unlock( void )
   (void) osal_mutex_give( s_lock );
 }
 
+/* State-change notification plumbing -------------------------------------- */
+
+/* Snapshot of the optional notification hook, captured in the same lock scope
+ * as the state commit so the delivered session token always matches the
+ * lifecycle generation in which the transition actually occurred. */
+typedef struct
+{
+  wifi_provisioning_controller_state_cb_t cb;
+  void                                   *user_ctx;
+  uint32_t                                session;
+} notify_snapshot_t;
+
+/* Copy the currently registered hook and session token. Must be called while
+ * holding the controller lock, in the same scope that commits the transition
+ * it will describe. */
+static void _capture_notify( notify_snapshot_t *snap )
+{
+  snap->cb       = s_ctx.notify_cb;
+  snap->user_ctx = s_ctx.notify_user_ctx;
+  snap->session  = s_ctx.session;
+}
+
+/* Deliver a captured notification outside the controller lock. A NULL hook is
+ * a safe no-op (notifications are opt-in) and a transition where the state did
+ * not actually change is suppressed. The callback is invoked with the lock
+ * released so a product may safely query get_state() from inside it; the
+ * callback contract (see the header) forbids every other controller call. */
+static void _fire_notify( const notify_snapshot_t *snap,
+                          wifi_provisioning_controller_state_t previous,
+                          wifi_provisioning_controller_state_t current )
+{
+  if ( snap->cb != NULL && previous != current )
+  {
+    snap->cb( previous, current, snap->session, snap->user_ctx );
+  }
+}
+
 /* Private helpers ------------------------------------------------------- */
 
 /* Forward declaration: defined below, used by _start_grace and the expiry
@@ -144,6 +185,7 @@ static bool _retire_provisioning( bool as_online );
 static void _abort_grace_window( void )
 {
   bool do_stop = false;
+  notify_snapshot_t snap = { NULL, NULL, 0u };
 
   _lock();
   if ( s_ctx.state == WIFI_PROVISIONING_CONTROLLER_GRACE )
@@ -151,10 +193,13 @@ static void _abort_grace_window( void )
     do_stop = s_ctx.grace_timer_active && s_ctx.grace_timer_ready;
     s_ctx.grace_timer_active      = false;
     s_ctx.state                   = WIFI_PROVISIONING_CONTROLLER_PROVISIONING;
+    _capture_notify( &snap );
   }
   _unlock();
 
   if ( do_stop ) (void) osal_timer_stop( s_ctx.grace_timer, 0u );
+  _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_GRACE,
+                WIFI_PROVISIONING_CONTROLLER_PROVISIONING );
 }
 
 /* Start the success grace window. A zero period shuts the portal down
@@ -167,6 +212,7 @@ static void _start_grace( void )
   uint32_t session = 0u;
   uint32_t grace_ms = 0u;
   osal_timer_id_t timer = NULL;
+  notify_snapshot_t snap = { NULL, NULL, 0u };
 
   _lock();
   if ( !s_ctx.enabled || s_ctx.state != WIFI_PROVISIONING_CONTROLLER_PROVISIONING )
@@ -180,7 +226,10 @@ static void _start_grace( void )
     /* Zero grace: retire immediately. Keep the state in GRACE so the retire
      * helper recognises a live window and refuses a spurious later restart. */
     s_ctx.state = WIFI_PROVISIONING_CONTROLLER_GRACE;
+    _capture_notify( &snap );
     _unlock();
+    _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                  WIFI_PROVISIONING_CONTROLLER_GRACE );
     (void) _retire_provisioning( true );
     return;
   }
@@ -194,8 +243,11 @@ static void _start_grace( void )
     grace_ms                      = s_ctx.grace_ms;
     timer                         = s_ctx.grace_timer;
     arm                           = true;
+    _capture_notify( &snap );
   }
   _unlock();
+  _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                WIFI_PROVISIONING_CONTROLLER_GRACE );
 
   if ( arm )
   {
@@ -221,7 +273,10 @@ static void _start_grace( void )
   /* No usable timer: fall through to an immediate (no-wait) retirement. */
   _lock();
   s_ctx.state = WIFI_PROVISIONING_CONTROLLER_GRACE;
+  _capture_notify( &snap );
   _unlock();
+  _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                WIFI_PROVISIONING_CONTROLLER_GRACE );
   (void) _retire_provisioning( true );
 }
 
@@ -240,6 +295,8 @@ static bool _retire_provisioning( bool as_online )
   uint32_t   sess;
   bool       listeners_stopped;
   bool       current;
+  wifi_provisioning_controller_state_t prev;
+  notify_snapshot_t snap = { NULL, NULL, 0u };
 
   _lock();
   if ( !s_ctx.enabled )
@@ -247,6 +304,7 @@ static bool _retire_provisioning( bool as_online )
     _unlock();
     return false;
   }
+  prev = s_ctx.state;
 
   switch ( s_ctx.state )
   {
@@ -258,7 +316,9 @@ static bool _retire_provisioning( bool as_online )
       /* Explicit stop while waiting has no active portal to retire. */
       s_ctx.state         = WIFI_PROVISIONING_CONTROLLER_DISABLED;
       s_ctx.retire_online = false;
+      _capture_notify( &snap );
       _unlock();
+      _fire_notify( &snap, prev, WIFI_PROVISIONING_CONTROLLER_DISABLED );
       return true;
     default:
       /* No active portal. Only an explicit stop turns this into DISABLED; a
@@ -267,8 +327,10 @@ static bool _retire_provisioning( bool as_online )
       {
         s_ctx.state         = WIFI_PROVISIONING_CONTROLLER_DISABLED;
         s_ctx.retire_online = false;
+        _capture_notify( &snap );
       }
       _unlock();
+      _fire_notify( &snap, prev, WIFI_PROVISIONING_CONTROLLER_DISABLED );
       return true;
   }
 
@@ -277,7 +339,9 @@ static bool _retire_provisioning( bool as_online )
   s_ctx.grace_timer_active     = false;
   s_ctx.state                  = WIFI_PROVISIONING_CONTROLLER_RETIRING_AP;
   s_ctx.retire_online          = as_online;
+  _capture_notify( &snap );
   _unlock();
+  _fire_notify( &snap, prev, WIFI_PROVISIONING_CONTROLLER_RETIRING_AP );
 
   if ( do_timer_stop ) (void) osal_timer_stop( s_ctx.grace_timer, 0u );
 
@@ -303,7 +367,10 @@ static bool _retire_provisioning( bool as_online )
     _lock();
     s_ctx.state         = WIFI_PROVISIONING_CONTROLLER_PROVISIONING;
     s_ctx.retire_online = false;
+    _capture_notify( &snap );
     _unlock();
+    _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
+                  WIFI_PROVISIONING_CONTROLLER_PROVISIONING );
     return false;
   }
 
@@ -316,7 +383,10 @@ static bool _retire_provisioning( bool as_online )
     _lock();
     s_ctx.state         = WIFI_PROVISIONING_CONTROLLER_PROVISIONING;
     s_ctx.retire_online = false;
+    _capture_notify( &snap );
     _unlock();
+    _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
+                  WIFI_PROVISIONING_CONTROLLER_PROVISIONING );
     (void) wifi_http_provisioning_start();
     return false;
   }
@@ -382,6 +452,8 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
        * read under the lock; the grace timer stop itself runs outside it. */
       {
         wifi_provisioning_controller_state_t state_before;
+        notify_snapshot_t snap = { NULL, NULL, 0u };
+
         _lock();
         state_before = s_ctx.state;
         _unlock();
@@ -394,7 +466,10 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
         {
           _lock();
           s_ctx.state = WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT;
+          _capture_notify( &snap );
           _unlock();
+          _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_ONLINE,
+                        WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT );
         }
       }
       break;
@@ -405,6 +480,8 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
        * window only cancels the timer and keeps the existing portal. */
       {
         wifi_provisioning_controller_state_t state_before;
+        notify_snapshot_t snap = { NULL, NULL, 0u };
+
         _lock();
         state_before = s_ctx.state;
         _unlock();
@@ -415,6 +492,8 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
         }
         else if ( state_before == WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT )
         {
+          bool entered_provisioning = false;
+
           _lock();
           if ( !s_ctx.fallback_started )
           {
@@ -425,9 +504,16 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
             if ( s_ctx.enabled )
             {
               s_ctx.state = WIFI_PROVISIONING_CONTROLLER_PROVISIONING;
+              entered_provisioning = true;
+              _capture_notify( &snap );
             }
           }
           _unlock();
+          if ( entered_provisioning )
+          {
+            _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                          WIFI_PROVISIONING_CONTROLLER_PROVISIONING );
+          }
         }
       }
       break;
@@ -436,20 +522,28 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
       /* The asynchronous completion of a STA-only retirement: only now may
        * the controller report ONLINE (or, for an explicit stop, DISABLED).
        * A stale confirmation after a newer session is ignored. */
-      _lock();
-      if ( s_ctx.enabled && s_ctx.state == WIFI_PROVISIONING_CONTROLLER_RETIRING_AP )
       {
-        if ( s_ctx.retire_online )
+        wifi_provisioning_controller_state_t next = WIFI_PROVISIONING_CONTROLLER_DISABLED;
+        notify_snapshot_t snap = { NULL, NULL, 0u };
+
+        _lock();
+        if ( s_ctx.enabled && s_ctx.state == WIFI_PROVISIONING_CONTROLLER_RETIRING_AP )
         {
-          s_ctx.state = WIFI_PROVISIONING_CONTROLLER_ONLINE;
+          if ( s_ctx.retire_online )
+          {
+            next = WIFI_PROVISIONING_CONTROLLER_ONLINE;
+          }
+          else
+          {
+            next = WIFI_PROVISIONING_CONTROLLER_DISABLED;
+          }
+          s_ctx.state         = next;
+          s_ctx.retire_online = false;
+          _capture_notify( &snap );
         }
-        else
-        {
-          s_ctx.state = WIFI_PROVISIONING_CONTROLLER_DISABLED;
-        }
-        s_ctx.retire_online = false;
+        _unlock();
+        _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_RETIRING_AP, next );
       }
-      _unlock();
       break;
 
     default:
@@ -462,7 +556,16 @@ static void _controller_on_event( wifi_mgmt_event_t event, void* user_data )
 
 bool wifi_provisioning_controller_init( void )
 {
+  return wifi_provisioning_controller_init_with_config( NULL );
+}
+
+bool wifi_provisioning_controller_init_with_config(
+    const wifi_provisioning_controller_config_t *config )
+{
   bool timer_ready = false;
+  bool entered_provisioning = false;
+  wifi_provisioning_controller_state_t prev;
+  notify_snapshot_t snap = { NULL, NULL, 0u };
 
   if ( !_ensure_lock() ) return false;
 
@@ -477,6 +580,7 @@ bool wifi_provisioning_controller_init( void )
   _unlock();
 
   _lock();
+  prev                     = s_ctx.state;
   s_ctx.enabled            = true;
   s_ctx.fallback_started   = false;
   s_ctx.grace_timer_active = false;
@@ -487,8 +591,24 @@ bool wifi_provisioning_controller_init( void )
   {
     s_ctx.grace_ms = CONFIG_WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS;
   }
+  /* Install the opt-in state-change hook from the init-time configuration.
+   * A NULL config (and a NULL hook) disables notifications for this fresh
+   * lifecycle; a NULL config also clears any hook left over from an earlier
+   * lifecycle so plain init() stays notification-free. */
+  if ( config != NULL )
+  {
+    s_ctx.notify_cb       = config->on_state_changed;
+    s_ctx.notify_user_ctx = config->user_ctx;
+  }
+  else
+  {
+    s_ctx.notify_cb       = NULL;
+    s_ctx.notify_user_ctx = NULL;
+  }
   s_ctx.state = WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT;
+  _capture_notify( &snap );
   _unlock();
+  _fire_notify( &snap, prev, WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT );
 
   /* The grace timer is created once and reused across sessions. A failure to
    * create it leaves the portal up after success (grace never expires). */
@@ -520,8 +640,15 @@ bool wifi_provisioning_controller_init( void )
     if ( s_ctx.enabled && s_ctx.fallback_started )
     {
       s_ctx.state = WIFI_PROVISIONING_CONTROLLER_PROVISIONING;
+      entered_provisioning = true;
+      _capture_notify( &snap );
     }
     _unlock();
+    if ( entered_provisioning )
+    {
+      _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                    WIFI_PROVISIONING_CONTROLLER_PROVISIONING );
+    }
   }
 
   (void) osal_mutex_give( s_lifecycle_lock );
@@ -530,6 +657,9 @@ bool wifi_provisioning_controller_init( void )
 
 void wifi_provisioning_controller_deinit( void )
 {
+  wifi_provisioning_controller_state_t prev;
+  notify_snapshot_t snap = { NULL, NULL, 0u };
+
   if ( !_ensure_lock() ) return;
 
   (void) osal_mutex_take( s_lifecycle_lock );
@@ -562,14 +692,22 @@ void wifi_provisioning_controller_deinit( void )
   if ( do_delete ) (void) osal_timer_delete( s_ctx.grace_timer, 0u );
 
   /* Clear controller state only after the timer has been dismissed. The
-   * session generation bump invalidates any late callback. */
+   * session generation bump invalidates any late callback. The final DISABLED
+   * notification is fired with the still-registered hook and the fresh
+   * session token; afterwards the hook is cleared so a later lifecycle without
+   * a new configuration stays notification-free. */
   _lock();
-  s_ctx.enabled          = false;
-  s_ctx.fallback_started = false;
-  s_ctx.retire_online    = false;
-  s_ctx.state             = WIFI_PROVISIONING_CONTROLLER_DISABLED;
+  prev                     = s_ctx.state;
+  s_ctx.enabled            = false;
+  s_ctx.fallback_started   = false;
+  s_ctx.retire_online      = false;
+  s_ctx.state              = WIFI_PROVISIONING_CONTROLLER_DISABLED;
   ++s_ctx.session;
+  _capture_notify( &snap );
+  s_ctx.notify_cb          = NULL;
+  s_ctx.notify_user_ctx    = NULL;
   _unlock();
+  _fire_notify( &snap, prev, WIFI_PROVISIONING_CONTROLLER_DISABLED );
   (void) osal_mutex_give( s_lifecycle_lock );
 }
 

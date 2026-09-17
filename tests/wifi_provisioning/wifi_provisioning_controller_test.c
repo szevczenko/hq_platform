@@ -20,7 +20,11 @@
  *  - stop failure / mode failure       -> recoverable, never ONLINE,
  *  - mode acknowledgement              -> ONLINE only after MODE_CHANGED,
  *  - init/deinit are idempotent,
- *  - deinit unsubscribes every callback.
+ *  - deinit unsubscribes every callback,
+ *  - opt-in state-change notification  -> fired on every documented transition,
+ *  - stale-session notification        -> discarded after deinit/re-init,
+ *  - NULL callback                     -> safe no-op,
+ *  - re-entrant get_state() callback   -> no deadlock/panic.
  *
  * The controller source is compiled against mock implementations of
  * wifi_mgmt_is_read_data/subscribe/unsubscribe/request_mode,
@@ -305,6 +309,121 @@ static void assert_timer_armed( uint32_t period_ms )
 {
   TEST_ASSERT_TRUE( osal_timer_is_active( NULL ) );
   TEST_ASSERT_EQUAL_UINT32( period_ms, s_timer_period );
+}
+
+/* --- state-change notification helpers ------------------------------------ */
+
+#define NOTIFY_MAX 64
+
+/* Golden record of one delivered state-change notification. */
+typedef struct
+{
+  wifi_provisioning_controller_state_t prev;
+  wifi_provisioning_controller_state_t cur;
+  uint32_t                             session;
+} notify_record_t;
+
+static notify_record_t s_notify_records[ NOTIFY_MAX ];
+static int             s_notify_count        = 0;
+static void           *s_notify_user_ctx_seen = NULL;
+
+/* Product-side mirror state maintained by the filtering callback. */
+static wifi_provisioning_controller_state_t s_product_state = WIFI_PROVISIONING_CONTROLLER_DISABLED;
+static uint32_t s_product_view_session = 0u;   /* Newest lifecycle token accepted. */
+static int      s_product_stale_count  = 0;    /* Notifications dropped as stale. */
+
+static void record_notify( wifi_provisioning_controller_state_t prev,
+                           wifi_provisioning_controller_state_t cur,
+                           uint32_t session,
+                           void *user_ctx )
+{
+  s_notify_user_ctx_seen = user_ctx;
+  if ( s_notify_count < NOTIFY_MAX )
+  {
+    s_notify_records[ s_notify_count ].prev    = prev;
+    s_notify_records[ s_notify_count ].cur     = cur;
+    s_notify_records[ s_notify_count ].session = session;
+    ++s_notify_count;
+  }
+}
+
+/* Plain recorder: accepts every notification. */
+static void on_state_changed( wifi_provisioning_controller_state_t prev,
+                              wifi_provisioning_controller_state_t cur,
+                              uint32_t session,
+                              void *user_ctx )
+{
+  record_notify( prev, cur, session, user_ctx );
+}
+
+/* Product-style callback: keeps a mirror state machine and drops notifications
+ * whose session token predates the newest lifecycle it has seen, exactly what
+ * a state-machine-driven product does with the generation token. */
+static void on_state_changed_filter_session( wifi_provisioning_controller_state_t prev,
+                                             wifi_provisioning_controller_state_t cur,
+                                             uint32_t session,
+                                             void *user_ctx )
+{
+  (void) prev;
+  if ( session < s_product_view_session )
+  {
+    ++s_product_stale_count;    /* stale: discarded, mirror not updated. */
+    return;
+  }
+  s_product_view_session = session;
+  s_product_state        = cur;
+  record_notify( prev, cur, session, user_ctx );
+}
+
+/* Re-entrant callback: queries get_state() from inside the notification. The
+ * controller must deliver notifications with its lock released, so this must
+ * neither deadlock nor panic and must observe the very state just entered. */
+static void on_state_changed_query_state( wifi_provisioning_controller_state_t prev,
+                                          wifi_provisioning_controller_state_t cur,
+                                          uint32_t session,
+                                          void *user_ctx )
+{
+  record_notify( prev, cur, session, user_ctx );
+  TEST_ASSERT_EQUAL( cur, wifi_provisioning_controller_get_state() );
+}
+
+/* Convenience: install the recorder and initialize with no saved credentials
+ * (fresh lifecycle, provisioning starts immediately). */
+static void init_with_recorder( const wifi_provisioning_controller_config_t *cfg )
+{
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init_with_config( cfg ) );
+}
+
+static void reset_notify_records( void )
+{
+  s_notify_count          = 0;
+  s_notify_user_ctx_seen  = (void*) 0;
+  s_product_state         = WIFI_PROVISIONING_CONTROLLER_DISABLED;
+  s_product_view_session  = 0u;
+  s_product_stale_count   = 0;
+}
+
+/* Assert that the recorded notifications equal the expected (prev, cur)
+ * sequence and that every delivered token belongs to the same controller
+ * lifecycle (identical, non-zero session). The absolute value is intentionally
+ * not pinned: the session is a running generation counter that only increases
+ * across the lifecycles exercised by the whole test process. */
+static void assert_notify_sequence( const wifi_provisioning_controller_state_t *expected,
+                                    int count )
+{
+  uint32_t first_session;
+  int i;
+
+  TEST_ASSERT_TRUE( count > 0 );
+  TEST_ASSERT_EQUAL_INT( count, s_notify_count );
+  first_session = s_notify_records[ 0 ].session;
+  TEST_ASSERT_TRUE( first_session != 0u );
+  for ( i = 0; i < count; ++i )
+  {
+    TEST_ASSERT_EQUAL_INT( expected[ 2 * i ],     s_notify_records[ i ].prev );
+    TEST_ASSERT_EQUAL_INT( expected[ 2 * i + 1 ], s_notify_records[ i ].cur );
+    TEST_ASSERT_EQUAL_UINT32( first_session, s_notify_records[ i ].session );
+  }
 }
 
 /* Assert that a shutdown logged "S" (listener stop) before any "M"
@@ -715,6 +834,232 @@ static void test_stale_expiry_cannot_stop_new_session( void )
   TEST_ASSERT_EQUAL_INT( 2, s_provision_start_count );
 }
 
+/* --- state-change notification tests --------------------------------------- */
+
+/* The hook fires for the init transitions: DISABLED -> AWAITING_CONNECT and
+ * the immediate fallback entry AWAITING_CONNECT -> PROVISIONING, each carrying
+ * the current lifecycle's session token and the registered user context. */
+static void test_callback_fired_on_init_and_fallback( void )
+{
+  wifi_provisioning_controller_config_t cfg = { on_state_changed, (void*) 0xCAFEu };
+  static const wifi_provisioning_controller_state_t expected[] = {
+    WIFI_PROVISIONING_CONTROLLER_DISABLED,         WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+    WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT, WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+  };
+
+  reset_mocks();
+  reset_notify_records();
+  init_with_recorder( &cfg );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  assert_notify_sequence( expected, 2 );
+  TEST_ASSERT_EQUAL( (void*) 0xCAFEu, s_notify_user_ctx_seen );
+}
+
+/* The full success lifecycle is observable end to end: PROVISIONING -> GRACE
+ * on station IP, GRACE -> RETIRING_AP on expiry, RETIRING_AP -> ONLINE on the
+ * STA-only confirmation. All tokens belong to the single session. */
+static void test_callback_fired_on_grace_expiry_to_online( void )
+{
+  wifi_provisioning_controller_config_t cfg = { on_state_changed, NULL };
+  static const wifi_provisioning_controller_state_t expected[] = {
+    WIFI_PROVISIONING_CONTROLLER_DISABLED,         WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+    WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT, WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+    WIFI_PROVISIONING_CONTROLLER_PROVISIONING,     WIFI_PROVISIONING_CONTROLLER_GRACE,
+    WIFI_PROVISIONING_CONTROLLER_GRACE,            WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
+    WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,      WIFI_PROVISIONING_CONTROLLER_ONLINE,
+  };
+
+  reset_mocks();
+  reset_notify_records();
+  init_with_recorder( &cfg );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );    /* PROVISIONING -> GRACE */
+  fire_grace_expiry();                  /* GRACE -> RETIRING_AP */
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED ); /* RETIRING_AP -> ONLINE */
+  assert_notify_sequence( expected, 5 );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
+                     wifi_provisioning_controller_get_state() );
+}
+
+/* The grace-abort path is observable: a disconnect inside the grace window
+ * moves GRACE -> PROVISIONING and keeps the portal open. */
+static void test_callback_fired_on_grace_abort( void )
+{
+  wifi_provisioning_controller_config_t cfg = { on_state_changed, NULL };
+  static const wifi_provisioning_controller_state_t expected[] = {
+    WIFI_PROVISIONING_CONTROLLER_DISABLED,         WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+    WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT, WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+    WIFI_PROVISIONING_CONTROLLER_PROVISIONING,     WIFI_PROVISIONING_CONTROLLER_GRACE,
+    WIFI_PROVISIONING_CONTROLLER_GRACE,            WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+  };
+
+  reset_mocks();
+  reset_notify_records();
+  init_with_recorder( &cfg );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );   /* PROVISIONING -> GRACE */
+  fire( WIFI_MGMT_EVENT_DISCONNECTED );/* GRACE -> PROVISIONING (abort) */
+  assert_notify_sequence( expected, 4 );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_is_provisioning() );
+}
+
+/* The online-loss path is observable: a transient disconnect from ONLINE
+ * falls back to AWAITING_CONNECT without reopening the portal. */
+static void test_callback_fired_on_online_loss( void )
+{
+  wifi_provisioning_controller_config_t cfg = { on_state_changed, NULL };
+  static const wifi_provisioning_controller_state_t expected[] = {
+    WIFI_PROVISIONING_CONTROLLER_DISABLED,         WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+    WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT, WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
+    WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,      WIFI_PROVISIONING_CONTROLLER_ONLINE,
+    WIFI_PROVISIONING_CONTROLLER_ONLINE,           WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+  };
+
+  reset_mocks();
+  s_has_saved_credentials = true;
+  reset_notify_records();
+  init_with_recorder( &cfg );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                     wifi_provisioning_controller_get_state() );
+  fire( WIFI_MGMT_EVENT_CONNECTED );    /* AWAITING_CONNECT -> RETIRING_AP */
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED ); /* RETIRING_AP -> ONLINE */
+  fire( WIFI_MGMT_EVENT_DISCONNECTED ); /* ONLINE -> AWAITING_CONNECT */
+  assert_notify_sequence( expected, 4 );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
+}
+
+/* An explicit stop is observable: GRACE -> RETIRING_AP -> DISABLED once the
+ * STA-only mode is confirmed. */
+static void test_callback_fired_on_explicit_stop( void )
+{
+  wifi_provisioning_controller_config_t cfg = { on_state_changed, NULL };
+  static const wifi_provisioning_controller_state_t expected[] = {
+    WIFI_PROVISIONING_CONTROLLER_DISABLED,         WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+    WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT, WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+    WIFI_PROVISIONING_CONTROLLER_PROVISIONING,     WIFI_PROVISIONING_CONTROLLER_GRACE,
+    WIFI_PROVISIONING_CONTROLLER_GRACE,            WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
+    WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,      WIFI_PROVISIONING_CONTROLLER_DISABLED,
+  };
+
+  reset_mocks();
+  reset_notify_records();
+  init_with_recorder( &cfg );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );  /* PROVISIONING -> GRACE */
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_stop() );  /* GRACE -> RETIRING_AP */
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED ); /* RETIRING_AP -> DISABLED */
+  assert_notify_sequence( expected, 5 );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED,
+                     wifi_provisioning_controller_get_state() );
+}
+
+/* The session/generation token lets a product discard notifications from a
+ * prior controller lifecycle: after deinit/re-init every genuine notification
+ * carries the fresh token, and a late straggler from an old lifecycle is
+ * dropped by the product's session-gated filter. */
+static void test_stale_session_notifications_discarded( void )
+{
+  wifi_provisioning_controller_config_t cfg = { on_state_changed_filter_session, NULL };
+  uint32_t sess1, sess2, sess3;
+
+  reset_mocks();
+  reset_notify_records();
+  init_with_recorder( &cfg );                     /* fresh lifecycle: D->AC, AC->P */
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING, s_product_state );
+  TEST_ASSERT_EQUAL_INT( 2, s_notify_count );
+  sess1 = s_notify_records[ s_notify_count - 1 ].session;
+  TEST_ASSERT_EQUAL_UINT32( sess1, s_product_view_session );
+
+  wifi_provisioning_controller_deinit();          /* DISABLED, new generation */
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED, s_product_state );
+  TEST_ASSERT_EQUAL_INT( 3, s_notify_count );
+  sess2 = s_notify_records[ s_notify_count - 1 ].session;
+  TEST_ASSERT_TRUE( sess2 > sess1 );
+  TEST_ASSERT_EQUAL_UINT32( sess2, s_product_view_session );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_DISABLED,
+                     wifi_provisioning_controller_get_state() );
+
+  init_with_recorder( &cfg );                     /* lifecycle 3: D->AC, AC->P */
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING, s_product_state );
+  TEST_ASSERT_EQUAL_INT( 5, s_notify_count );
+  sess3 = s_notify_records[ s_notify_count - 1 ].session;
+  TEST_ASSERT_TRUE( sess3 > sess2 );
+  TEST_ASSERT_EQUAL_UINT32( sess3, s_product_view_session );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+
+  /* Genuine notifications across the three lifecycles: none was stale. */
+  TEST_ASSERT_EQUAL_INT( 0, s_product_stale_count );
+
+  /* A straggler from lifecycle #1 or #2 delivered after the re-init carries an
+   * old token and must be discarded without touching the product mirror. */
+  on_state_changed_filter_session( WIFI_PROVISIONING_CONTROLLER_GRACE,
+                                   WIFI_PROVISIONING_CONTROLLER_RETIRING_AP, sess1, NULL );
+  on_state_changed_filter_session( WIFI_PROVISIONING_CONTROLLER_GRACE,
+                                   WIFI_PROVISIONING_CONTROLLER_RETIRING_AP, sess2, NULL );
+  TEST_ASSERT_EQUAL_INT( 2, s_product_stale_count );
+  TEST_ASSERT_EQUAL_INT( 5, s_notify_count );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING, s_product_state );
+  TEST_ASSERT_EQUAL_UINT32( sess3, s_product_view_session );
+}
+
+/* A NULL hook (plain init() or a config with on_state_changed == NULL) is a
+ * safe no-op: no callback is invoked anywhere in the lifecycle. */
+static void test_null_callback_is_noop( void )
+{
+  wifi_provisioning_controller_config_t null_cfg = { NULL, NULL };
+
+  /* Zero-arg init: full lifecycle with no notifications at all. */
+  reset_mocks();
+  reset_notify_records();
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+  fire_grace_expiry();
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_notify_count );
+
+  /* Config-init with a NULL hook is equally a no-op. */
+  reset_mocks();
+  reset_notify_records();
+  init_with_recorder( &null_cfg );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_notify_count );
+}
+
+/* Re-entrancy: a product callback that queries get_state() must neither
+ * deadlock nor panic; it must observe the exact state just entered. */
+static void test_callback_queries_get_state_without_panic( void )
+{
+  wifi_provisioning_controller_config_t cfg = { on_state_changed_query_state, NULL };
+  static const wifi_provisioning_controller_state_t expected[] = {
+    WIFI_PROVISIONING_CONTROLLER_DISABLED,         WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+    WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT, WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+    WIFI_PROVISIONING_CONTROLLER_PROVISIONING,     WIFI_PROVISIONING_CONTROLLER_GRACE,
+    WIFI_PROVISIONING_CONTROLLER_GRACE,            WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,
+    WIFI_PROVISIONING_CONTROLLER_RETIRING_AP,      WIFI_PROVISIONING_CONTROLLER_ONLINE,
+  };
+
+  reset_mocks();
+  reset_notify_records();
+  init_with_recorder( &cfg );
+  wifi_provisioning_controller_set_success_grace_ms( 200 );
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+  fire_grace_expiry();
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED );
+  assert_notify_sequence( expected, 5 );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
+                     wifi_provisioning_controller_get_state() );
+}
+
 /* Runner ------------------------------------------------------------------- */
 
 static void run_controller_tests( void )
@@ -736,6 +1081,14 @@ static void run_controller_tests( void )
   RUN_TEST( test_mode_failure_keeps_provisioning );
   RUN_TEST( test_deinit_then_stale_expiry_is_ignored );
   RUN_TEST( test_stale_expiry_cannot_stop_new_session );
+  RUN_TEST( test_callback_fired_on_init_and_fallback );
+  RUN_TEST( test_callback_fired_on_grace_expiry_to_online );
+  RUN_TEST( test_callback_fired_on_grace_abort );
+  RUN_TEST( test_callback_fired_on_online_loss );
+  RUN_TEST( test_callback_fired_on_explicit_stop );
+  RUN_TEST( test_stale_session_notifications_discarded );
+  RUN_TEST( test_null_callback_is_noop );
+  RUN_TEST( test_callback_queries_get_state_without_panic );
 }
 
 /* setUp/tearDown are intentionally empty (each test resets its own state). */

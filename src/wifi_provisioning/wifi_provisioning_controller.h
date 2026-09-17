@@ -72,10 +72,86 @@ typedef enum
   WIFI_PROVISIONING_CONTROLLER_RETIRING_AP      = 5,
 } wifi_provisioning_controller_state_t;
 
+/**
+ * @brief State-change notification callback (opt-in, NULL disables it).
+ *
+ * Invoked for every policy state transition the controller commits, so a
+ * product with its own application state machine can mirror the full
+ * controller lifecycle without polling
+ * @c wifi_provisioning_controller_get_state().
+ *
+ * @param[in] previous State the controller is leaving.
+ * @param[in] current  State the controller just entered.
+ * @param[in] session  Session/generation token of the controller lifecycle in
+ *                     which the transition was committed. It is incremented on
+ *                     every init/deinit, so a notification captured in an
+ *                     earlier lifecycle carries an older token; a product that
+ *                     keeps the newest token it has seen can discard stale
+ *                     notifications delivered from a prior controller
+ *                     lifecycle.
+ * @param[in] user_ctx Opaque pointer registered in
+ *                     @c wifi_provisioning_controller_config_t.
+ *
+ * @par Execution context
+ * Transitions driven by a Wi-Fi event or by the grace timer are delivered on
+ * the Wi-Fi management event thread or the OSAL timer callback context,
+ * respectively. Transitions initiated synchronously by the public API -
+ * @c wifi_provisioning_controller_init_with_config() (DISABLED ->
+ * AWAITING_CONNECT and the immediate fallback entry into PROVISIONING),
+ * @c wifi_provisioning_controller_stop() (-> RETIRING_AP or DISABLED) and
+ * @c wifi_provisioning_controller_deinit() (-> DISABLED) - are delivered on
+ * the thread that called that API, which must itself honor the rules below.
+ * In every case the callback runs on the thread that committed the transition
+ * and it must therefore:
+ *   - not block: no mutexes, semaphores, long loops, network or file I/O;
+ *   - not call back into the controller
+ *     (@c wifi_provisioning_controller_* APIs). The controller is
+ *     mid-transition when the callback runs, so re-entering it can deadlock or
+ *     corrupt the state machine. The read-only queries
+ *     @c wifi_provisioning_controller_get_state() and
+ *     @c wifi_provisioning_controller_is_provisioning() are the documented
+ *     exception: they take only the short-lived controller lock (released
+ *     before the callback is invoked) and never block; every other controller
+ *     entry point (init, deinit, stop, set_success_grace_ms) must not be
+ *     called from the callback;
+ *   - not free or reuse @p user_ctx; its lifetime is the caller's
+ *     responsibility and must cover every callback invocation.
+ *
+ * @par Payload guarantee
+ * The payload is a pure state signal: two state enumerators, the session
+ * token and @p user_ctx. No credential, SSID or other wireless content is
+ * ever passed to this callback.
+ */
+typedef void (*wifi_provisioning_controller_state_cb_t)(
+    wifi_provisioning_controller_state_t previous,
+    wifi_provisioning_controller_state_t current,
+    uint32_t session,
+    void *user_ctx );
+
+/**
+ * @brief Init-time configuration for the automatic fallback controller.
+ *
+ * Passed to @c wifi_provisioning_controller_init_with_config(). Every field is
+ * optional; a NULL configuration equals the default behavior of
+ * @c wifi_provisioning_controller_init() (no notifications).
+ */
+typedef struct
+{
+  /** Optional state-change hook; NULL (default) disables notifications. See
+   *  @c wifi_provisioning_controller_state_cb_t for the callback contract. */
+  wifi_provisioning_controller_state_cb_t on_state_changed;
+
+  /** Opaque user context passed back to @p on_state_changed. May be NULL. */
+  void *user_ctx;
+} wifi_provisioning_controller_config_t;
+
 /* Public functions --------------------------------------------------------- */
 
 /**
  * @brief Initialize the automatic fallback controller (idempotent).
+ *
+ * Equivalent to @c wifi_provisioning_controller_init_with_config(NULL):
+ * the controller runs without a state-change notification callback.
  *
  * Subscribes to @c WIFI_MGMT_EVENT_CONNECTED, @c WIFI_MGMT_EVENT_DISCONNECTED,
  * @c WIFI_MGMT_EVENT_CONNECT_FAILED and @c WIFI_MGMT_EVENT_MODE_CHANGED. If no
@@ -88,6 +164,34 @@ typedef enum
  *         application.
  */
 bool wifi_provisioning_controller_init( void );
+
+/**
+ * @brief Initialize the automatic fallback controller with an optional
+ *        state-change notification hook (idempotent).
+ *
+ * Behaves exactly like @c wifi_provisioning_controller_init() and additionally
+ * installs the opt-in notification callback carried by @p config, letting a
+ * product observe the full controller lifecycle (DISABLED -> AWAITING_CONNECT,
+ * fallback entry into PROVISIONING, PROVISIONING -> GRACE, GRACE ->
+ * RETIRING_AP, RETIRING_AP -> ONLINE/DISABLED, the grace-abort path GRACE ->
+ * PROVISIONING and the online-loss path ONLINE -> AWAITING_CONNECT) without
+ * polling. See @c wifi_provisioning_controller_state_cb_t for the callback
+ * contract and the re-entrancy rule.
+ *
+ * @param[in] config Optional configuration; may be NULL, in which case this
+ *                   function behaves exactly like
+ *                   @c wifi_provisioning_controller_init() (no notifications).
+ *                   The structure is copied at init time; its storage need not
+ *                   outlive the call.
+ *
+ * @return true always; repeated calls while already initialized are safe
+ *         no-ops that do not re-subscribe, restart the provisioning
+ *         application or replace an already installed callback. A fresh
+ *         lifecycle started with @c wifi_provisioning_controller_deinit()
+ *         followed by this function applies the new configuration.
+ */
+bool wifi_provisioning_controller_init_with_config(
+    const wifi_provisioning_controller_config_t *config );
 
 /**
  * @brief Deinitialize the automatic fallback controller (idempotent).
