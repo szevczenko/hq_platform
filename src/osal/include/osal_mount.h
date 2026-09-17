@@ -49,7 +49,7 @@ int32_t osal_mkfs(char *address, const char *devname, const char *volname, size_
  *
  * Mounts a file system or block device at the given mount point.
  *
- * @note No format on mount failure (TASK-118 guarantee): if the filesystem is
+ * @note No format on mount failure: if the filesystem is
  *       missing or corrupt, osal_mount() reports OSAL_ERROR and leaves the
  *       partition contents completely untouched.  The backend never formats
  *       the volume as an automatic reaction to a mount error.  Formatting is
