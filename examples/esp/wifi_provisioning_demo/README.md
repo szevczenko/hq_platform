@@ -66,10 +66,19 @@ in `defconfig/esp_provisioning.defconfig` and behaves as follows:
 | Condition                          | Behavior                                         |
 |------------------------------------|--------------------------------------------------|
 | No saved credential exists          | Portal opens immediately at boot                  |
-| Saved credentials exhausted (connect failed) | Portal reopens once per fallback session  |
+| Saved credentials exhausted (connect failed) | Portal reopens after the configured fallback budget (default 1 = first failure) |
 | Single transient disconnect         | Portal never reopens                              |
 | Credential submitted while portal up| Station connects; portal stays for the grace period |
 | Grace period expires                | Portal stops; STA-only transition (AP retired)     |
+
+The fallback budget (`CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS`) is the
+number of consecutive `CONNECT_FAILED` events the controller must observe
+while waiting for a saved-credential connection before it opens the portal.
+The demo keeps the historical value of 1 (the portal opens on the first
+failure); a product can raise it so a transient router reboot does not surface
+the provisioning AP, set it to 0 to disable the failure-driven fallback
+entirely, or override it per device at init time through
+`wifi_provisioning_controller_config_t.fallback_budget`.
 
 ## Provisioning flow
 

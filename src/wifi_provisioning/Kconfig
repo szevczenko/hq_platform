@@ -17,6 +17,21 @@ config WIFI_HTTP_PROVISIONING_AUTO_FALLBACK
     Start the provisioning portal automatically when no usable saved
     credentials exist or when saved credentials fail to connect.
 
+config WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS
+  int "Consecutive saved-credential connect failures before fallback"
+  range 0 64
+  default 1
+  help
+    Number of consecutive CONNECT_FAILED events observed while the automatic
+    fallback controller is awaiting a saved-credential connection before the
+    provisioning portal opens. A value of 1 preserves the historical
+    first-failure behavior; 0 disables the fallback entirely (the
+    no-saved-credential start-on-init path is not affected). The controller
+    resets the budget on any successful connect and re-arms it when it returns
+    to the awaiting-connect state from an online connection. A per-device
+    override can be installed at init time through
+    wifi_provisioning_controller_config_t.fallback_budget.
+
 config WIFI_HTTP_PROVISIONING_HTTP_URL
   string "Provisioning HTTP listen URL"
   default "http://0.0.0.0:80"

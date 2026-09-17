@@ -7,6 +7,9 @@
  *  - no saved credential               -> provisioning starts on init,
  *  - successful saved credential       -> no portal; goes ONLINE,
  *  - exhausted saved credentials       -> provisioning starts once,
+ *  - fallback budget                  -> opens only after N consecutive
+ *                                        CONNECT_FAILED, reset on success,
+ *                                        zero disables fallback,
  *  - transient disconnect              -> provisioning is never opened,
  *  - success grace period              -> portal kept, then STA-only,
  *  - failure inside the grace window   -> portal kept, timer cancelled,
@@ -93,6 +96,16 @@ static void log_action( const char *action )
   {
     s_action_log[ s_action_log_len++ ] = action[i];
   }
+}
+
+/* --- OSAL log mock -------------------------------------------------------- */
+/* The controller logs a dropped deferred item (queue full). This single-
+ * threaded test binary does not link the real OSAL log implementation, so a
+ * swallow-all sink keeps the policy logic linkable and silent. */
+void osal_log_printf( const char *level, const char *format, ... )
+{
+  (void) level;
+  (void) format;
 }
 
 /* --- OSAL mutex mocks (single-threaded controller test) ------------------ */
@@ -711,6 +724,154 @@ static void test_fallback_reenables_after_deinit( void )
   fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
   TEST_ASSERT_EQUAL_INT( 2, s_provision_start_count );
 }
+/* Fallback budget honored: with a per-device budget of N the portal opens only
+ * on the Nth consecutive CONNECT_FAILED while awaiting a saved-credential
+ * connection; the N-1 failures stay quiet and only the exhausted-budget
+ * fallback delivers the state-change notification. */
+static void test_fallback_budget_n_honored( void )
+{
+  wifi_provisioning_controller_config_t cfg = { on_state_changed, NULL, true, 3u };
+
+  reset_mocks();
+  reset_notify_records();
+  s_has_saved_credentials = true;
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init_with_config( &cfg ) );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
+  TEST_ASSERT_EQUAL_INT( 1, s_notify_count );   /* init: DISABLED -> AWAITING_CONNECT */
+
+  /* Budget 3: the first two failures never open the portal and produce no
+   * notification (the policy decision has not been made yet). */
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
+  TEST_ASSERT_FALSE( wifi_provisioning_controller_is_provisioning() );
+  TEST_ASSERT_EQUAL_INT( 1, s_notify_count );
+
+  /* The third consecutive failure exhausts the budget: fallback fires and the
+   * AWAITING_CONNECT -> PROVISIONING notification is delivered. */
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_is_provisioning() );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_start_count );
+  TEST_ASSERT_EQUAL_INT( 2, s_notify_count );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                         s_notify_records[ 1 ].prev );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                         s_notify_records[ 1 ].cur );
+
+  /* Once fired, further failures do not start a second portal. */
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_start_count );
+}
+
+/* The budget is reset on a successful saved-credential connect and re-armed
+ * when the controller returns to AWAITING_CONNECT from ONLINE: failures from
+ * one cycle never carry into the next. */
+static void test_fallback_budget_reset_on_success( void )
+{
+  wifi_provisioning_controller_config_t cfg = { NULL, NULL, true, 3u };
+
+  reset_mocks();
+  s_has_saved_credentials = true;
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init_with_config( &cfg ) );
+
+  /* Two failures against a budget of 3: still awaiting, no portal. */
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
+
+  /* A successful saved-credential connect resets the budget, and the return
+   * to AWAITING_CONNECT re-arms it for a fresh cycle. */
+  fire( WIFI_MGMT_EVENT_CONNECTED );
+  fire( WIFI_MGMT_EVENT_MODE_CHANGED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_ONLINE,
+                     wifi_provisioning_controller_get_state() );
+  fire( WIFI_MGMT_EVENT_DISCONNECTED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                     wifi_provisioning_controller_get_state() );
+
+  /* Two fresh failures stay quiet: the counter was reset by CONNECTED (and
+   * re-armed on the ONLINE loss); without the reset the cumulative 4 failures
+   * would already have exhausted the budget of 3. */
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
+
+  /* The third fresh consecutive failure exhausts the re-armed budget. */
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_start_count );
+}
+
+/* A zero budget disables the failure-driven fallback entirely: no amount of
+ * CONNECT_FAILED opens the portal, while the fresh-device path (no saved
+ * credential -> portal on init) stays immediate. */
+static void test_fallback_budget_zero_disables_fallback( void )
+{
+  wifi_provisioning_controller_config_t cfg = { NULL, NULL, true, 0u };
+
+  reset_mocks();
+  s_has_saved_credentials = true;
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init_with_config( &cfg ) );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                     wifi_provisioning_controller_get_state() );
+
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
+  TEST_ASSERT_FALSE( wifi_provisioning_controller_is_provisioning() );
+
+  /* The fresh-device path is unaffected: no saved credential opens the portal
+   * immediately even though the fallback budget is zero. */
+  wifi_provisioning_controller_deinit();
+  reset_mocks();                       /* also clears s_has_saved_credentials */
+  TEST_ASSERT_FALSE( s_has_saved_credentials );
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init_with_config( &cfg ) );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_is_provisioning() );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_start_count );
+}
+
+/* Default-budget backward compatibility: a config that leaves the budget
+ * unset (or plain init()) keeps the historical first-CONNECT_FAILED behavior
+ * supplied by the Kconfig default (1). */
+static void test_fallback_budget_default_backward_compat( void )
+{
+  wifi_provisioning_controller_config_t unset = { NULL, NULL, false, 0u };
+
+  /* Config without fallback_budget_set: the Kconfig default (1) applies, so a
+   * single CONNECT_FAILED still opens the portal. */
+  reset_mocks();
+  s_has_saved_credentials = true;
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init_with_config( &unset ) );
+  TEST_ASSERT_EQUAL_INT( 0, s_provision_start_count );
+
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_start_count );
+
+  /* Plain init() (NULL config) keeps the same default behavior. */
+  reset_mocks();
+  s_has_saved_credentials = true;
+  TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
+  fire( WIFI_MGMT_EVENT_CONNECT_FAILED );
+  TEST_ASSERT_EQUAL( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
+                     wifi_provisioning_controller_get_state() );
+  TEST_ASSERT_EQUAL_INT( 1, s_provision_start_count );
+}
 
 /* Init and deinit must be idempotent: repeated calls do not re-subscribe and
  * a deinit while already disabled is a safe no-op. */
@@ -1243,6 +1404,10 @@ static void run_controller_tests( void )
   RUN_TEST( test_transient_disconnect_does_not_start );
   RUN_TEST( test_exhausted_credentials_starts_once );
   RUN_TEST( test_fallback_reenables_after_deinit );
+  RUN_TEST( test_fallback_budget_n_honored );
+  RUN_TEST( test_fallback_budget_reset_on_success );
+  RUN_TEST( test_fallback_budget_zero_disables_fallback );
+  RUN_TEST( test_fallback_budget_default_backward_compat );
   RUN_TEST( test_init_deinit_idempotent_unsubscribes_all );
   RUN_TEST( test_grace_success_stops_after_expiry );
   RUN_TEST( test_zero_grace_shuts_down_immediately );

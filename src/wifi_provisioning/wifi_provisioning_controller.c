@@ -49,6 +49,7 @@
 
 #include "hq_config.h"
 #include "osal_bin_sem.h"
+#include "osal_log.h"
 #include "osal_mutex.h"
 #include "osal_queue.h"
 #include "osal_task.h"
@@ -63,6 +64,13 @@
  * build configuration (the portal then shuts down immediately on success). */
 #ifndef CONFIG_WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS
 #define CONFIG_WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS 0u
+#endif
+
+/* Default fallback budget (consecutive CONNECT_FAILED events before the portal
+ * opens) when the Kconfig option is not wired into the build configuration.
+ * 1 preserves the historical first-failure behavior. */
+#ifndef CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS
+#define CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS 1u
 #endif
 
 /* Private state --------------------------------------------------------- */
@@ -95,6 +103,8 @@ typedef struct
   bool                                 enabled;          /* Init gate (idempotent). */
   bool                                 fallback_started; /* Start-once guard. */
   uint32_t                             grace_ms;         /* Overridable grace period. */
+  uint32_t                             fallback_budget;  /* Consecutive CONNECT_FAILED budget (0 = disabled). */
+  uint32_t                             fallback_failures;/* Consecutive failures counted in AWAITING_CONNECT. */
   osal_timer_id_t                      grace_timer;      /* Success grace timer. */
   bool                                 grace_timer_ready;/* Timer created at init. */
   bool                                 grace_timer_active;/* Timer currently armed. */
@@ -119,6 +129,8 @@ static wifi_controller_ctx_t s_ctx = {
   false,                                             /* enabled */
   false,                                             /* fallback_started */
   CONFIG_WIFI_HTTP_PROVISIONING_SUCCESS_GRACE_MS,    /* grace_ms */
+  CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS,   /* fallback_budget */
+  0u,                                                /* fallback_failures */
   NULL,                                              /* grace_timer */
   false,                                             /* grace_timer_ready */
   false,                                             /* grace_timer_active */
@@ -866,9 +878,12 @@ static void _controller_apply_event( const controller_deferred_t *item )
       /* If the station obtained an IP while the portal is active, the
        * submitted credential succeeded: enter the grace window. Otherwise
        * this is a saved-credential connect: retire the startup SoftAP and only
-       * report ONLINE after the STA-only mode change is acknowledged. */
+       * report ONLINE after the STA-only mode change is acknowledged. Every
+       * successful connect resets the fallback failure budget so a later
+       * cycle of failures is counted from a fresh baseline. */
       _lock();
       if ( !s_ctx.enabled || s_ctx.session != session ) { _unlock(); return; }
+      s_ctx.fallback_failures = 0u;
       if ( s_ctx.state == WIFI_PROVISIONING_CONTROLLER_PROVISIONING )
       {
         _unlock();
@@ -909,6 +924,10 @@ static void _controller_apply_event( const controller_deferred_t *item )
           if ( s_ctx.enabled && s_ctx.session == session )
           {
             s_ctx.state = WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT;
+            /* Re-arm the fallback budget for the new connect cycle: failures
+             * accumulated before the device went ONLINE must not carry over
+             * into the next cycle. */
+            s_ctx.fallback_failures = 0u;
             _capture_notify( &snap );
           }
           _unlock();
@@ -919,9 +938,15 @@ static void _controller_apply_event( const controller_deferred_t *item )
       break;
 
     case WIFI_MGMT_EVENT_CONNECT_FAILED:
-      /* A saved-credential attempt failed and no saved credentials remain:
-       * open the portal exactly once. A failed attempt inside the grace
-       * window only cancels the timer and keeps the existing portal. */
+      /* A saved-credential attempt failed while awaiting a connection: count
+       * it against the fallback budget and open the portal once the budget is
+       * exhausted (a bounded number of consecutive failures lets a transient
+       * router reboot pass without surfacing the provisioning AP while a
+       * genuinely exhausted credential still triggers fallback). A budget of 0
+       * disables the failure-driven path entirely; the fresh-device start-on-
+       * init path is unaffected. The portal is opened at most once per
+       * fallback. A failed attempt inside the grace window only cancels the
+       * timer and keeps the existing portal. */
       {
         wifi_provisioning_controller_state_t state_before;
         notify_snapshot_t snap = { NULL, NULL, 0u };
@@ -936,17 +961,28 @@ static void _controller_apply_event( const controller_deferred_t *item )
         }
         else if ( state_before == WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT )
         {
+          bool budget_exhausted = false;
           bool entered_provisioning = false;
 
           _lock();
-          /* The portal is opened at most once per fallback; the session
-           * token is re-validated after the blocking start so a deinit or a
-           * fresh session that ran in the meantime is not committed. */
+          /* The session token is re-validated before and after the blocking
+           * start so a deinit or a fresh session that ran in the meantime is
+           * not committed. */
           if ( s_ctx.enabled && s_ctx.session == session &&
-               !s_ctx.fallback_started )
+               !s_ctx.fallback_started && s_ctx.fallback_budget > 0u )
           {
-            s_ctx.fallback_started = true;
-            _unlock();
+            ++s_ctx.fallback_failures;
+            if ( s_ctx.fallback_failures >= s_ctx.fallback_budget )
+            {
+              s_ctx.fallback_started = true;
+              s_ctx.fallback_failures = 0u;
+              budget_exhausted = true;
+            }
+          }
+          _unlock();
+
+          if ( budget_exhausted )
+          {
             (void) wifi_http_provisioning_start();
             _lock();
             if ( s_ctx.enabled && s_ctx.session == session )
@@ -955,12 +991,12 @@ static void _controller_apply_event( const controller_deferred_t *item )
               entered_provisioning = true;
               _capture_notify( &snap );
             }
-          }
-          _unlock();
-          if ( entered_provisioning )
-          {
-            _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
-                          WIFI_PROVISIONING_CONTROLLER_PROVISIONING );
+            _unlock();
+            if ( entered_provisioning )
+            {
+              _fire_notify( &snap, WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT,
+                            WIFI_PROVISIONING_CONTROLLER_PROVISIONING );
+            }
           }
         }
       }
@@ -1062,6 +1098,18 @@ bool wifi_provisioning_controller_init_with_config(
     s_ctx.notify_cb       = NULL;
     s_ctx.notify_user_ctx = NULL;
   }
+  /* Fallback budget: a per-device init-config override wins over the build
+   * default (Kconfig CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS). A fresh
+   * lifecycle always starts with a re-armed (zeroed) failure counter. */
+  if ( config != NULL && config->fallback_budget_set )
+  {
+    s_ctx.fallback_budget = config->fallback_budget;
+  }
+  else
+  {
+    s_ctx.fallback_budget = CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS;
+  }
+  s_ctx.fallback_failures = 0u;
   s_ctx.state = WIFI_PROVISIONING_CONTROLLER_AWAITING_CONNECT;
   _capture_notify( &snap );
   _unlock();
@@ -1146,6 +1194,7 @@ void wifi_provisioning_controller_deinit( void )
   prev                     = s_ctx.state;
   s_ctx.enabled            = false;
   s_ctx.fallback_started   = false;
+  s_ctx.fallback_failures  = 0u;
   s_ctx.retire_online      = false;
   s_ctx.state              = WIFI_PROVISIONING_CONTROLLER_DISABLED;
   ++s_ctx.session;

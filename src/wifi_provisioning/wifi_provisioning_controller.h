@@ -6,8 +6,18 @@
  * application automatically so a device can be set up without a prior
  * network credential:
  *   - immediately during init when no saved Wi-Fi credential exists,
- *   - after the saved credential attempts are exhausted (CONNECT_FAILED),
+ *   - after the configured number of consecutive saved-credential connect
+ *     failures is exhausted (a bounded CONNECT_FAILED budget, default 1;
+ *     budget 0 disables this path),
  *   - never after a single transient disconnect (DISCONNECTED).
+ *
+ * The failure budget is a per-device policy knob: it counts consecutive
+ * CONNECT_FAILED events observed while the controller is awaiting a connection
+ * and opens the portal once the budget is met. It defaults to
+ * CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS and can be overridden per
+ * device at init time (wifi_provisioning_controller_config_t). The budget is
+ * reset on any successful connect and re-armed when the controller returns to
+ * AWAITING_CONNECT from ONLINE, so a parked product can retry the cycle.
  *
  * Once a submitted credential connects (station IP acquisition) while the
  * portal is up, the controller keeps AP + HTTP and DNS available for a
@@ -154,6 +164,25 @@ typedef struct
 
   /** Opaque user context passed back to @p on_state_changed. May be NULL. */
   void *user_ctx;
+
+  /** When true, @p fallback_budget overrides the build-time Kconfig default
+   *  (@c CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS); when false (the
+   *  default), the Kconfig value applies, so a product can set the policy
+   *  entirely in its build configuration without code changes. Set this flag
+   *  to install a per-device override. */
+  bool fallback_budget_set;
+
+  /** Fallback budget: the number of consecutive @c CONNECT_FAILED events the
+   *  controller must observe while in @c AWAITING_CONNECT before the
+   *  provisioning portal opens automatically. A value of 1 (the Kconfig
+   *  default) preserves the historical first-failure behavior; 0 disables the
+   *  automatic fallback entirely, leaving only the fresh-device path (no
+   *  saved credential -> portal on init) active. The budget is reset on any
+   *  successful connect (@c CONNECTED) and re-armed when the controller
+   *  returns to @c AWAITING_CONNECT from @c ONLINE, so a parked product can
+   *  retry the cycle with a fresh counter. Ignored when @p fallback_budget_set
+   *  is false. */
+  uint32_t fallback_budget;
 } wifi_provisioning_controller_config_t;
 
 /* Public functions --------------------------------------------------------- */
@@ -189,6 +218,11 @@ bool wifi_provisioning_controller_init( void );
  * PROVISIONING and the online-loss path ONLINE -> AWAITING_CONNECT) without
  * polling. See @c wifi_provisioning_controller_state_cb_t for the callback
  * contract and the re-entrancy rule.
+ *
+ * The configuration may also carry a per-device fallback budget override
+ * (@c wifi_provisioning_controller_config_t.fallback_budget with
+ * @c fallback_budget_set set); when the budget is not set the build-time
+ * @c CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS value applies.
  *
  * @param[in] config Optional configuration; may be NULL, in which case this
  *                   function behaves exactly like
