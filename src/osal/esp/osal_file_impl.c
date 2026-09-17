@@ -309,7 +309,15 @@ int32_t osal_stat(const char *path, osal_fstat_t *filestats)
     struct stat posix_st;
     if (stat(vfs_path, &posix_st) != 0)
     {
-        return OSAL_ERROR;
+        /* Missing-file classification (TASK-108): a file that is not there
+         * is a documented missing-file status, not a generic failure.  The
+         * LittleFS VFS layer reports a missing entry as ENOENT (its
+         * lfs_errno_remap() maps LFS_ERR_NOENT to ENOENT), so surface the
+         * documented "path invalid / missing" OSAL status here.  Only
+         * ENOENT is classified this way; every other stat failure keeps
+         * the generic OSAL_ERROR so callers can distinguish "missing"
+         * from "temporarily unreadable". */
+        return (errno == ENOENT) ? OSAL_FS_ERR_PATH_INVALID : OSAL_ERROR;
     }
 
     filestats->file_mode_bits = posix_mode_to_osal(posix_st.st_mode);

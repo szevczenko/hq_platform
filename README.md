@@ -236,6 +236,39 @@ Inclusion rules:
 - Rely on IDF `REQUIRES` as usual: requiring an hq_platform component makes its
   public include directory visible to your component.
 
+### OSAL filesystem mount/format semantics (no format on mount failure)
+
+The OSAL LittleFS backends (`src/osal/esp/osal_mount_impl.c`,
+`src/osal/posix/osal_mount_impl.c`) follow a strict mount/format contract
+(TASK-118):
+
+- **`osal_mount()` never formats.** If the filesystem is missing or corrupt,
+  the mount fails with `OSAL_ERROR` and the partition/volume contents are left
+  completely untouched (`format_if_mount_failed = false` in the ESP backend).
+  An ordinary boot-time mount error must therefore never silently destroy
+  credentials or manufacturing state.
+- **Formatting happens only through explicit entry points**: `osal_mkfs()`,
+  `osal_rmfs()` (and `osal_initfs()` volume setup, plus provisioning flows).
+  On ESP the ESP-IDF 5.x register-format-unregister trick
+  (`esp_vfs_littlefs_register()` with `format_if_mount_failed = true`,
+  then `esp_vfs_littlefs_unregister()`) is used inside those explicit paths
+  only.
+- Recovery from a corrupt filesystem is a product decision (e.g. a
+  manufacturing/provisioning flow), never an automatic reaction to a mount
+  error.
+
+See `src/osal/include/osal_mount.h` and
+`tests/osal/osal_mount_test.c`
+(`test_mount_failure_preserves_contents`,
+`test_explicit_format_paths_still_work`) for the normative behavior and the
+regression tests. On-target verification of the ESP path:
+
+1. `idf.py -p <port> erase-flash`, then boot: the first `osal_mount()` after a
+   successful `osal_mkfs()` must succeed (explicit format path works).
+2. Corrupt the `storage` partition (e.g. `esptool.py erase_region` over it):
+   the next boot must report the mount failure and leave the partition
+   unformatted — a repeat mount keeps failing instead of auto-formatting.
+
 ### Required Kconfig options
 
 `hq_platform` has its own Kconfig system, separate from ESP-IDF's sdkconfig.

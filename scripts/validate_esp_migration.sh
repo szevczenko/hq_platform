@@ -31,7 +31,7 @@ TESTS_DIR="$BUILD_DIR/tests"
 # ---------------------------------------------------------------------------
 # POSIX Unity summary counts (from TASK-506..TASK-524 registrations).
 declare -A EXPECTED=(
-  [osal_tests]=37
+  [osal_tests]=39
   [wifi_tests]=28
   [mqtt_tests]=6
   [tb_tests]=52

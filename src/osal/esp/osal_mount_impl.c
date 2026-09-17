@@ -162,11 +162,20 @@ int32_t osal_mount(const char *devname, const char *mount_point)
     strncpy(g_osal_lfs_mount_point, mount_point, sizeof(g_osal_lfs_mount_point) - 1);
     g_osal_lfs_mount_point[sizeof(g_osal_lfs_mount_point) - 1] = '\0';
 
+    /* TASK-118: osal_mount() must NEVER format the partition as a side
+     * effect of a mount failure.  A missing or corrupt filesystem is an
+     * ordinary boot-time error that has to surface as OSAL_ERROR so that
+     * product code can degrade fail-safely while credentials and
+     * manufacturing state stored on the partition stay intact.  Formatting
+     * is available only through the explicit entry points (osal_mkfs(),
+     * osal_rmfs() and provisioning flows), which keep
+     * format_if_mount_failed = true locally for the register-format trick
+     * required by ESP-IDF 5.x. */
     esp_vfs_littlefs_conf_t conf = {
         .base_path = g_osal_lfs_mount_point,
         .partition_label = g_osal_lfs_partition_label,
         .partition = NULL,
-        .format_if_mount_failed = true,
+        .format_if_mount_failed = false,
         .read_only = false,
         .dont_mount = false,
         .grow_on_mount = false,
@@ -174,6 +183,9 @@ int32_t osal_mount(const char *devname, const char *mount_point)
 
     if (esp_vfs_littlefs_register(&conf) != 0)
     {
+        /* Mount failed (e.g. absent or corrupt filesystem).  The partition
+         * contents are untouched; recovery is the caller's explicit choice
+         * (osal_mkfs()/osal_rmfs()/provisioning), never automatic. */
         return OSAL_ERROR;
     }
 

@@ -942,6 +942,119 @@ static void test_cleanup_required_retains_started_stop_retry( void )
 #endif
 }
 
+/* ============================================================================
+ * Test 17 (TASK-120): No credential leakage into the Wi-Fi HAL log output.
+ *          Feeds a known SSID/password through the full connect request path
+ *          (set_sta_config + connect, both the not-found and the successful
+ *          variants) while capturing the HAL's log stream, then asserts the
+ *          captured log never contains the SSID, the password, or a password
+ *          length indicator ("pass_len").  A positive control proves the
+ *          capture actually collected HAL log lines.
+ * ========================================================================== */
+static void test_connect_logs_contain_no_credentials( void )
+{
+  _reset_session();
+
+  /* Credential material that must never appear in the captured log. */
+  const char* const secret_ssid = "properly_ap";
+  const char* const secret_pass = "s3cr3t-passphrase-120";
+
+  g_cb_a_events = 0;
+
+  wifi_hal_init_t init = _make_init( NULL, _cb_count_a, NULL );
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_init( &init ), "init" );
+
+  /* Redirect the log sink (stdout) to a private temporary file without
+   * disturbing the file descriptor the process was started with, so the
+   * restore works regardless of how the test binary was launched. */
+  (void) fflush( stdout );
+  const int saved_stdout = dup( STDOUT_FILENO );
+  TEST_ASSERT_TRUE_MESSAGE( saved_stdout >= 0, "dup stdout" );
+  FILE* capture = tmpfile();
+  TEST_ASSERT_NOT_NULL_MESSAGE( capture, "tmpfile for log capture" );
+  /* dup2 returns newfd (STDOUT_FILENO), not 0. */
+  TEST_ASSERT_EQUAL_MESSAGE( STDOUT_FILENO,
+                             dup2( fileno( capture ), STDOUT_FILENO ),
+                             "redirect stdout to capture file" );
+
+  /* 1) Full connect round against a simulated AP with a secret password.
+   *    NOTE: no Unity assertions are made while stdout is redirected — a
+   *    failing assertion longjmps to tearDown and its report would be
+   *    written into the capture file.  Raw results are recorded and asserted
+   *    after stdout has been restored. */
+  wifi_hal_sta_config_t sta_config = { 0 };
+  strncpy( sta_config.ssid, secret_ssid, sizeof( sta_config.ssid ) - 1 );
+  strncpy( sta_config.password, secret_pass, sizeof( sta_config.password ) - 1 );
+
+  int rc_start = (int) wifi_hal_start( WIFI_HAL_MODE_STA );
+  int rc_set   = (int) wifi_hal_set_sta_config( &sta_config );
+  int rc_conn  = (int) wifi_hal_connect();
+  uint32_t cb_events_after_connect = g_cb_a_events;
+
+  /* 2) Connect request for an SSID that is not in the simulated
+   *    environment — exercises the not-found warning path with a
+   *    credential-bearing SSID. */
+  wifi_hal_sta_config_t missing = { 0 };
+  strncpy( missing.ssid, "log_privacy_missing_ssid",
+           sizeof( missing.ssid ) - 1 );
+  strncpy( missing.password, "log_privacy_missing_pass",
+           sizeof( missing.password ) - 1 );
+  int rc_set_missing  = (int) wifi_hal_set_sta_config( &missing );
+  int rc_conn_missing = (int) wifi_hal_connect();
+
+  /* Restore stdout, then read back everything the HAL logged. */
+  (void) fflush( stdout );
+  TEST_ASSERT_EQUAL_MESSAGE( STDOUT_FILENO,
+                             dup2( saved_stdout, STDOUT_FILENO ),
+                             "restore stdout" );
+  (void) close( saved_stdout );
+
+  /* First assert the functional behavior of the exercised paths (these
+   * failures are reported on the real stdout). */
+  TEST_ASSERT_EQUAL_MESSAGE( (int) OSAL_SUCCESS, rc_start, "start station mode" );
+  TEST_ASSERT_EQUAL_MESSAGE( (int) OSAL_SUCCESS, rc_set, "set station config" );
+  TEST_ASSERT_EQUAL_MESSAGE( (int) OSAL_SUCCESS, rc_conn, "connect accepted" );
+  TEST_ASSERT_EQUAL_MESSAGE( 1u, cb_events_after_connect, "GOT_IP delivered" );
+  TEST_ASSERT_EQUAL_MESSAGE( (int) OSAL_SUCCESS, rc_set_missing,
+                             "set unknown station config" );
+  TEST_ASSERT_EQUAL_MESSAGE( (int) OSAL_ERROR, rc_conn_missing,
+                             "connect to unknown SSID fails" );
+
+  char   log_text[ 8192 ];
+  size_t log_len = 0;
+  rewind( capture );
+  log_len = fread( log_text, 1, sizeof( log_text ) - 1, capture );
+  log_text[ log_len ] = '\0';
+  (void) fclose( capture );
+
+  /* Positive control: the capture must actually contain HAL log lines,
+   * otherwise the assertions below would pass vacuously. */
+  TEST_ASSERT_TRUE_MESSAGE( strstr( log_text, "[wifi-sim]" ) != NULL,
+                            "log capture collected HAL output" );
+
+  /* The credential itself — SSID and password — must never appear. */
+  TEST_ASSERT_TRUE_MESSAGE( strstr( log_text, secret_ssid ) == NULL,
+                            "captured log must not contain the station SSID" );
+  TEST_ASSERT_TRUE_MESSAGE( strstr( log_text, secret_pass ) == NULL,
+                            "captured log must not contain the password" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    strstr( log_text, "log_privacy_missing_ssid" ) == NULL,
+    "captured log must not contain the unknown SSID" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    strstr( log_text, "log_privacy_missing_pass" ) == NULL,
+    "captured log must not contain the unknown password" );
+  /* The former regression: password length must never be logged either. */
+  TEST_ASSERT_TRUE_MESSAGE( strstr( log_text, "pass_len" ) == NULL,
+                            "captured log must not contain pass_len" );
+
+  /* Non-sensitive transition/status information must still be present. */
+  TEST_ASSERT_TRUE_MESSAGE( strstr( log_text, "connect" ) != NULL,
+                            "captured log keeps non-sensitive transitions" );
+
+  TEST_ASSERT_EQUAL_MESSAGE( OSAL_SUCCESS, wifi_hal_deinit(), "cleanup deinit" );
+  (void) log_len;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Runner                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -980,6 +1093,7 @@ void wifi_hal_posix_tests_run( void )
   RUN_TEST( test_init_stop_stop_deinit_stop_deinit );
   RUN_TEST( test_stop_join_failure_then_retry );
   RUN_TEST( test_cleanup_required_retains_started_stop_retry );
+  RUN_TEST( test_connect_logs_contain_no_credentials );
 }
 
 #ifndef OSAL_TESTS_AGGREGATE

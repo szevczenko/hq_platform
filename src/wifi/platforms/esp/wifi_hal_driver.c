@@ -1348,10 +1348,11 @@ osal_status_t wifi_hal_connect( void )
     return OSAL_ERROR;
   }
 
-  size_t pass_len = strlen( g_wifi_hal_ctx.sta_cfg.password );
-  osal_log_debug( "[wifi-hal] connect requested: ssid='%s', pass_len=%u",
-                  g_wifi_hal_ctx.sta_cfg.ssid,
-                  (unsigned) pass_len );
+  /* TASK-120: no credential logging on the connect path.  Station SSID,
+   * password and password length must never reach the log; only the
+   * non-sensitive transition itself is recorded here (the resulting mode and
+   * any error codes are logged below by the individual steps). */
+  osal_log_debug( "[wifi-hal] connect requested" );
 
   wifi_mode_t mode = WIFI_MODE_NULL;
   esp_err_t err = esp_wifi_get_mode( &mode );

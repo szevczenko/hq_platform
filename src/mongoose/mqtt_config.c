@@ -192,7 +192,7 @@ static bool resolve_cert_entry(cert_entry_t *entry)
 			return false;
 
 		if (osal_stat(entry->value, &st) != OSAL_SUCCESS ||
-		    st.file_size == 0)
+		    st.file_size == 0 || st.file_size >= sizeof(entry->resolved))
 			return false;
 
 		fd = osal_open_create(entry->value, OSAL_FILE_FLAG_NONE,
@@ -206,7 +206,7 @@ static bool resolve_cert_entry(cert_entry_t *entry)
 		n = osal_read(fd, entry->resolved, to_read);
 		(void)osal_close(fd);
 
-		if (n < 0) {
+		if (n < 0 || (size_t)n != to_read) {
 			entry->resolved[0] = '\0';
 			return false;
 		}
