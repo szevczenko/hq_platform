@@ -695,6 +695,14 @@ static void _save_current_sta_config( void )
   {
     strncpy( g_ctx.saved_data.ssid,     ssid,  sizeof( g_ctx.saved_data.ssid ) - 1 );
     strncpy( g_ctx.saved_data.password, pass,  sizeof( g_ctx.saved_data.password ) - 1 );
+    /* The device now holds a saved credential: mirror the flag the
+     * controller and products use to tell "fresh" from "credentialed"
+     * (TASK-136).  Until here the flag was only ever set by a boot-time
+     * load, so a fresh device that was just provisioned through the portal
+     * still reported "no saved credential" and the machine parked at the
+     * NETWORK gate after PROVISIONING_SUCCEEDED instead of proceeding to
+     * TLS.  Erase (wifi_mgmt_erase_credentials) clears it again. */
+    g_ctx.read_wifi_data = true;
   }
 }
 
