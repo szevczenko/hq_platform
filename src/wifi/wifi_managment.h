@@ -182,6 +182,24 @@ bool wifi_mgmt_set_ap_credentials( const char* name, const char* password );
 bool wifi_mgmt_request_mode( wifi_type_t type );
 
 /**
+ * @brief   Query the effective Wi-Fi operating mode.
+ *
+ * @details Reports the mode the radio is actually running in, not merely a
+ *          requested mode: the value is committed only after a HAL mode
+ *          transition succeeds.  Use this to verify that an asynchronous
+ *          @c wifi_mgmt_request_mode() call has been applied (the request
+ *          itself only returns "accepted").  @c WIFI_MGMT_EVENT_MODE_CHANGED
+ *          is emitted at the same commit point.
+ *
+ * @return  The current effective @c wifi_type_t
+ *          (@c T_WIFI_TYPE_SERVER, @c T_WIFI_TYPE_CLIENT, or
+ *          @c T_WIFI_TYPE_CLI_SER).
+ * @note    Only meaningful while the module is running; a stopped module
+ *          reports the last committed mode.
+ */
+wifi_type_t wifi_mgmt_get_mode( void );
+
+/**
  * @brief   Initialize the Wi-Fi management module and spawn the worker task.
  *
  * @details Initialization is transactional: every mutex, semaphore, task

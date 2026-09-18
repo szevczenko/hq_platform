@@ -1502,6 +1502,14 @@ bool wifi_mgmt_request_mode( wifi_type_t type )
   return true;
 }
 
+wifi_type_t wifi_mgmt_get_mode( void )
+{
+  _lock_state();
+  const wifi_type_t mode = g_wifi_type;
+  _unlock_state();
+  return mode;
+}
+
 bool wifi_mgmt_stop( void )
 {
   /* The cleared initialized flag is the stop-before-init guard.  No management

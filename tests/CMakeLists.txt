@@ -511,15 +511,27 @@ if(NOT ESP_PLATFORM)
     # failures are injected with real socket conflicts.  Registered as a
     # separate target so a lifecycle regression is isolated from the route
     # tests.
+    # The source set mirrors the hq_wifi_provisioning/hq_wifi library wiring
+    # (provisioning module + Wi-Fi management + the POSIX simulator HAL) but is
+    # compiled directly into this binary so WIFI_PROVISIONING_TEST_OBSERVABILITY
+    # enables the deterministic start-status test hooks (refused mode request,
+    # started-without-AP) in the module under test.
     add_executable(wifi_http_provisioning_lifecycle_tests
       ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_lifecycle_test.c
       ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_test_fixture.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+      ${WIFI_SRC_DIR}/wifi_managment.c
+      ${WIFI_SRC_DIR}/wifi_config.c
+      ${WIFI_SRC_DIR}/wifi_utils.c
+      ${WIFI_SRC_DIR}/platforms/posix/wifi_hal_driver.c
     )
 
     target_include_directories(wifi_http_provisioning_lifecycle_tests
       PRIVATE ${WIFI_PROVISIONING_TEST_DIR}
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi/platforms/posix
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
       PRIVATE ${HQ_CONFIG_DIR}
@@ -531,8 +543,14 @@ if(NOT ESP_PLATFORM)
       )
     endif()
 
+    target_compile_definitions(wifi_http_provisioning_lifecycle_tests PRIVATE
+      WIFI_PROVISIONING_TEST_OBSERVABILITY=1
+    )
+
     target_link_libraries(wifi_http_provisioning_lifecycle_tests
-      hq_wifi_provisioning
+      hq_mongoose
+      hq_osal
+      hq_cjson
       unity
       pthread
     )

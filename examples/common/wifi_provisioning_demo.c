@@ -147,18 +147,23 @@ static int demo_init_provisioning( void )
     printf( "[demo] ERROR: cannot configure DNS listen URL\n" );
     return -1;
   }
-  if ( !wifi_http_provisioning_start() )
+  wifi_http_provisioning_start_status_t st = wifi_http_provisioning_start_ex();
+  if ( st != WIFI_HTTP_PROVISIONING_START_OK &&
+       st != WIFI_HTTP_PROVISIONING_START_ALREADY_RUNNING )
   {
-    printf( "[demo] ERROR: provisioning app failed to start\n" );
+    printf( "[demo] ERROR: provisioning app failed to start (status=%d)\n",
+            ( int ) wifi_http_provisioning_get_last_start_status() );
     return -1;
   }
-  if ( wifi_http_provisioning_get_state() != WIFI_PROVISIONING_RUNNING )
+  /* RUNNING alone does not prove the radio reached AP+STA; only a reachable
+   * portal (AP + both listeners) counts as started for this demo. */
+  if ( !wifi_http_provisioning_is_reachable() )
   {
-    printf( "[demo] ERROR: provisioning app not RUNNING (state=%s)\n",
+    printf( "[demo] ERROR: provisioning app not reachable (state=%s)\n",
             demo_prov_state_name( wifi_http_provisioning_get_state() ) );
     return -1;
   }
-  printf( "[demo] init 4/4: provisioning app RUNNING\n" );
+  printf( "[demo] init 4/4: provisioning app RUNNING and reachable\n" );
   return 0;
 }
 

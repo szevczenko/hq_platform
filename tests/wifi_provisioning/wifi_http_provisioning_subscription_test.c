@@ -53,6 +53,10 @@ bool wifi_mgmt_is_running(void) { return s_wifi_running; }
 bool wifi_mgmt_trying_connect(void) { return false; }
 bool wifi_mgmt_is_connected(void) { return true; }
 
+/* The mock always "reaches" AP+STA so a clean start passes the radio
+ * verification that proves the portal reachable. */
+wifi_type_t wifi_mgmt_get_mode(void) { return T_WIFI_TYPE_CLI_SER; }
+
 bool wifi_mgmt_get_ip_info(wifi_mgmt_ip_info_t *info)
 {
 	if (info == NULL) return false;
