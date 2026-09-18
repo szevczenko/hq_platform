@@ -9,6 +9,43 @@
 #include <stdio.h>
 #include <string.h>
 
+/* --------------------------------------------------------------------------
+ * Provisioning AP identity default (build-time overrides only).
+ *
+ * The platform ships NO AP password in any public header (TASK-014).  A
+ * product MUST set its own provisioning AP identity at runtime via
+ * wifi_mgmt_set_ap_credentials() before wifi_mgmt_start(); the configured
+ * identity is applied verbatim (no platform-imposed MAC suffix) and the
+ * password is never logged.
+ *
+ * WIFI_AP_NAME / WIFI_AP_PASSWORD are honored only as compile-time overrides
+ * so existing examples can keep a historical identity through their own build
+ * configuration (-DWIFI_AP_NAME="..." -DWIFI_AP_PASSWORD="...").  When a
+ * build defines neither, the neutral non-secret fallback below is used so a
+ * never-configured product still compiles and boots with a discoverable
+ * development AP instead of failing — products MUST replace it.
+ *
+ * The soft-AP authentication mode is derived from the configured password at
+ * start time (see _apply_ap_authmode): an empty key maps to an open-network
+ * auth mode, so the empty fallback above is never advertised as WPA2 with an
+ * empty key (an open network mislabeled secure) and is never rejected by the
+ * ESP IDF HAL (ESP_ERR_WIFI_PASSWORD).
+ * ------------------------------------------------------------------------ */
+#ifndef WIFI_AP_NAME
+#define WIFI_AP_NAME "wifi_provisioning"
+#endif
+#ifndef WIFI_AP_PASSWORD
+#define WIFI_AP_PASSWORD ""
+#endif
+
+/* Soft-AP authentication-mode enum values handed to the platform HAL.  These
+ * match the ESP-IDF wifi_auth_mode_t values consumed by the ESP HAL
+ * (0 = WIFI_AUTH_OPEN, 4 = WIFI_AUTH_WPA_WPA2_PSK) and the POSIX HAL
+ * convention; the management layer derives the mode from the configured
+ * password at start time (see _apply_ap_authmode). */
+#define WIFI_AP_AUTH_OPEN 0
+#define WIFI_AP_AUTH_WPA2 4
+
 #define CALLBACKS_LIST_SIZE        8
 #define DEFAULT_SCAN_LIST_SIZE     WIFI_DRV_MAX_SCAN_AP
 /* Blocking scan timeout (ms) when callers expect results synchronously. */
@@ -97,6 +134,10 @@ typedef struct
   uint16_t              scanned_ap_num;
   wifi_hal_sta_config_t sta_cfg;
   wifi_hal_ap_config_t  ap_cfg;
+  /* True once wifi_mgmt_set_ap_credentials() supplied a product identity.
+   * A configured identity is used verbatim (no MAC suffix) and is locked once
+   * the module starts.  Reset to the compiled default on teardown. */
+  bool                  ap_identity_set;
   wifi_mgmt_con_data_t  saved_data;
   wifi_mgmt_ip_info_t   ip_info;
   int                   rssi;
@@ -162,7 +203,7 @@ static wifi_ctx_t g_ctx = {
     .ssid           = WIFI_AP_NAME,
     .password       = WIFI_AP_PASSWORD,
     .max_connection = 2,
-    .authmode       = 4,
+    .authmode       = WIFI_AP_AUTH_WPA2,
   },
   /* No lifecycle has started before init; this is a clean stop boundary. */
   .stop_clean           = true,
@@ -177,6 +218,28 @@ static void _init_list( callback_list_t* list )
 {
   memset( list, 0, sizeof( *list ) );
 }
+
+/* Copy a raw AP identity into the management context.  Consumers read ssid /
+ * password under state_mutex (see _setup_ap_name_with_mac), so any write made
+ * while a worker exists must hold the same mutex; before init no worker (and
+ * no mutex) exists, so the documented pre-start window needs no lock. */
+static void _store_ap_identity( const char* name, const char* password )
+{
+  memset( g_ctx.ap_cfg.ssid,     0, sizeof( g_ctx.ap_cfg.ssid ) );
+  memset( g_ctx.ap_cfg.password, 0, sizeof( g_ctx.ap_cfg.password ) );
+  strncpy( g_ctx.ap_cfg.ssid,     name,     sizeof( g_ctx.ap_cfg.ssid ) - 1 );
+  strncpy( g_ctx.ap_cfg.password, password, sizeof( g_ctx.ap_cfg.password ) - 1 );
+}
+
+/* Restore the provisioning AP identity to the compiled build-time default.
+ * Called on teardown so a fresh lifecycle never starts from a stale identity
+ * configured by an earlier product/lifecycle (TASK-014). */
+static void _reset_ap_identity( void )
+{
+  _store_ap_identity( WIFI_AP_NAME, WIFI_AP_PASSWORD );
+  g_ctx.ap_identity_set = false;
+}
+
 /* ---------------------------------------------------------------- Lifecycle --
  * Transactional init rollback.
  *
@@ -242,6 +305,7 @@ static void _clear_initialized_state( void )
   g_ctx.startup_ok     = false;
   g_ctx.quit_pending   = false;
   g_ctx.quit_quiesced  = false;
+  _reset_ap_identity();
   g_ctx.initialized    = false;
 }
 
@@ -635,13 +699,29 @@ static void _save_current_sta_config( void )
 
 static void _setup_ap_name_with_mac( void )
 {
+  /* A product identity configured via wifi_mgmt_set_ap_credentials() is
+   * authoritative and used verbatim (serial-number-derived names are already
+   * device-unique, so no platform MAC suffix is imposed).  Only the
+   * build-time default name gets the historical MAC disambiguation suffix. */
+  _lock_state();
+  const bool identity_set = g_ctx.ap_identity_set;
+  _unlock_state();
+  if ( identity_set )
+  {
+    return;
+  }
+
   uint8_t mac[6] = { 0 };
   if ( wifi_hal_get_default_mac( mac ) != OSAL_SUCCESS )
   {
     return;
   }
 
-  char ssid[sizeof( g_ctx.ap_cfg.ssid )] = { 0 };
+  /* Scratch buffer sized to hold a full-length SSID plus the MAC suffix, so a
+   * long build-time default name can never trigger format-truncation
+   * diagnostics.  The 32-byte broadcast SSID bound is still enforced by the
+   * strncpy below. */
+  char ssid[WIFI_HAL_SSID_MAX_LEN + 1 + 24] = { 0 };
   snprintf( ssid,
             sizeof( ssid ),
             "%s:%02x:%02x:%02x:%02x:%02x:%02x",
@@ -649,6 +729,39 @@ static void _setup_ap_name_with_mac( void )
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5] );
 
   strncpy( g_ctx.ap_cfg.ssid, ssid, sizeof( g_ctx.ap_cfg.ssid ) - 1 );
+}
+
+/* Derive the soft-AP authentication mode from the configured password right
+ * before the AP config is handed to the HAL (called only for AP-bearing
+ * modes).  An empty key must map to an open-network auth mode: advertising
+ * WPA2 with an empty password would be an open network mislabeled as secure,
+ * and the ESP IDF HAL rejects that exact combination (ESP_ERR_WIFI_PASSWORD),
+ * which would make _start_mode() fail and the module never become ready.
+ * If the platform is about to bring up the unsecured default fallback (no
+ * product identity was configured), a prominent warning is logged that names
+ * the AP but never the password. */
+static void _apply_ap_authmode( wifi_hal_mode_t mode )
+{
+  if ( mode != WIFI_HAL_MODE_AP && mode != WIFI_HAL_MODE_APSTA )
+  {
+    return;
+  }
+
+  _lock_state();
+  const bool ap_is_open        = g_ctx.ap_cfg.password[0] == '\0';
+  const bool unsecured_default = ap_is_open && !g_ctx.ap_identity_set;
+  g_ctx.ap_cfg.authmode = ap_is_open ? WIFI_AP_AUTH_OPEN : WIFI_AP_AUTH_WPA2;
+  _unlock_state();
+
+  if ( unsecured_default )
+  {
+    osal_log_warning(
+      "[wifi] WARNING: starting an UNSECURED (open, no password) provisioning "
+      "AP '%s' because no product identity was configured.  Products MUST call "
+      "wifi_mgmt_set_ap_credentials() before wifi_mgmt_start().  Do not ship "
+      "this configuration.",
+      g_ctx.ap_cfg.ssid );
+  }
 }
 
 static osal_status_t _start_mode( wifi_hal_mode_t mode )
@@ -660,6 +773,10 @@ static osal_status_t _start_mode( wifi_hal_mode_t mode )
   {
     return OSAL_SUCCESS;
   }
+
+  /* Normalize the AP auth mode from the configured password (open network for
+   * an empty key, WPA2 otherwise) before the HAL sees the config. */
+  _apply_ap_authmode( mode );
 
   osal_status_t st = wifi_hal_set_ap_config( &g_ctx.ap_cfg );
   if ( st != OSAL_SUCCESS )
@@ -1319,6 +1436,46 @@ void wifi_mgmt_set_wifi_type( wifi_type_t type )
   }
 }
 
+bool wifi_mgmt_set_ap_credentials( const char* name, const char* password )
+{
+  if ( !name || !password || name[0] == '\0' )
+  {
+    return false;
+  }
+  const size_t name_len = strlen( name );
+  const size_t pass_len = strlen( password );
+  if ( name_len > MAX_SSID_SIZE || pass_len > MAX_PASSWORD_SIZE )
+  {
+    return false;
+  }
+
+  /* The AP identity is locked once the interface may be up.  Before init no
+   * worker exists, and between init and start the worker is parked in DISABLE,
+   * so the pre-start window is single-owner; a concurrent caller is an
+   * unsupported usage (init/start/stop must be serialized by one owner).  The
+   * write below still holds state_mutex whenever the mutex exists, so the read
+   * side in _setup_ap_name_with_mac() always observes an atomic identity. */
+  if ( g_ctx.initialized )
+  {
+    _lock_state();
+    const bool started = g_ctx.is_started || g_ctx.state != WIFI_APP_DISABLE;
+    if ( started )
+    {
+      _unlock_state();
+      return false;
+    }
+    _store_ap_identity( name, password );
+    g_ctx.ap_identity_set = true;
+    _unlock_state();
+  }
+  else
+  {
+    _store_ap_identity( name, password );
+    g_ctx.ap_identity_set = true;
+  }
+  return true;
+}
+
 bool wifi_mgmt_request_mode( wifi_type_t type )
 {
   if ( type != T_WIFI_TYPE_SERVER &&
@@ -1652,6 +1809,9 @@ bool wifi_mgmt_deinit( void )
   g_ctx.stop_clean           = true;
   g_ctx.restart_authorized   = true;
   g_ctx.stop_restart_blocked = false;
+  /* A fresh lifecycle starts from the compiled default AP identity, never
+   * from a stale value configured by an earlier lifecycle (TASK-014). */
+  _reset_ap_identity();
   g_ctx.initialized    = false;
   return true;
 }

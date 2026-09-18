@@ -224,9 +224,18 @@ if(NOT ESP_PLATFORM)
   # WIFI_MGMT_TEST_OBSERVABILITY enables the test-only lifecycle snapshot API
   # (TASK-135C) inside wifi_managment.c/h.  It is defined only for this test
   # target; production builds and the other Wi-Fi test targets never define it.
+  #
+  # TASK-014: the platform ships no AP name/password default in a public
+  # header anymore; wifi_managment.c still honors WIFI_AP_NAME /
+  # WIFI_AP_PASSWORD as build-time overrides so examples can keep a historical
+  # compile-time identity.  Supplying the historical values here lets the host
+  # tests pin the "default behavior unchanged when never called" case against
+  # the exact identity products currently expect.
   target_compile_definitions(wifi_tests PRIVATE
     OSAL_TESTS_AGGREGATE
     WIFI_MGMT_TEST_OBSERVABILITY
+    WIFI_AP_NAME="Bimbrownik"
+    WIFI_AP_PASSWORD="SuperTrudne1!-_"
   )
 
   target_link_libraries(wifi_tests

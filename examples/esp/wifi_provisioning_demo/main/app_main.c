@@ -42,6 +42,19 @@
 #define DEMO_STORAGE_DEVICE "storage"
 #define DEMO_STORAGE_MOUNT  "/littlefs"
 
+/* Provisioning soft-AP identity — EXAMPLE-SPECIFIC (TASK-014).
+ *
+ * The platform treats the provisioning AP identity as a RUNTIME configuration:
+ * a product MUST set its own identity (name + password) with
+ * wifi_mgmt_set_ap_credentials() before wifi_mgmt_start(), and the platform
+ * ships no default AP password in any public header.  This example sets an
+ * explicit example identity below; a real product would derive the name from
+ * its model/serial number (e.g. "KitchenLamp-a1b2c3") and keep the password
+ * out of logs.  The demo's banner prints this exact name as the broadcast
+ * SSID. */
+#define DEMO_AP_NAME     "Bimbrownik"
+#define DEMO_AP_PASSWORD "SuperTrudne1!-_"
+
 /* How long to wait for the Wi-Fi worker task to come up after start(). */
 #define DEMO_WIFI_START_TIMEOUT_MS 5000u
 
@@ -135,6 +148,18 @@ static int demo_init_storage( void )
 static int demo_init_wifi( void )
 {
   printf( "[demo] init 3/5: Wi-Fi management (AP+STA)...\n" );
+
+  /* TASK-014: the provisioning AP identity is a runtime configuration and
+   * MUST be set before wifi_mgmt_start(); calls after the module is running
+   * are rejected.  A product passes its own identity here (the demo uses the
+   * explicit example identity above). */
+  if ( !wifi_mgmt_set_ap_credentials( DEMO_AP_NAME, DEMO_AP_PASSWORD ) )
+  {
+    printf( "[demo] ERROR: cannot set provisioning AP identity "
+            "(must be configured before wifi_mgmt_start)\n" );
+    return -1;
+  }
+
   wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLI_SER );
   wifi_mgmt_init();
   wifi_mgmt_start();
@@ -242,7 +267,7 @@ void app_main( void )
 
   demo_print_status();
   printf( "\n[demo] connect a phone/laptop to the %s access point and open "
-          "http://10.10.0.1 in a browser\n", WIFI_AP_NAME );
+          "http://10.10.0.1 in a browser\n", DEMO_AP_NAME );
   printf( "[demo] submitting credentials through the portal stores them in "
           "wifi_ap.json on the storage partition\n" );
   printf( "\n" );

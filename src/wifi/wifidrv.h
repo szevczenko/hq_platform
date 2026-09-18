@@ -14,13 +14,10 @@
 
 /* Public macros -------------------------------------------------------------*/
 
-#ifndef WIFI_AP_NAME
-#define WIFI_AP_NAME "Bimbrownik"
-#endif
-
-#ifndef WIFI_AP_PASSWORD
-#define WIFI_AP_PASSWORD "SuperTrudne1!-_"
-#endif
+/* Provisioning AP identity is a RUNTIME configuration (TASK-014): see
+ * wifi_mgmt_set_ap_credentials() in wifi_managment.h.  No AP name or password
+ * default is shipped in a public header; the neutral non-secret build-time
+ * fallback lives in the implementation (wifi_managment.c). */
 
 #define MAX_SSID_SIZE     32
 #define MAX_PASSWORD_SIZE 64

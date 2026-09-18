@@ -83,9 +83,11 @@ entirely, or override it per device at init time through
 ## Provisioning flow
 
 1. Power the board. With no `wifi_ap.json` on the storage partition the demo
-   starts the portal automatically: the device creates the `wifi_provisioning`
-   access point (SSID advertised in the console banner) and the captive DNS
-   responder answers all A queries with `10.10.0.1`.
+   starts the portal automatically: the device creates the example's
+   provisioning access point (`DEMO_AP_NAME` — `Bimbrownik`, set explicitly at
+   runtime via `wifi_mgmt_set_ap_credentials()` before start; a product MUST
+   set its own identity) and the captive DNS responder answers all A queries
+   with `10.10.0.1`.
 2. Connect a phone/laptop to that AP. A browser opens the captive portal at
    `http://10.10.0.1` (any DNS/HTTP request is redirected to it).
 3. Select the home network and enter its password; the portal submits the

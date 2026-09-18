@@ -16,13 +16,19 @@
 
 /* Public macros -------------------------------------------------------------*/
 
-#ifndef WIFI_AP_NAME
-#define WIFI_AP_NAME "Bimbrownik"
-#endif
-
-#ifndef WIFI_AP_PASSWORD
-#define WIFI_AP_PASSWORD "SuperTrudne1!-_"
-#endif
+/*
+ * Provisioning AP identity
+ * -------------------------
+ * The soft-AP broadcast by the device for provisioning is a RUNTIME
+ * configuration: a product MUST set its own identity with
+ * wifi_mgmt_set_ap_credentials() before wifi_mgmt_start() (see the function
+ * documentation below).  This public header deliberately ships no AP name and
+ * no AP password.  The neutral non-secret fallback used when a build defines
+ * neither WIFI_AP_NAME nor WIFI_AP_PASSWORD lives in the implementation
+ * (wifi_managment.c), and examples that want to keep a compile-time identity
+ * may still override those two macros at build time through their own build
+ * configuration.
+ */
 
 /** @brief Maximum SSID length in characters (without null terminator). */
 #define MAX_SSID_SIZE        32
@@ -125,6 +131,37 @@ typedef void ( *wifi_mgmt_event_cb_t )( wifi_mgmt_event_t event, void* user_data
  *          @c wifi_mgmt_request_mode for runtime transitions.
  */
 void wifi_mgmt_set_wifi_type( wifi_type_t type );
+
+/**
+ * @brief   Set the provisioning soft-AP identity (broadcast name + password).
+ *
+ * @details Configures the access point that the device broadcasts for
+ *          provisioning.  The identity is applied by the platform HAL when the
+ *          Wi-Fi module starts, so this is the canonical way for a product —
+ *          or a single device, e.g. via a serial-number-derived name such as
+ *          "KitchenLamp-a1b2c3" — to choose its own provisioning AP identity
+ *          at runtime.  The full name is accepted verbatim: the platform does
+ *          not append a MAC suffix to an explicitly configured identity and
+ *          keeps out of identity policy, and it never stores or logs the
+ *          password.
+ *
+ * @param   [in] name     - null-terminated AP broadcast name (SSID),
+ *                          1..@c MAX_SSID_SIZE characters
+ * @param   [in] password - null-terminated AP password,
+ *                          0..@c MAX_PASSWORD_SIZE characters
+ *                          (an empty string opens the AP without a key)
+ * @return  true when the identity was accepted and will be used on the next
+ *          @c wifi_mgmt_start, false on invalid input or when called while
+ *          the module is already running.
+ *
+ * @note    MUST be called before @c wifi_mgmt_start(): the AP interface comes
+ *          up from the value set at that point.  Calls made after the module
+ *          has started — or while a start is in progress — are rejected and
+ *          return false; stop the module (and start it again) to apply a new
+ *          identity.  Products MUST set their own identity; the platform does
+ *          not impose one and ships no secret default.
+ */
+bool wifi_mgmt_set_ap_credentials( const char* name, const char* password );
 
 /**
  * @brief   Asynchronously request a runtime transition to @p type.

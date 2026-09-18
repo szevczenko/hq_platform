@@ -25,6 +25,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "wifi_managment.h"
 #include "wifi_hal_mock.h"
@@ -1890,6 +1892,283 @@ static void test_lifecycle_timed_out_deinit_retains_objects( void )
 }
 
 /* ============================================================================
+ * TASK-014: Runtime provisioning AP identity
+ *
+ * The provisioning soft-AP identity is a runtime configuration:
+ *   - wifi_mgmt_set_ap_credentials() is honored when called before start,
+ *   - it is rejected once the module is running,
+ *   - never calling it keeps the build-time default identity unchanged,
+ *   - the AP auth mode is derived from the configured password (an empty key
+ *     must come up as an open network, never WPA2 with an empty key),
+ *   - the AP password never appears in captured log output.
+ * ========================================================================== */
+
+#define TEST_AP_LOG_CAPTURE_PATH "/tmp/hq_wifi_ap_credentials_capture.log"
+
+/* stdout (the OSAL log sink) redirection used by the log-scrubbing
+ * regression.  The Wi-Fi worker logs synchronously to stdout, so redirecting
+ * the fd across a full start/stop/deinit lifecycle captures every management
+ * log emitted in that window. */
+static int g_log_capture_saved_fd = -1;
+
+static bool _log_capture_begin( void )
+{
+  fflush( stdout );
+  const int saved = dup( STDOUT_FILENO );
+  const int fd    = open( TEST_AP_LOG_CAPTURE_PATH,
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644 );
+  if ( saved < 0 || fd < 0 )
+  {
+    if ( saved >= 0 )
+    {
+      close( saved );
+    }
+    if ( fd >= 0 )
+    {
+      close( fd );
+    }
+    return false;
+  }
+  if ( dup2( fd, STDOUT_FILENO ) < 0 )
+  {
+    close( fd );
+    close( saved );
+    return false;
+  }
+  close( fd );
+  g_log_capture_saved_fd = saved;
+  return true;
+}
+
+static void _log_capture_end( void )
+{
+  fflush( stdout );
+  if ( g_log_capture_saved_fd >= 0 )
+  {
+    (void) dup2( g_log_capture_saved_fd, STDOUT_FILENO );
+    close( g_log_capture_saved_fd );
+    g_log_capture_saved_fd = -1;
+  }
+}
+
+static bool _log_capture_contains( const char* needle )
+{
+  FILE* f = fopen( TEST_AP_LOG_CAPTURE_PATH, "r" );
+  if ( !f )
+  {
+    return false;
+  }
+  char line[512];
+  bool found = false;
+  while ( fgets( line, sizeof( line ), f ) != NULL )
+  {
+    if ( strstr( line, needle ) != NULL )
+    {
+      found = true;
+      break;
+    }
+  }
+  fclose( f );
+  return found;
+}
+
+/* Fresh stopped/uninitialized boundary for the standalone identity tests: a
+ * clean deinit baseline (like the TASK-135C lifecycle tests), an empty
+ * credential file, and a reset mock. */
+static void _ap_identity_clean_baseline( void )
+{
+  ( void ) wifi_mgmt_deinit(); /* Clean baseline from an earlier lifecycle. */
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+  wifi_hal_mock_reset();
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+}
+
+static void test_ap_credentials_default_unchanged_when_never_called( void )
+{
+  _ap_identity_clean_baseline();
+
+  /* Never call wifi_mgmt_set_ap_credentials(): the compiled build-time
+   * identity must be applied unchanged, including the historical MAC suffix. */
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready" );
+
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+
+  char expected_ssid[MAX_SSID_SIZE + 1] = { 0 };
+  (void) snprintf( expected_ssid, sizeof( expected_ssid ),
+                   "%s:aa:bb:cc:dd:ee:ff", WIFI_AP_NAME );
+  char expected_pass[MAX_PASSWORD_SIZE + 1] = { 0 };
+  (void) snprintf( expected_pass, sizeof( expected_pass ), "%s", WIFI_AP_PASSWORD );
+
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( expected_ssid, ms.ap_cfg.ssid,
+                                    "default AP name + MAC suffix unchanged" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( expected_pass, ms.ap_cfg.password,
+                                    "default AP password unchanged" );
+  TEST_ASSERT_FALSE_MESSAGE( ms.ap_cfg.ssid[0] == '\0', "default name non-empty" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after default check" );
+}
+
+static void test_ap_credentials_set_before_start_is_honored( void )
+{
+  _ap_identity_clean_baseline();
+
+  /* A device-identity-friendly full name (e.g. serial-number derived) is
+   * accepted verbatim; the platform appends no MAC suffix and stays out of
+   * identity policy. */
+  const char* ap_name     = "KitchenLamp-a1b2c3";
+  const char* ap_password = "DevicePass!42";
+
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( ap_name, ap_password ),
+    "setter accepted before start" );
+
+  /* Invalid input is rejected without touching the stored identity. */
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( NULL, ap_password ), "NULL name rejected" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( ap_name, NULL ), "NULL password rejected" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( "", ap_password ), "empty name rejected" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( "123456789012345678901234567890123",
+                                  ap_password ),
+    "oversize name rejected" );
+  {
+    char long_pass[MAX_PASSWORD_SIZE + 2];
+    memset( long_pass, 'x', sizeof( long_pass ) );
+    long_pass[sizeof( long_pass ) - 1] = '\0';
+    TEST_ASSERT_FALSE_MESSAGE(
+      wifi_mgmt_set_ap_credentials( ap_name, long_pass ),
+      "oversize password rejected" );
+  }
+
+  /* An empty password (open AP) is a valid explicit identity; a later call
+   * replaces it (pre-start last writer wins). */
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( ap_name, "" ),
+    "empty password accepted pre-start" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( ap_name, ap_password ),
+    "setter accepted again before start" );
+
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready" );
+
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( ap_name, ms.ap_cfg.ssid,
+                                    "AP name honored verbatim (no MAC suffix)" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( ap_password, ms.ap_cfg.password,
+                                    "AP password honored" );
+  TEST_ASSERT_EQUAL_MESSAGE( 4, ms.ap_cfg.authmode,
+                             "AP auth mode is WPA2 for a non-empty key" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after honored check" );
+}
+
+static void test_ap_credentials_rejected_after_start( void )
+{
+  _ap_identity_clean_baseline();
+
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( "TestAP", "TestPass123" ),
+    "setter accepted before start" );
+
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready" );
+
+  /* Once the module is running, later calls are rejected outright. */
+  TEST_ASSERT_FALSE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( "OtherAP", "OtherPass456" ),
+    "setter rejected after start" );
+
+  /* The in-force identity is still the one configured before start. */
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "TestAP", ms.ap_cfg.ssid,
+                                    "AP name unchanged after rejection" );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "TestPass123", ms.ap_cfg.password,
+                                    "AP password unchanged after rejection" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after rejection check" );
+}
+
+static void test_ap_credentials_empty_password_opens_ap( void )
+{
+  _ap_identity_clean_baseline();
+
+  /* Start in AP-only (SERVER) mode so the start-time auth-mode derivation
+   * runs: an explicitly-set empty password is a valid product identity, and
+   * the AP config handed to the HAL must carry an open-network auth mode
+   * (never WPA2 with an empty key, which the ESP IDF HAL rejects with
+   * ESP_ERR_WIFI_PASSWORD and which would advertise an open network as
+   * secured). */
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_SERVER );
+  const char* ap_name = "OpenLamp-a1b2c3";
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( ap_name, "" ),
+    "setter accepted with empty (open) password" );
+
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready" );
+
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( ap_name, ms.ap_cfg.ssid,
+                                    "AP name honored for open AP" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, ms.ap_cfg.password[0],
+                             "AP password is empty for open AP" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, ms.ap_cfg.authmode,
+                             "AP auth mode is OPEN for an empty key" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after open-AP check" );
+}
+
+static void test_ap_credentials_password_never_logged( void )
+{
+  _ap_identity_clean_baseline();
+
+  const char* ap_name     = "LogScrubLamp-a1b2c3";
+  const char* ap_password = "LogScrubSecret!42";
+
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( ap_name, ap_password ),
+    "setter accepted before start" );
+  TEST_ASSERT_TRUE_MESSAGE( _log_capture_begin(),
+                            "log capture started (stdout redirected)" );
+
+  /* Bring the interface up and down so every config/state-machine log path
+   * runs while stdout is captured.  Results are stored and asserted only
+   * after the capture is closed so a failure stays visible on the console. */
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  const bool ready     = wifi_mgmt_wait_ready( 3000 );
+  osal_task_delay_ms( 200 ); /* let the worker drain its start logs */
+  const bool stopped   = wifi_mgmt_stop();
+  const bool deinit_ok = wifi_mgmt_deinit();
+  osal_task_delay_ms( 200 ); /* let teardown logs drain */
+  _log_capture_end();
+
+  TEST_ASSERT_TRUE_MESSAGE( ready, "module ready inside capture window" );
+  TEST_ASSERT_TRUE_MESSAGE( stopped, "clean stop inside capture window" );
+  TEST_ASSERT_TRUE_MESSAGE( deinit_ok, "clean deinit inside capture window" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    _log_capture_contains( ap_password ),
+    "AP password must never appear in captured logs" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    _log_capture_contains( ap_name ),
+    "AP name is not logged either (identity scrub)" );
+  ( void ) osal_remove( TEST_AP_LOG_CAPTURE_PATH );
+}
+
+/* ============================================================================
  * Runner
  * ========================================================================== */
 
@@ -1956,6 +2235,16 @@ void wifi_mgmt_tests_run( void )
   /* --- One-time stop --- */
   wifi_mgmt_stop();
   osal_task_delay_ms( 300 );
+
+  /* --- TASK-014: runtime provisioning AP identity (isolated lifetimes) ---
+   * Each test starts from a clean deinit baseline and runs its own full
+   * lifecycle so the runtime setter is always evaluated in its documented
+   * pre-start window. */
+  RUN_TEST( test_ap_credentials_default_unchanged_when_never_called );
+  RUN_TEST( test_ap_credentials_set_before_start_is_honored );
+  RUN_TEST( test_ap_credentials_rejected_after_start );
+  RUN_TEST( test_ap_credentials_empty_password_opens_ap );
+  RUN_TEST( test_ap_credentials_password_never_logged );
 
   /* --- TASK-135C: deterministic lifecycle regression (isolated lifetimes) ---
    * Each lifecycle test deinitializes the single-lifecycle module above and
