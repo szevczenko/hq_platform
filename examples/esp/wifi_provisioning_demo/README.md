@@ -114,6 +114,13 @@ Wi-Fi management layer loads that file, so the device reconnects to the saved
 network without user interaction; the portal only reopens if the saved
 credentials fail.
 
+On boot, this demo formats `storage` and retries the mount when the partition
+cannot be mounted. This handles a freshly flashed or erased device, but also
+discards any unreadable credentials and other files on that partition. The
+format is performed explicitly by the demo; the shared OSAL `osal_mount()` API
+does not format failed mounts implicitly, so other products can choose a safer
+recovery policy.
+
 ## Build, flash, monitor
 
 Requires ESP-IDF v5.5.x. From this directory:

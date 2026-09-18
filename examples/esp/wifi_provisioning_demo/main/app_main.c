@@ -20,7 +20,9 @@
  *
  * Storage (the littlefs "storage" partition, see partitions.csv) is mounted
  * before Wi-Fi management so saved credentials can be loaded at startup and
- * written back after a successful connection (wifi_ap.json).
+ * written back after a successful connection (wifi_ap.json). This standalone
+ * provisioning demo explicitly formats the partition when it cannot be
+ * mounted, which gives a freshly flashed device a usable filesystem.
  *
  * Credential persistence: submitted credentials are stored in wifi_ap.json on
  * the littlefs storage partition. To erase-and-reprovision a device, erase
@@ -135,9 +137,16 @@ static int demo_init_storage( void )
           DEMO_STORAGE_DEVICE, DEMO_STORAGE_MOUNT );
   if ( osal_mount( DEMO_STORAGE_DEVICE, DEMO_STORAGE_MOUNT ) != OSAL_SUCCESS )
   {
-    printf( "[demo] ERROR: cannot mount %s partition (see partitions.csv)\n",
-            DEMO_STORAGE_DEVICE );
-    return -1;
+      printf( "[demo] storage mount failed; formatting %s for provisioning\n",
+        DEMO_STORAGE_DEVICE );
+      if ( osal_mkfs( NULL, DEMO_STORAGE_DEVICE, DEMO_STORAGE_MOUNT, 0U, 0U ) !=
+     OSAL_SUCCESS ||
+     osal_mount( DEMO_STORAGE_DEVICE, DEMO_STORAGE_MOUNT ) != OSAL_SUCCESS )
+      {
+        printf( "[demo] ERROR: cannot initialize %s partition (see partitions.csv)\n",
+          DEMO_STORAGE_DEVICE );
+        return -1;
+      }
   }
   printf( "[demo] init 2/5: storage ready\n" );
   return 0;
