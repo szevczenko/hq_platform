@@ -2169,6 +2169,213 @@ static void test_ap_credentials_password_never_logged( void )
 }
 
 /* ============================================================================
+ * TASK-015: Saved-credential erase API
+ *
+ * wifi_mgmt_erase_credentials() removes the persisted credential file, is
+ * idempotent, is safe in every Wi-Fi state (stopped, running-disconnected,
+ * running-connected), flips wifi_mgmt_is_read_data() to false immediately,
+ * and never logs credential content — only the outcome.
+ * ========================================================================== */
+
+static void test_erase_credentials_with_credential_present( void )
+{
+  wifi_config_list_t seeded = { 0 };
+  wifi_config_list_t loaded = { 0 };
+
+  ( void ) wifi_mgmt_deinit(); /* Clean baseline from an earlier lifecycle. */
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+  wifi_hal_mock_reset();
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+
+  /* Seed a persisted credential exactly like a provisioned device. */
+  seeded.count = 1;
+  seeded.last_use = 1;
+  seeded.entries[0].nb = 1;
+  strncpy( seeded.entries[0].ssid, "EraseNet",
+           sizeof( seeded.entries[0].ssid ) - 1 );
+  strncpy( seeded.entries[0].password, "ErasePass",
+           sizeof( seeded.entries[0].password ) - 1 );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_save( &seeded ) );
+
+  /* Bring the module up: the saved credential is loaded at init, so the
+   * device reports "has saved data" before the erase. */
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_read_data(),
+                            "saved credential loaded at startup" );
+
+  /* Erase while running: the file disappears and the device is fresh. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "erase succeeds with a credential present" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "is_read_data false after erase" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_config_load( &loaded ) != OSAL_SUCCESS,
+                            "credential file removed from persistent storage" );
+  {
+    char name[MAX_SSID_SIZE + 1] = { 0 };
+    wifi_mgmt_get_ap_name( name );
+    TEST_ASSERT_EQUAL_STRING_MESSAGE( "", name,
+                                      "no in-memory AP name remains after erase" );
+  }
+
+  /* Idempotent: erasing again with nothing saved is still a no-op success. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "second erase is an idempotent no-op success" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "still fresh after repeated erase" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after erase" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit after erase" );
+}
+
+static void test_erase_credentials_with_none_noop( void )
+{
+  ( void ) wifi_mgmt_deinit(); /* Clean baseline from an earlier lifecycle. */
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+  wifi_hal_mock_reset();
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+
+  /* Stopped / uninitialized: nothing persisted, erase is a no-op success. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "erase with no credential is a no-op success" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "fresh device reports no saved data" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "repeated no-op erase succeeds" );
+
+  /* Same guarantee while the module is running without a saved credential. */
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "no saved data after start" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "erase while running with no credential succeeds" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "still fresh after the no-op erase" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after no-op erase" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit after no-op erase" );
+}
+
+/* Erase is safe while the station is connected: the live session survives
+ * (the HAL owns the network configuration) but the saved credential and the
+ * in-memory credential state are gone, so the device is immediately fresh. */
+static void test_erase_credentials_while_connected( void )
+{
+  wifi_config_list_t seeded = { 0 };
+
+  ( void ) wifi_mgmt_deinit(); /* Clean baseline from an earlier lifecycle. */
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+  wifi_hal_mock_reset();
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+
+  /* Seed the credential that the module loads at startup (this is what makes
+   * wifi_mgmt_is_read_data() true before the erase). */
+  seeded.count = 1;
+  seeded.last_use = 2;
+  seeded.entries[0].nb = 2;
+  strncpy( seeded.entries[0].ssid, "HomeNet",
+           sizeof( seeded.entries[0].ssid ) - 1 );
+  strncpy( seeded.entries[0].password, "HomePass",
+           sizeof( seeded.entries[0].password ) - 1 );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_save( &seeded ) );
+
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  wifi_mgmt_init();
+  wifi_mgmt_register_connect_cb( _on_connect );
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "module ready" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_read_data(),
+                            "saved credential loaded at startup" );
+
+  /* The loaded credential auto-connects; complete it like a provisioned
+   * device that is currently associated. */
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_hal_mock_wait_connect_completed_level( 1, 3000 ),
+    "saved credential reaches auto-connect" );
+  g_connect_cb_fired = false;
+  wifi_hal_event_data_t evt_data = { 0 };
+  strncpy( evt_data.ip_info.ip, "192.168.1.10",
+           sizeof( evt_data.ip_info.ip ) - 1 );
+  wifi_hal_mock_inject_event( WIFI_HAL_EVT_STA_GOT_IP, &evt_data );
+  TEST_ASSERT_TRUE_MESSAGE( _wait_for( &g_connect_cb_fired, 3000 ),
+                            "connect callback fired" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_connected(), "is_connected true" );
+
+  /* Erase while connected: the session survives; the device is fresh. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "erase while connected succeeds" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "is_read_data false after connected erase" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_connected(),
+                            "live session stays connected after erase" );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after connected erase" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit after connected erase" );
+}
+
+/* The full erase path — startup with a saved credential, the erase call,
+ * stop and teardown — must never write the credential (SSID or password) to
+ * any log output; only the outcome is logged. */
+static void test_erase_credentials_password_never_logged( void )
+{
+  wifi_config_list_t seeded = { 0 };
+
+  ( void ) wifi_mgmt_deinit(); /* Clean baseline from an earlier lifecycle. */
+  ( void ) osal_remove( WIFI_CONFIG_FILE_PATH );
+  wifi_hal_mock_reset();
+  wifi_hal_mock_set_connect_result( OSAL_SUCCESS );
+
+  const char* ap_ssid     = "EraseLogScrubNet";
+  const char* ap_password = "EraseLogScrubSecret!77";
+
+  /* Seed the credential before capture; its content must never be repeated. */
+  seeded.count = 1;
+  seeded.last_use = 3;
+  seeded.entries[0].nb = 3;
+  strncpy( seeded.entries[0].ssid, ap_ssid,
+           sizeof( seeded.entries[0].ssid ) - 1 );
+  strncpy( seeded.entries[0].password, ap_password,
+           sizeof( seeded.entries[0].password ) - 1 );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_save( &seeded ) );
+
+  TEST_ASSERT_TRUE_MESSAGE( _log_capture_begin(),
+                            "log capture started (stdout redirected)" );
+
+  /* Run the saved-credential startup, the erase, and full teardown while
+   * stdout is captured.  Results are stored and asserted only after the
+   * capture is closed so a failure stays visible on the console. */
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  const bool ready     = wifi_mgmt_wait_ready( 3000 );
+  osal_task_delay_ms( 200 ); /* let the worker drain its start logs */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_read_data(),
+                            "seeded credential loaded inside capture window" );
+  const bool erased    = wifi_mgmt_erase_credentials();
+  const bool stopped   = wifi_mgmt_stop();
+  const bool deinit_ok = wifi_mgmt_deinit();
+  osal_task_delay_ms( 200 ); /* let teardown logs drain */
+  _log_capture_end();
+
+  TEST_ASSERT_TRUE_MESSAGE( ready, "module ready inside capture window" );
+  TEST_ASSERT_TRUE_MESSAGE( erased, "erase succeeded inside capture window" );
+  TEST_ASSERT_TRUE_MESSAGE( stopped, "clean stop inside capture window" );
+  TEST_ASSERT_TRUE_MESSAGE( deinit_ok, "clean deinit inside capture window" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    _log_capture_contains( ap_password ),
+    "credential password must never appear in captured logs" );
+  TEST_ASSERT_FALSE_MESSAGE(
+    _log_capture_contains( ap_ssid ),
+    "credential SSID must never appear in captured logs" );
+  ( void ) osal_remove( TEST_AP_LOG_CAPTURE_PATH );
+}
+
+/* ============================================================================
  * Runner
  * ========================================================================== */
 
@@ -2245,6 +2452,15 @@ void wifi_mgmt_tests_run( void )
   RUN_TEST( test_ap_credentials_rejected_after_start );
   RUN_TEST( test_ap_credentials_empty_password_opens_ap );
   RUN_TEST( test_ap_credentials_password_never_logged );
+
+  /* --- TASK-015: saved-credential erase API (isolated lifetimes) ---
+   * Each test starts from a clean deinit baseline and runs its own full
+   * lifecycle so erase is exercised across every Wi-Fi state (stopped,
+   * running-disconnected, running-connected). */
+  RUN_TEST( test_erase_credentials_with_credential_present );
+  RUN_TEST( test_erase_credentials_with_none_noop );
+  RUN_TEST( test_erase_credentials_while_connected );
+  RUN_TEST( test_erase_credentials_password_never_logged );
 
   /* --- TASK-135C: deterministic lifecycle regression (isolated lifetimes) ---
    * Each lifecycle test deinitializes the single-lifecycle module above and

@@ -1,6 +1,7 @@
 #include "wifi_managment.h"
 
 #include "osal_bin_sem.h"
+#include "osal_file.h"
 #include "osal_log.h"
 #include "osal_mutex.h"
 #include "osal_task.h"
@@ -2064,6 +2065,56 @@ bool wifi_mgmt_is_read_data( void )
   const bool ok = g_ctx.read_wifi_data;
   _unlock_state();
   return ok;
+}
+
+bool wifi_mgmt_erase_credentials( void )
+{
+  /* Probe the credential file first: a missing file is the idempotent no-op
+   * success case, and a real removal is only reported as a failure when an
+   * existing file could not be deleted. */
+  osal_fstat_t stat = { 0 };
+  const int32_t stat_rc = osal_stat( WIFI_CONFIG_FILE_PATH, &stat );
+
+  int32_t rm_rc = ( stat_rc == OSAL_SUCCESS )
+                    ? osal_remove( WIFI_CONFIG_FILE_PATH )
+                    : stat_rc;
+  const bool stat_missing = ( stat_rc == OSAL_FS_ERR_PATH_INVALID );
+  const bool removed = ( ( stat_rc != OSAL_SUCCESS && stat_missing ) ) ||
+                       ( rm_rc == OSAL_SUCCESS );
+
+  /* Clear the in-memory credential state under the state lock so a concurrent
+   * reader (e.g. wifi_mgmt_is_read_data) never observes a partial erase and
+   * the device is immediately fresh even if a file-removal retry is needed.
+   * Before init no mutex (and no worker) exists and the caller is the single
+   * owner — the same pre-start window the AP-identity setter documents. */
+  const bool lock_taken = g_ctx.state_mutex != NULL;
+  if ( lock_taken )
+  {
+    _lock_state();
+  }
+  memset( &g_ctx.config_list, 0, sizeof( g_ctx.config_list ) );
+  g_ctx.current_cred_nb = 0;
+  g_ctx.config_loaded   = false;
+  g_ctx.read_wifi_data  = false;
+  memset( &g_ctx.saved_data, 0, sizeof( g_ctx.saved_data ) );
+  memset( g_ctx.sta_cfg.ssid, 0, sizeof( g_ctx.sta_cfg.ssid ) );
+  memset( g_ctx.sta_cfg.password, 0, sizeof( g_ctx.sta_cfg.password ) );
+  if ( lock_taken )
+  {
+    _unlock_state();
+  }
+
+  /* Never log credential content — only the outcome (TASK-015). */
+  if ( removed )
+  {
+    osal_log_warning( "[wifi] saved credentials erased" );
+  }
+  else
+  {
+    osal_log_warning( "[wifi] credential erase failed rc=%d", (int) rm_rc );
+  }
+
+  return removed;
 }
 
 bool wifi_mgmt_is_idle( void )

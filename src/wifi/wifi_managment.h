@@ -390,6 +390,49 @@ int wifi_mgmt_get_rssi( void );
 bool wifi_mgmt_is_read_data( void );
 
 /**
+ * @brief   Erase all saved Wi-Fi credentials from persistent storage.
+ *
+ * @details Removes the credential file (@c WIFI_CONFIG_FILE_PATH —
+ *          @c wifi_ap.json on the mounted storage) and clears the in-memory
+ *          credential state, so the device immediately reports "fresh":
+ *          afterwards @c wifi_mgmt_is_read_data() returns false and the
+ *          controller (and products) treat the device as never provisioned.
+ *          The provisioning soft-AP identity configured via
+ *          @c wifi_mgmt_set_ap_credentials() is NOT affected.
+ *
+ *          The call is idempotent: erasing when no credential is saved is a
+ *          no-op success (the returned status is still true).
+ *
+ *          Behavior in each Wi-Fi state:
+ *          - not initialized / stopped: any credential file present on the
+ *            mounted storage is removed; @c wifi_mgmt_is_read_data() is false
+ *            afterwards;
+ *          - running, disconnected: the saved credential is removed from
+ *            storage and from memory; @c wifi_mgmt_is_read_data() is false
+ *            immediately; the module keeps running;
+ *          - running, connected: the saved credential is removed from storage
+ *            and from memory and @c wifi_mgmt_is_read_data() is false
+ *            immediately; the current session stays connected (the HAL owns
+ *            the live network configuration) but a subsequent reconnect or
+ *            restart starts from the fresh-device state.
+ *
+ *          Recovery contract: after erase, restart the device — or re-run the
+ *          documented re-init path — and the management layer no longer holds
+ *          a saved credential, so the controller's fresh-device fallback opens
+ *          the provisioning portal.  Any device can therefore be forced back
+ *          into the provisioning flow and re-provisioned without serial
+ *          access or a reflash.
+ *
+ * @return  true when no credential remains persisted (erase succeeded or
+ *          there was nothing to erase), false only when a credential file
+ *          exists but could not be removed.
+ *
+ * @note    This call never logs credential content — only the outcome is
+ *          logged, consistent with the platform Wi-Fi logging policy.
+ */
+bool wifi_mgmt_erase_credentials( void );
+
+/**
  * @brief   Check whether the Wi-Fi management module is running.
  * @return  true once startup has completed (state @c WIFI_APP_IDLE or beyond),
  *          false while the module is still initializing (@c WIFI_APP_INIT), is
