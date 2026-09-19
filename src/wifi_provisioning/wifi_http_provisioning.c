@@ -390,6 +390,20 @@ static void prov_wifi_event_cb( wifi_mgmt_event_t event, void * user_data )
   (void) osal_mutex_give( s_mutex );
 }
 
+/* A new credential submission starts a new station attempt. Do not expose
+ * the failure category latched by the previous attempt while this one is
+ * still connecting. */
+static void prov_reset_wifi_failure( void )
+{
+  if ( !s_mutex_ready ) return;
+
+  (void) osal_mutex_take( s_mutex );
+  s_wifi_failed = false;
+  strncpy( s_last_failure, "no_failure", sizeof( s_last_failure ) - 1 );
+  s_last_failure[sizeof( s_last_failure ) - 1] = '\0';
+  (void) osal_mutex_give( s_mutex );
+}
+
 /* Subscribe the WiFi events the status route depends on. */
 static void prov_subscribe_wifi_events( void )
 {
@@ -678,6 +692,7 @@ static void prov_handle_credentials_request( struct mg_connection * nc,
   /* Push credentials and request an asynchronous connect. */
   ( void ) wifi_mgmt_set_ap_name( ssid, ssid_len );
   ( void ) wifi_mgmt_set_password( password, pass_len );
+  prov_reset_wifi_failure();
   ( void ) wifi_mgmt_connect();
 
   /* Never retain a password in a scratch buffer. */
