@@ -162,9 +162,19 @@ void MongooseProcess_Init(void)
 	s_invoke_q        = NULL;
 	s_control_nc      = NULL;
 	s_control_conn_id = 0;
+	#if defined(MG_ENABLE_PACKED_FS) && MG_ENABLE_PACKED_FS
+	mg_mem_files = mg_packed_files;
+	#endif
 	mg_mgr_init(&mgr);
 	mg_wakeup_init(&mgr);
 	mg_log_set(CONFIG_MONGOOSE_LOG_LEVEL);
+
+#if ESP_PLATFORM
+	/* Mongoose routes .local hostnames through this listener.  The shared
+	 * manager must own it before MQTT creates its first outbound connection. */
+	if (mg_mdns_listen(&mgr, NULL, NULL) == NULL)
+		goto err_mgr_free;
+#endif
 
 	if (osal_bin_sem_create(&s_stopped_sem, "mg_stopped",
 				OSAL_SEM_EMPTY) != OSAL_SUCCESS)

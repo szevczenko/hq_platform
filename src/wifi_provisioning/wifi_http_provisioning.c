@@ -736,11 +736,11 @@ static void prov_handle_disconnect_request( struct mg_connection * nc )
 static bool prov_respond_packed( struct mg_connection * nc, const char * path,
                                 const char * headers )
 {
-  size_t size = 0u;
-  const char * data = mg_unpack( path, &size, NULL );
+  struct mg_str packed = mg_unpacked( path );
 
-  if ( data == NULL ) return false;
-  mg_http_reply( nc, 200, headers, "%.*s", ( int ) size, data );
+  if ( packed.buf == NULL ) return false;
+  mg_http_reply( nc, 200, headers, "%.*s", ( int ) packed.len,
+                 packed.buf );
   return true;
 }
 
