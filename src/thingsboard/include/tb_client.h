@@ -88,6 +88,10 @@ typedef struct {
  */
 int tb_client_init(tb_client_t **client, const tb_client_config_t *config);
 
+int tb_client_update_credentials(tb_client_t *client,
+                                 const char *access_token,
+                                 const char *client_id);
+
 /**
  * @brief Deinitialize and free the ThingsBoard client
  * @param client  Client handle

@@ -47,6 +47,18 @@ int tb_provision_request(tb_client_t *client, const tb_provision_request_t *req,
                          tb_provision_cb_t cb, void *user_data,
                          uint32_t timeout_ms);
 
+/**
+ * @brief Unregister a pending provisioning response callback.
+ *
+ * Must be called by the caller of tb_provision_request() when it gives up
+ * waiting for a response (e.g. on timeout) so a response that arrives
+ * afterwards can never invoke the callback with a user_data pointer that
+ * has gone out of scope. Safe to call even if no request is pending.
+ *
+ * @param client  Client handle passed to tb_provision_request().
+ */
+void tb_provision_cancel(tb_client_t *client);
+
 #ifdef __cplusplus
 }
 #endif

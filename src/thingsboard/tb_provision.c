@@ -133,3 +133,16 @@ void tb_provision_deinit(tb_client_t *client)
 	s_provision_subscribed = false;
 	s_owner_client = NULL;
 }
+
+void tb_provision_cancel(tb_client_t *client)
+{
+	if (client == NULL || s_owner_client != client) {
+		return;
+	}
+
+	/* Unregister only the pending callback/user_data; the subscription
+	 * itself stays intact so a subsequent request on the same client
+	 * does not need to re-subscribe. */
+	s_provision_cb = NULL;
+	s_provision_user_data = NULL;
+}

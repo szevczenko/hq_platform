@@ -8,6 +8,7 @@
 #include "tb_client.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -710,6 +711,24 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
     *client = ctx;
 
     osal_log_info("[tb] ThingsBoard client initialized");
+    return 0;
+}
+
+int tb_client_update_credentials(tb_client_t *client,
+                                 const char *access_token,
+                                 const char *client_id)
+{
+    if (client == NULL || !client->initialized || access_token == NULL ||
+        client_id == NULL || access_token[0] == '\0' || client_id[0] == '\0') {
+        return -1;
+    }
+    (void)snprintf(client->config.access_token,
+                   sizeof(client->config.access_token), "%s", access_token);
+    (void)snprintf(client->config.client_id,
+                   sizeof(client->config.client_id), "%s", client_id);
+    mqtt_config_set_string(access_token, MQTT_CONFIG_VALUE_USERNAME);
+    mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD);
+    mqtt_config_set_string(client_id, MQTT_CONFIG_VALUE_CLIENT_ID);
     return 0;
 }
 
