@@ -183,6 +183,12 @@ osal_status_t osal_ota_confirm_running_image(void)
 
 osal_status_t osal_ota_finish(bool apply_update)
 {
+    return osal_ota_finish_ex(apply_update, apply_update);
+}
+
+osal_status_t osal_ota_finish_ex(bool apply_update, bool restart)
+{
+    (void)restart;
     if (!s_ota_ctx.active) {
         return OSAL_ERR_INCORRECT_OBJ_STATE;
     }

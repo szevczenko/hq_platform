@@ -115,8 +115,8 @@ Recommended state telemetry keys emitted by current implementation:
 
 - fw_state
 - fw_error
-- current_fw_title
-- current_fw_version
+- fw_title
+- fw_version
 
 ## Firmware Authenticity
 

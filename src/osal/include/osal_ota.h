@@ -47,6 +47,12 @@ osal_status_t osal_ota_verify(void);
 bool osal_ota_needs_confirmation(void);
 osal_status_t osal_ota_confirm_running_image(void);
 osal_status_t osal_ota_finish(bool apply_update);
+/**
+ * @brief Finish the session; with @p apply_update the image becomes the
+ *        next boot partition and, only when @p restart is set, the device
+ *        restarts immediately (osal_ota_finish(a) == osal_ota_finish_ex(a, a)).
+ */
+osal_status_t osal_ota_finish_ex(bool apply_update, bool restart);
 osal_status_t osal_ota_abort(void);
 osal_status_t osal_ota_get_progress(size_t *written_size, size_t *total_size);
 

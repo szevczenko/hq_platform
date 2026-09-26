@@ -733,21 +733,26 @@ static void prov_handle_disconnect_request( struct mg_connection * nc )
   mg_http_reply( nc, 202, s_json_headers, "%s", "{\"state\":\"accepted\"}" );
 }
 
-static bool prov_respond_packed( struct mg_connection * nc, const char * path,
-                                const char * headers )
+static bool prov_respond_packed( struct mg_connection * nc,
+                                 struct mg_http_message * hm,
+                                 const char * path, const char * headers )
 {
   struct mg_str packed = mg_unpacked( path );
+  struct mg_http_serve_opts opts = {
+    .extra_headers = headers,
+    .fs = &mg_fs_packed,
+  };
 
   if ( packed.buf == NULL ) return false;
-  mg_http_reply( nc, 200, headers, "%.*s", ( int ) packed.len,
-                 packed.buf );
+  mg_http_serve_file( nc, hm, path, &opts );
   return true;
 }
 
 /* Serve the captive portal landing page as a 200 OK HTML document. */
-static void prov_respond_portal( struct mg_connection * nc )
+static void prov_respond_portal( struct mg_connection * nc,
+                                 struct mg_http_message * hm )
 {
-  if ( !prov_respond_packed( nc, "/index.html", s_html_headers ) )
+  if ( !prov_respond_packed( nc, hm, "/index.html", s_html_headers ) )
     mg_http_reply( nc, 200, s_html_headers, "%s", s_portal_html );
 }
 
@@ -902,7 +907,7 @@ static void http_ev_handler( struct mg_connection * nc, int ev, void * ev_data )
    * it believe the network is already connected). */
   if ( prov_is_captive_probe( hm->uri ) )
   {
-    prov_respond_portal( nc );
+    prov_respond_portal( nc, hm );
     nc->is_draining = 1;
     return;
   }
@@ -910,14 +915,14 @@ static void http_ev_handler( struct mg_connection * nc, int ev, void * ev_data )
   /* The portal root serves the landing page directly. */
   if ( mg_strcmp( hm->uri, mg_str( "/" ) ) == 0 )
   {
-    prov_respond_portal( nc );
+    prov_respond_portal( nc, hm );
     nc->is_draining = 1;
     return;
   }
 
   if ( mg_strcmp( hm->uri, mg_str( "/app.css" ) ) == 0 )
   {
-    if ( !prov_respond_packed( nc, "/app.css", s_css_headers ) )
+    if ( !prov_respond_packed( nc, hm, "/app.css", s_css_headers ) )
       mg_http_reply( nc, 404, "Content-Type: text/plain\r\n", "Not Found" );
     nc->is_draining = 1;
     return;
@@ -925,7 +930,7 @@ static void http_ev_handler( struct mg_connection * nc, int ev, void * ev_data )
 
   if ( mg_strcmp( hm->uri, mg_str( "/app.js" ) ) == 0 )
   {
-    if ( !prov_respond_packed( nc, "/app.js", s_js_headers ) )
+    if ( !prov_respond_packed( nc, hm, "/app.js", s_js_headers ) )
       mg_http_reply( nc, 404, "Content-Type: text/plain\r\n", "Not Found" );
     nc->is_draining = 1;
     return;
