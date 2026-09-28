@@ -536,12 +536,38 @@ static int subscribe_response_topic(tb_client_t *client)
 	return ret;
 }
 
-static int attr_request_common(tb_client_t *client, const char *keys[],
-			       size_t num_keys, const char *key_type,
+/* Comma-join keys into out; false when the list does not fit. */
+static bool build_key_list(char *out, size_t cap, const char *keys[],
+			   size_t count)
+{
+	size_t offset = 0u;
+
+	for (size_t i = 0u; i < count; ++i) {
+		const size_t klen = strlen(keys[i]);
+		const size_t sep = (i > 0u) ? 1u : 0u;
+		if (offset + sep + klen >= cap) {
+			return false;
+		}
+		if (sep != 0u) {
+			out[offset++] = ',';
+		}
+		memcpy(out + offset, keys[i], klen);
+		offset += klen;
+	}
+	out[offset] = '\0';
+	return true;
+}
+
+static int attr_request_common(tb_client_t *client,
+			       const char *client_keys[], size_t client_count,
+			       const char *shared_keys[], size_t shared_count,
 			       tb_attribute_response_cb_t cb, void *user_data,
 			       uint32_t timeout_ms)
 {
-	if (client == NULL || keys == NULL || num_keys == 0 || cb == NULL) {
+	if (client == NULL || cb == NULL ||
+	    (client_count == 0u && shared_count == 0u) ||
+	    (client_count > 0u && client_keys == NULL) ||
+	    (shared_count > 0u && shared_keys == NULL)) {
 		return -1;
 	}
 
@@ -558,21 +584,14 @@ static int attr_request_common(tb_client_t *client, const char *keys[],
 		return ret;
 	}
 
-	/* Build comma-separated key list */
-	char keys_str[512] = { 0 };
-	size_t offset = 0;
-	for (size_t i = 0; i < num_keys; i++) {
-		if (i > 0) {
-			keys_str[offset++] = ',';
-		}
-		size_t klen = strlen(keys[i]);
-		if (offset + klen >= sizeof(keys_str) - 1) {
-			break;
-		}
-		memcpy(keys_str + offset, keys[i], klen);
-		offset += klen;
+	char client_str[512] = { 0 };
+	char shared_str[512] = { 0 };
+	if (!build_key_list(client_str, sizeof(client_str), client_keys,
+			    client_count) ||
+	    !build_key_list(shared_str, sizeof(shared_str), shared_keys,
+			    shared_count)) {
+		return -1;
 	}
-	keys_str[offset] = '\0';
 
 	uint32_t req_id = tb_client_get_next_request_id(client);
 	uint32_t effective_timeout =
@@ -602,7 +621,7 @@ static int attr_request_common(tb_client_t *client, const char *keys[],
 	s_pending[slot].active = true;
 	osal_mutex_give(s_pending_mutex);
 
-	/* Build request JSON: {"clientKeys":"key1,key2"} or {"sharedKeys":"key1,key2"} */
+	/* Build request JSON with either or both attribute scopes. */
 	cJSON *root = cJSON_CreateObject();
 	if (root == NULL) {
 		osal_mutex_take(s_pending_mutex);
@@ -615,7 +634,12 @@ static int attr_request_common(tb_client_t *client, const char *keys[],
 		}
 		return -1;
 	}
-	cJSON_AddStringToObject(root, key_type, keys_str);
+	if (client_count > 0u) {
+		cJSON_AddStringToObject(root, "clientKeys", client_str);
+	}
+	if (shared_count > 0u) {
+		cJSON_AddStringToObject(root, "sharedKeys", shared_str);
+	}
 
 	char *json = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
@@ -656,7 +680,7 @@ int tb_attributes_request_client(tb_client_t *client, const char *keys[],
 				 size_t num_keys, tb_attribute_response_cb_t cb,
 				 void *user_data, uint32_t timeout_ms)
 {
-	return attr_request_common(client, keys, num_keys, "clientKeys", cb,
+	return attr_request_common(client, keys, num_keys, NULL, 0u, cb,
 				   user_data, timeout_ms);
 }
 
@@ -664,8 +688,18 @@ int tb_attributes_request_shared(tb_client_t *client, const char *keys[],
 				 size_t num_keys, tb_attribute_response_cb_t cb,
 				 void *user_data, uint32_t timeout_ms)
 {
-	return attr_request_common(client, keys, num_keys, "sharedKeys", cb,
+	return attr_request_common(client, NULL, 0u, keys, num_keys, cb,
 				   user_data, timeout_ms);
+}
+
+int tb_attributes_request(tb_client_t *client,
+			  const char *client_keys[], size_t client_count,
+			  const char *shared_keys[], size_t shared_count,
+			  tb_attribute_response_cb_t cb, void *user_data,
+			  uint32_t timeout_ms)
+{
+	return attr_request_common(client, client_keys, client_count,
+				   shared_keys, shared_count, cb, user_data, timeout_ms);
 }
 
 int tb_attributes_subscribe(tb_client_t *client, tb_shared_attribute_cb_t cb,

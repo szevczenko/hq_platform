@@ -87,6 +87,13 @@ int tb_attributes_request_shared(tb_client_t *client, const char *keys[],
                                  size_t num_keys, tb_attribute_response_cb_t cb,
                                  void *user_data, uint32_t timeout_ms);
 
+/** @brief Request client and shared attributes in one response. */
+int tb_attributes_request(tb_client_t *client,
+                          const char *client_keys[], size_t client_count,
+                          const char *shared_keys[], size_t shared_count,
+                          tb_attribute_response_cb_t cb, void *user_data,
+                          uint32_t timeout_ms);
+
 /**
  * @brief Subscribe to shared attribute updates
  */

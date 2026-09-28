@@ -1092,7 +1092,10 @@ static void handle_mqtt_command_event(struct mg_mqtt_message *mm)
 			osal_log_error("MQTT CONNACK rejected ack=%u",
 				       (unsigned)mm->ack);
 			mqtt_notify_connect_failure(
-				MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED);
+				(mm->ack == 4u || mm->ack == 5u ||
+				 mm->ack == 0x86u || mm->ack == 0x87u)
+					? MQTT_CONNECT_FAILURE_REASON_AUTH_REJECTED
+					: MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED);
 			if (mqtt_state.nc != NULL)
 				mqtt_state.nc->is_closing = 1;
 		}

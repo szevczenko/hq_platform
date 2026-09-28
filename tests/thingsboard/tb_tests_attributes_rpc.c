@@ -325,6 +325,31 @@ static void test_attributes_request_shared(void)
 	destroy_test_client(client);
 }
 
+static void test_attributes_request_client_and_shared(void)
+{
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT_NOT_NULL(client);
+	reset_attr_state();
+	const char *ckeys[] = { "power", "brightness" };
+	const char *skeys[] = { "power" };
+	TEST_ASSERT_EQUAL(0, tb_attributes_request(client, ckeys, 2, skeys, 1,
+						   attr_response_cb, NULL, 5000));
+	TEST_ASSERT_EQUAL(1, mock_publish_count);
+	cJSON *root = cJSON_Parse(mock_publishes[0].message);
+	TEST_ASSERT_NOT_NULL(root);
+	cJSON *ck = cJSON_GetObjectItemCaseSensitive(root, "clientKeys");
+	cJSON *sk = cJSON_GetObjectItemCaseSensitive(root, "sharedKeys");
+	TEST_ASSERT_TRUE(cJSON_IsString(ck));
+	TEST_ASSERT_TRUE(cJSON_IsString(sk));
+	TEST_ASSERT_EQUAL_STRING("power,brightness", ck->valuestring);
+	TEST_ASSERT_EQUAL_STRING("power", sk->valuestring);
+	cJSON_Delete(root);
+
+	TEST_ASSERT_TRUE(tb_attributes_request(client, NULL, 0, NULL, 0,
+					       attr_response_cb, NULL, 5000) != 0);
+	destroy_test_client(client);
+}
+
 static void test_attributes_request_shared_timeout_and_reconnect(void)
 {
 	tb_client_t *client = create_test_client();
@@ -673,6 +698,7 @@ void run_attributes_tests(void)
 	RUN_TEST(test_attributes_json_shape);
 	RUN_TEST(test_attributes_request);
 	RUN_TEST(test_attributes_request_shared);
+	RUN_TEST(test_attributes_request_client_and_shared);
 	RUN_TEST(test_attributes_request_shared_timeout_and_reconnect);
 	RUN_TEST(test_attributes_request_reconnect_safety);
 	RUN_TEST(test_attributes_request_timeout_and_slot_reuse);

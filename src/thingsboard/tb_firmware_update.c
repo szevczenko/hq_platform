@@ -33,6 +33,8 @@
 #define TB_FW_TELEM_ERROR "fw_error"
 #define TB_FW_TELEM_TITLE "fw_title"
 #define TB_FW_TELEM_VERSION "fw_version"
+#define TB_FW_TELEM_CURRENT_TITLE "current_fw_title"
+#define TB_FW_TELEM_CURRENT_VERSION "current_fw_version"
 
 #define TB_FW_REQ_TOPIC_FMT "v2/fw/request/%" PRIu32 "/chunk/%" PRIu32
 #define TB_FW_RESP_TOPIC_SUB "v2/fw/response/+/chunk/+"
@@ -246,6 +248,10 @@ static int fw_report_state(tb_fw_state_t state, const char *error)
 	cJSON_AddStringToObject(root, TB_FW_TELEM_TITLE,
 				s_fw.current_title);
 	cJSON_AddStringToObject(root, TB_FW_TELEM_VERSION,
+				s_fw.current_version);
+	cJSON_AddStringToObject(root, TB_FW_TELEM_CURRENT_TITLE,
+				s_fw.current_title);
+	cJSON_AddStringToObject(root, TB_FW_TELEM_CURRENT_VERSION,
 				s_fw.current_version);
 	cJSON_AddStringToObject(root, TB_FW_TELEM_STATE,
 				fw_state_to_string(state));
