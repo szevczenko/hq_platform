@@ -61,5 +61,6 @@ void mqtt_app_mock_advance_time_ms(uint32_t elapsed_ms);
 void mqtt_app_mock_set_auto_suback(bool enabled, uint32_t delay_ms);
 void mqtt_app_mock_set_auto_puback(bool enabled, uint32_t delay_ms);
 void mqtt_app_mock_set_replay_subscriptions_on_connect(bool enabled);
+void mqtt_app_mock_set_verified_config(bool current);
 
 #endif /* MQTT_APP_MOCK_H */

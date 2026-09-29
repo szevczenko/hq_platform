@@ -64,6 +64,7 @@
 #include "wifi_hal_mock.h"
 #include "wifi_http_provisioning.h"
 #include "wifi_managment.h"
+#include "wifi_provisioning.h"
 #include "wifi_provisioning_controller.h"
 
 #ifdef ESP_PLATFORM
@@ -196,6 +197,7 @@ void setUp( void )
   /* Initialize Wi-Fi management once; each scenario brings it up and waits
    * for readiness before any provisioning component depends on it. */
   wifi_mgmt_init();
+  TEST_ASSERT_TRUE( wifi_mgmt_erase_credentials() );
 }
 
 void tearDown( void )
@@ -218,6 +220,7 @@ void tearDown( void )
    * controller is unsubscribed/deinitialized before Wi-Fi, Wi-Fi is stopped
    * and deinitialized before the shared Mongoose process, and the filesystem
    * is only cleaned once every writer behind the shared image is joined. */
+  ( void ) wifi_provisioning_deinit();
   ( void ) wifi_http_provisioning_stop();
   wifi_provisioning_controller_deinit();
   (void) wifi_mgmt_stop();
@@ -534,8 +537,12 @@ static void test_automatic_fallback_flow( void )
 
   /* --- 1. automatic fallback without saved credentials --------------------
    * No wifi_ap.json exists: the controller starts the portal immediately. */
-  TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_init(),
-                            "controller init must start provisioning without credentials" );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_OK, wifi_provisioning_init() );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_EVENT_STARTED,
+                         wifi_provisioning_poll_event() );
+  TEST_ASSERT_TRUE( wifi_provisioning_is_active() );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STATE_RUNNING,
+                         wifi_provisioning_get_state() );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_PROVISIONING,
                          wifi_provisioning_controller_get_state() );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
@@ -614,6 +621,13 @@ static void test_automatic_fallback_flow( void )
                          wifi_provisioning_controller_get_state() );
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
                          wifi_http_provisioning_get_state() );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_EVENT_SUCCEEDED,
+                         wifi_provisioning_poll_event() );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_EVENT_NONE,
+                         wifi_provisioning_poll_event() );
+  TEST_ASSERT_FALSE( wifi_provisioning_is_active() );
+  TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STATE_STOPPED,
+                         wifi_provisioning_get_state() );
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_is_connected(),
                             "STA connection must survive SoftAP retirement" );
   TEST_ASSERT_FALSE_MESSAGE( http_port_accepts( http_port ),
@@ -674,6 +688,11 @@ static void test_stale_grace_expiry_cannot_retire_next_session( void )
   wifi_provisioning_controller_deinit();
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_DISABLED,
                          wifi_provisioning_controller_get_state() );
+
+  /* The connected session persisted its credential (TASK-136); erase it so
+   * the next session is a fresh, uncredentialed one. */
+  TEST_ASSERT_TRUE( wifi_mgmt_is_read_data() );
+  TEST_ASSERT_TRUE( wifi_mgmt_erase_credentials() );
 
   /* A fresh session starts provisioning (no saved credentials), with no grace
    * armed - the session that owned the stale timer is gone. */
@@ -836,6 +855,9 @@ static void test_controller_defers_policy_off_wifi_worker( void )
   wifi_provisioning_controller_deinit();
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_DISABLED,
                          wifi_provisioning_controller_get_state() );
+
+  /* Phase 1 persisted a credential (TASK-136); start the next session fresh. */
+  TEST_ASSERT_TRUE( wifi_mgmt_erase_credentials() );
 
   TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
   TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_test_wait_idle( EVENT_WAIT_MS ),

@@ -5,12 +5,12 @@ TASK-130 - POSIX provisioning demo smoke test.
 Launches the built `wifi_provisioning_demo` (simulated Wi-Fi) and verifies its
 Definition of Done end-to-end:
 
-  1. the provisioning portal opens on http://127.0.0.1:8080/;
-  2. DNS (udp://127.0.0.1:10053) and all HTTP workflows operate against the
+  1. the provisioning portal opens on http://127.0.0.1:<free port>/;
+  2. DNS (udp://127.0.0.1:<free port>) and all HTTP workflows operate against the
      simulated Wi-Fi environment (status, scan, scan results, connect with
      credentials, disconnect);
   3. a clean shutdown (SIGTERM, reverse ownership order) is performed;
-  4. shutdown releases both listener ports (8080 TCP, 10053 UDP).
+  4. shutdown releases both listener ports.
 
 The demo binary path is taken from argv[1]. Only the Python standard library
 is used so the test runs on any POSIX host with python3.
@@ -31,9 +31,12 @@ import tempfile
 import time
 
 HTTP_HOST = "127.0.0.1"
-HTTP_PORT = 8080
 DNS_HOST = "127.0.0.1"
-DNS_PORT = 10053
+# Chosen at runtime (free loopback ports) so a host service on the demo's
+# default ports cannot fail - or falsely pass - the test.
+HTTP_PORT = 0
+DNS_PORT = 0
+READY_MARKER = "init 4/4: provisioning app RUNNING and reachable"
 
 PORTAL_TITLE = "HQ Wi-Fi Provisioning Portal"
 DNS_NAME = "provision.local"
@@ -130,6 +133,15 @@ def parse_dns_a(data):
     return socket.inet_ntoa(rdata)
 
 
+def free_port(sock_type):
+    s = socket.socket(socket.AF_INET, sock_type)
+    try:
+        s.bind((HTTP_HOST, 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
 def port_free(port, sock_type):
     """True if `port` can be bound on loopback (i.e. no listener holds it).
 
@@ -221,34 +233,38 @@ def check_dns(proc, log_path):
 
 
 def main():
+    global HTTP_PORT, DNS_PORT
+
     if len(sys.argv) != 2:
         fail("usage: wifi_provisioning_demo_smoke_test.py <demo-binary>")
     demo = os.path.abspath(sys.argv[1])
     if not os.path.isfile(demo):
         fail("demo binary not found: %s" % demo)
 
+    HTTP_PORT = free_port(socket.SOCK_STREAM)
+    DNS_PORT = free_port(socket.SOCK_DGRAM)
+    env = dict(os.environ,
+               WIFI_PROV_DEMO_HTTP_PORT=str(HTTP_PORT),
+               WIFI_PROV_DEMO_DNS_PORT=str(DNS_PORT))
+
     with tempfile.TemporaryDirectory(prefix="wifi_prov_demo_") as workdir:
         log_path = os.path.join(workdir, "demo.log")
         log = open(log_path, "wb", buffering=0)
-        proc = subprocess.Popen([demo], cwd=workdir,
+        proc = subprocess.Popen([demo], cwd=workdir, env=env,
                                 stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=subprocess.STDOUT)
         try:
-            # Wait for the HTTP listener (also proves the DNS listener is up
-            # because the provisioning app only reaches RUNNING after both).
+            # The demo reports readiness only after both of ITS listeners are
+            # up; a foreign listener on the port can never satisfy this.
             deadline = time.time() + STARTUP_TIMEOUT_S
             ready = False
             while time.time() < deadline:
                 if proc.poll() is not None:
                     break
-                try:
-                    conn = socket.create_connection((HTTP_HOST, HTTP_PORT),
-                                                    timeout=1)
-                    conn.close()
+                if READY_MARKER in log_tail(log_path, limit=16000):
                     ready = True
                     break
-                except OSError:
-                    time.sleep(0.25)
+                time.sleep(0.25)
             if not ready:
                 fail("demo listener did not open within %.0f s\n%s" %
                      (STARTUP_TIMEOUT_S, log_tail(log_path)))
@@ -272,7 +288,8 @@ def main():
             demo_log = log_tail(log_path, limit=8000)
             for marker in ("shutting down in reverse ownership order",
                            "shutdown 1/3: provisioning app",
-                           "shutdown complete: HTTP :8080 and DNS :10053 were released"):
+                           "shutdown complete: HTTP :%d and DNS :%d were released"
+                           % (HTTP_PORT, DNS_PORT)):
                 if marker not in demo_log:
                     fail("shutdown log missing %r\n%s" % (marker, demo_log))
             print("PASS: clean shutdown in reverse ownership order")

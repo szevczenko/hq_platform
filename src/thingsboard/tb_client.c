@@ -674,17 +674,23 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
         return -1;
     }
 
-    /* Configure the MQTT connection parameters */
+    /* Keep an already-applied verified transport intact.  Credential
+     * ownership remains with ThingsBoard, while broker/TLS settings remain
+     * with the secure configuration owner. */
     mqtt_config_init();
-    mqtt_config_set_string(ctx->config.server_url, MQTT_CONFIG_VALUE_ADDRESS);
+    if (!mqtt_config_verified_is_current()) {
+        mqtt_config_set_string(ctx->config.server_url,
+                               MQTT_CONFIG_VALUE_ADDRESS);
+        if (ctx->config.client_id[0] != '\0') {
+            mqtt_config_set_string(ctx->config.client_id,
+                                   MQTT_CONFIG_VALUE_CLIENT_ID);
+        } else {
+            mqtt_config_set_string(ctx->config.access_token,
+                                   MQTT_CONFIG_VALUE_CLIENT_ID);
+        }
+    }
     mqtt_config_set_string(ctx->config.access_token, MQTT_CONFIG_VALUE_USERNAME);
     mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD);
-
-    if (ctx->config.client_id[0] != '\0') {
-        mqtt_config_set_string(ctx->config.client_id, MQTT_CONFIG_VALUE_CLIENT_ID);
-    } else {
-        mqtt_config_set_string(ctx->config.access_token, MQTT_CONFIG_VALUE_CLIENT_ID);
-    }
 
     mqtt_connection_policy_t policy = {
         .keepalive_sec = clamp_keepalive_sec(ctx->config.keepalive_sec),
@@ -728,7 +734,9 @@ int tb_client_update_credentials(tb_client_t *client,
                    sizeof(client->config.client_id), "%s", client_id);
     mqtt_config_set_string(access_token, MQTT_CONFIG_VALUE_USERNAME);
     mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD);
-    mqtt_config_set_string(client_id, MQTT_CONFIG_VALUE_CLIENT_ID);
+    if (!mqtt_config_verified_is_current()) {
+        mqtt_config_set_string(client_id, MQTT_CONFIG_VALUE_CLIENT_ID);
+    }
     return 0;
 }
 

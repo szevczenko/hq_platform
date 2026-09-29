@@ -50,6 +50,7 @@ static bool       s_wifi_running = true;
 /* Mock of the Wi-Fi management API --------------------------------------- */
 
 bool wifi_mgmt_is_running(void) { return s_wifi_running; }
+bool wifi_mgmt_is_read_data(void) { return true; }
 bool wifi_mgmt_trying_connect(void) { return false; }
 bool wifi_mgmt_is_connected(void) { return true; }
 

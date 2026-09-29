@@ -537,7 +537,7 @@ static int subscribe_response_topic(tb_client_t *client)
 }
 
 /* Comma-join keys into out; false when the list does not fit. */
-static bool build_key_list(char *out, size_t cap, const char *keys[],
+static bool build_key_list(char *out, size_t cap, const char *const keys[],
 			   size_t count)
 {
 	size_t offset = 0u;
@@ -559,8 +559,8 @@ static bool build_key_list(char *out, size_t cap, const char *keys[],
 }
 
 static int attr_request_common(tb_client_t *client,
-			       const char *client_keys[], size_t client_count,
-			       const char *shared_keys[], size_t shared_count,
+			       const char *const client_keys[], size_t client_count,
+			       const char *const shared_keys[], size_t shared_count,
 			       tb_attribute_response_cb_t cb, void *user_data,
 			       uint32_t timeout_ms)
 {
@@ -676,7 +676,7 @@ static int attr_request_common(tb_client_t *client,
 	return ret;
 }
 
-int tb_attributes_request_client(tb_client_t *client, const char *keys[],
+int tb_attributes_request_client(tb_client_t *client, const char *const keys[],
 				 size_t num_keys, tb_attribute_response_cb_t cb,
 				 void *user_data, uint32_t timeout_ms)
 {
@@ -684,7 +684,7 @@ int tb_attributes_request_client(tb_client_t *client, const char *keys[],
 				   user_data, timeout_ms);
 }
 
-int tb_attributes_request_shared(tb_client_t *client, const char *keys[],
+int tb_attributes_request_shared(tb_client_t *client, const char *const keys[],
 				 size_t num_keys, tb_attribute_response_cb_t cb,
 				 void *user_data, uint32_t timeout_ms)
 {
@@ -693,8 +693,8 @@ int tb_attributes_request_shared(tb_client_t *client, const char *keys[],
 }
 
 int tb_attributes_request(tb_client_t *client,
-			  const char *client_keys[], size_t client_count,
-			  const char *shared_keys[], size_t shared_count,
+			  const char *const client_keys[], size_t client_count,
+			  const char *const shared_keys[], size_t shared_count,
 			  tb_attribute_response_cb_t cb, void *user_data,
 			  uint32_t timeout_ms)
 {

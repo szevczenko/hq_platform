@@ -1,5 +1,6 @@
 if(NOT ESP_PLATFORM)
   include(${CMAKE_CURRENT_SOURCE_DIR}/common_tests.cmake)
+  add_subdirectory(app_services)
 
   # TASK-143: optional focused sanitizer build for the race regression
   # executable.  Accepted values: ""/none (default), "address" (ASan + UBSan),
@@ -522,6 +523,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_SRC_DIR}/platforms/posix/wifi_hal_driver.c
@@ -571,6 +573,7 @@ if(NOT ESP_PLATFORM)
       ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning/wifi_http_provisioning_subscription_test.c
       ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning/wifi_http_provisioning.c
       ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning/wifi_provisioning.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning/wifi_provisioning_controller.c
     )
 
     target_include_directories(wifi_http_provisioning_subscription_tests
@@ -613,6 +616,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -664,6 +668,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -715,6 +720,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -768,6 +774,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -817,6 +824,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -1030,13 +1038,17 @@ if(NOT ESP_PLATFORM)
     ${TB_TEST_DIR}/tb_tests_telemetry.c
     ${TB_TEST_DIR}/tb_tests_attributes_rpc.c
     ${TB_TEST_DIR}/tb_tests_provision_claim_fwu.c
+    ${TB_TEST_DIR}/tb_tests_enrollment.c
+    ${TB_TEST_DIR}/tb_tests_state_sync.c
     ${TB_TEST_DIR}/mqtt_app_mock.c
     # ThingsBoard module sources (linked against mock, not real mqtt_app)
     ${TB_SRC_DIR}/tb_client.c
     ${TB_SRC_DIR}/tb_telemetry.c
     ${TB_SRC_DIR}/tb_attributes.c
     ${TB_SRC_DIR}/tb_rpc.c
+    ${TB_SRC_DIR}/tb_state_sync.c
     ${TB_SRC_DIR}/tb_provision.c
+    ${TB_SRC_DIR}/tb_enrollment.c
     ${TB_SRC_DIR}/tb_claim.c
     ${TB_SRC_DIR}/tb_firmware_update.c
   )

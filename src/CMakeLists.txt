@@ -1,7 +1,11 @@
 add_subdirectory(osal)
+add_subdirectory(hq_storage)
+add_subdirectory(hq_app_services)
+add_subdirectory(hq_input)
 add_subdirectory(hal)
 add_subdirectory(mongoose)
 add_subdirectory(wifi)
+add_subdirectory(hq_net)
 add_subdirectory(thingsboard)
 add_subdirectory(cmd)
 

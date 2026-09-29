@@ -603,6 +603,11 @@ static void test_grace_expiry_racing_disconnect_and_deinit( void )
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_DISABLED,
                          wifi_provisioning_controller_get_state() );
 
+  /* The connected session persisted its credential (TASK-136); erase it so
+   * the re-init below is a fresh, uncredentialed session. */
+  TEST_ASSERT_TRUE( wifi_mgmt_is_read_data() );
+  TEST_ASSERT_TRUE( wifi_mgmt_erase_credentials() );
+
   /* The stale expiry of the cancelled session cannot retire a fresh session:
    * re-init immediately and confirm the portal stays up past the old grace. */
   TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
@@ -851,6 +856,9 @@ static void test_controller_defers_policy_off_wifi_worker( void )
   wifi_provisioning_controller_deinit();
   TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_CONTROLLER_DISABLED,
                          wifi_provisioning_controller_get_state() );
+
+  /* Phase 1 persisted a credential (TASK-136); start the next session fresh. */
+  TEST_ASSERT_TRUE( wifi_mgmt_erase_credentials() );
 
   TEST_ASSERT_TRUE( wifi_provisioning_controller_init() );
   TEST_ASSERT_TRUE_MESSAGE( wifi_provisioning_controller_test_wait_idle( EVENT_WAIT_MS ),

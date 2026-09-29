@@ -76,21 +76,21 @@ int tb_attributes_send_json(tb_client_t *client, const char *json);
  * @param timeout_ms  Request timeout in ms
  * @return 0 on success, negative on error
  */
-int tb_attributes_request_client(tb_client_t *client, const char *keys[],
+int tb_attributes_request_client(tb_client_t *client, const char *const keys[],
                                  size_t num_keys, tb_attribute_response_cb_t cb,
                                  void *user_data, uint32_t timeout_ms);
 
 /**
  * @brief Request shared attribute values from the server
  */
-int tb_attributes_request_shared(tb_client_t *client, const char *keys[],
+int tb_attributes_request_shared(tb_client_t *client, const char *const keys[],
                                  size_t num_keys, tb_attribute_response_cb_t cb,
                                  void *user_data, uint32_t timeout_ms);
 
 /** @brief Request client and shared attributes in one response. */
 int tb_attributes_request(tb_client_t *client,
-                          const char *client_keys[], size_t client_count,
-                          const char *shared_keys[], size_t shared_count,
+                          const char *const client_keys[], size_t client_count,
+                          const char *const shared_keys[], size_t shared_count,
                           tb_attribute_response_cb_t cb, void *user_data,
                           uint32_t timeout_ms);
 
