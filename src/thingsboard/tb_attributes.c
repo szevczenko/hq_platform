@@ -543,6 +543,9 @@ static bool build_key_list(char *out, size_t cap, const char *const keys[],
 	size_t offset = 0u;
 
 	for (size_t i = 0u; i < count; ++i) {
+		if (keys[i] == NULL) {
+			return false;
+		}
 		const size_t klen = strlen(keys[i]);
 		const size_t sep = (i > 0u) ? 1u : 0u;
 		if (offset + sep + klen >= cap) {

@@ -14,6 +14,8 @@
 
 #include "cJSON.h"
 #include "osal_log.h"
+#include "osal_bin_sem.h"
+#include "osal_mutex.h"
 
 #define TB_PROVISION_REQUEST_TOPIC "/provision/request"
 #define TB_PROVISION_RESPONSE_TOPIC "/provision/response"
@@ -23,6 +25,19 @@ static tb_provision_cb_t s_provision_cb = NULL;
 static void *s_provision_user_data = NULL;
 static bool s_provision_subscribed = false;
 static tb_client_t *s_owner_client = NULL;
+static osal_mutex_id_t s_provision_lock = NULL;
+static osal_bin_sem_id_t s_callback_done = NULL;
+static bool s_callback_in_flight = false;
+
+static bool provision_lock_init(void)
+{
+	if (s_provision_lock != NULL) {
+		return true;
+	}
+	return osal_mutex_create(&s_provision_lock, "tb_provision") == OSAL_SUCCESS &&
+		osal_bin_sem_create(&s_callback_done, "tb_provision_done",
+		                    OSAL_SEM_EMPTY) == OSAL_SUCCESS;
+}
 
 static void provision_response_handler(const char *topic, const char *payload,
 				       size_t payload_len)
@@ -30,26 +45,37 @@ static void provision_response_handler(const char *topic, const char *payload,
 	(void)topic;
 	(void)payload_len;
 
+	if (!provision_lock_init() || osal_mutex_take(s_provision_lock) != OSAL_SUCCESS) {
+		return;
+	}
 	if (s_provision_cb != NULL) {
+		tb_provision_cb_t callback = s_provision_cb;
+		void *callback_data = s_provision_user_data;
+		s_callback_in_flight = true;
+		osal_mutex_give(s_provision_lock);
 		char *buf = malloc(payload_len + 1);
 		if (buf != NULL) {
 			memcpy(buf, payload, payload_len);
 			buf[payload_len] = '\0';
-			s_provision_cb(buf, s_provision_user_data);
+			callback(buf, callback_data);
 			free(buf);
 		} else {
-			s_provision_cb(NULL, s_provision_user_data);
+			callback(NULL, callback_data);
 		}
+		osal_mutex_take(s_provision_lock);
 		s_provision_cb = NULL;
 		s_provision_user_data = NULL;
+		s_callback_in_flight = false;
+		osal_bin_sem_give(s_callback_done);
 	}
+	osal_mutex_give(s_provision_lock);
 }
 
 int tb_provision_request(tb_client_t *client, const tb_provision_request_t *req,
 			 tb_provision_cb_t cb, void *user_data,
 			 uint32_t timeout_ms)
 {
-	if (client == NULL || req == NULL || cb == NULL) {
+	if (client == NULL || req == NULL || cb == NULL || !provision_lock_init()) {
 		return -1;
 	}
 	if (req->provision_device_key == NULL ||
@@ -57,10 +83,20 @@ int tb_provision_request(tb_client_t *client, const tb_provision_request_t *req,
 		return -1;
 	}
 
+	if (osal_mutex_take(s_provision_lock) != OSAL_SUCCESS) {
+		return -1;
+	}
 	if (s_owner_client != client) {
 		s_owner_client = client;
 		s_provision_subscribed = false;
 	}
+	if (s_callback_in_flight) {
+		osal_mutex_give(s_provision_lock);
+		return -1;
+	}
+	s_provision_cb = cb;
+	s_provision_user_data = user_data;
+	osal_mutex_give(s_provision_lock);
 
 	/* Subscribe to response topic */
 	if (!s_provision_subscribed) {
@@ -69,17 +105,16 @@ int tb_provision_request(tb_client_t *client, const tb_provision_request_t *req,
 			provision_response_handler,
 			timeout_ms > 0 ? timeout_ms : TB_PROVISION_TIMEOUT_MS);
 		if (ret != 0) {
+			tb_provision_cancel(client);
 			return ret;
 		}
 		s_provision_subscribed = true;
 	}
 
-	s_provision_cb = cb;
-	s_provision_user_data = user_data;
-
 	/* Build provisioning request JSON */
 	cJSON *root = cJSON_CreateObject();
 	if (root == NULL) {
+		tb_provision_cancel(client);
 		return -1;
 	}
 
@@ -114,17 +149,26 @@ int tb_provision_request(tb_client_t *client, const tb_provision_request_t *req,
 	char *json = cJSON_PrintUnformatted(root);
 	cJSON_Delete(root);
 	if (json == NULL) {
+		tb_provision_cancel(client);
 		return -1;
 	}
 
 	int ret = tb_client_publish(client, TB_PROVISION_REQUEST_TOPIC, json);
 	cJSON_free(json);
+	if (ret != 0) {
+		tb_provision_cancel(client);
+	}
 	return ret;
 }
 
 void tb_provision_deinit(tb_client_t *client)
 {
-	if (client == NULL || s_owner_client == NULL || s_owner_client != client) {
+	if (client == NULL || !provision_lock_init() ||
+	    osal_mutex_take(s_provision_lock) != OSAL_SUCCESS) {
+		return;
+	}
+	if (s_owner_client == NULL || s_owner_client != client) {
+		osal_mutex_give(s_provision_lock);
 		return;
 	}
 
@@ -132,11 +176,21 @@ void tb_provision_deinit(tb_client_t *client)
 	s_provision_user_data = NULL;
 	s_provision_subscribed = false;
 	s_owner_client = NULL;
+	bool wait_for_callback = s_callback_in_flight;
+	osal_mutex_give(s_provision_lock);
+	if (wait_for_callback) {
+		(void)osal_bin_sem_take(s_callback_done);
+	}
 }
 
 void tb_provision_cancel(tb_client_t *client)
 {
-	if (client == NULL || s_owner_client != client) {
+	if (client == NULL || !provision_lock_init() ||
+	    osal_mutex_take(s_provision_lock) != OSAL_SUCCESS) {
+		return;
+	}
+	if (s_owner_client != client) {
+		osal_mutex_give(s_provision_lock);
 		return;
 	}
 
@@ -145,4 +199,9 @@ void tb_provision_cancel(tb_client_t *client)
 	 * does not need to re-subscribe. */
 	s_provision_cb = NULL;
 	s_provision_user_data = NULL;
+	bool wait_for_callback = s_callback_in_flight;
+	osal_mutex_give(s_provision_lock);
+	if (wait_for_callback) {
+		(void)osal_bin_sem_take(s_callback_done);
+	}
 }

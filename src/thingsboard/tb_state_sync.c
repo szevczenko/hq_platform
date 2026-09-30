@@ -232,20 +232,24 @@ static bool tb_sync_states_equal(const void *left, const void *right)
 
 static bool tb_sync_apply_locked(const uint8_t *state)
 {
-    if (s_sync.config.apply_state == NULL ||
-        !s_sync.config.apply_state(state, s_sync.output_suspended,
-                                   s_sync.config.user_data)) {
-        return false;
-    }
     memcpy(s_sync.applied_state.bytes, state, s_sync.config.state_size);
     s_sync.has_state = true;
     s_sync.retries = 0u;
     s_sync.state = TB_SYNCED;
-    tb_sync_publish_attributes_locked();
-    if (!s_sync.output_suspended) {
-        tb_sync_publish_telemetry_locked();
-    }
     return true;
+}
+
+static void tb_sync_publish_applied(const uint8_t *state, bool output_suspended,
+                                    tb_state_sync_state_fn_t publish_attributes,
+                                    tb_state_sync_void_fn_t publish_telemetry,
+                                    void *user_data)
+{
+    if (publish_attributes != NULL) {
+        publish_attributes(state, user_data);
+    }
+    if (!output_suspended && publish_telemetry != NULL) {
+        publish_telemetry(user_data);
+    }
 }
 
 static void tb_sync_on_shared_update(const char *json, void *user_data)
@@ -290,10 +294,45 @@ static void tb_sync_on_shared_update(const char *json, void *user_data)
     if (s_sync.state == TB_SYNCING) {
         s_sync.attempt_resolved = true;
     }
-    if (!tb_sync_apply_locked(state.bytes)) {
+    tb_state_sync_apply_fn_t apply_state = s_sync.config.apply_state;
+    void *callback_data = s_sync.config.user_data;
+    const bool output_suspended = s_sync.output_suspended;
+    const uint32_t session = s_sync.session;
+    osal_mutex_give(s_sync.lock);
+    if (!apply_state(state.bytes, output_suspended, callback_data)) {
+        if (osal_mutex_take(s_sync.lock) == OSAL_SUCCESS) {
+            if (s_sync.initialized && s_sync.session == session) {
+                tb_sync_fail_attempt_locked();
+            }
+            osal_mutex_give(s_sync.lock);
+        }
+        return;
+    }
+    if (osal_mutex_take(s_sync.lock) != OSAL_SUCCESS) {
+        return;
+    }
+    bool notify = false;
+    tb_state_sync_state_fn_t publish_attributes = NULL;
+    tb_state_sync_void_fn_t publish_telemetry = NULL;
+    uint8_t applied_state[TB_STATE_SYNC_MAX_STATE_BYTES];
+    if (!s_sync.initialized || s_sync.session != session ||
+        !tb_sync_apply_locked(state.bytes)) {
         tb_sync_fail_attempt_locked();
     }
+    if (s_sync.initialized && s_sync.session == session &&
+        s_sync.state == TB_SYNCED) {
+        memcpy(applied_state, s_sync.applied_state.bytes,
+               s_sync.config.state_size);
+        publish_attributes = s_sync.config.publish_applied_attributes;
+        publish_telemetry = s_sync.config.publish_telemetry;
+        notify = true;
+    }
     osal_mutex_give(s_sync.lock);
+    if (notify) {
+        tb_sync_publish_applied(applied_state, output_suspended,
+                                publish_attributes, publish_telemetry,
+                                callback_data);
+    }
 }
 
 static void tb_sync_on_attribute_response(tb_request_result_t result,
@@ -326,10 +365,43 @@ static void tb_sync_on_attribute_response(tb_request_result_t result,
         return;
     }
     s_sync.attempt_resolved = true;
-    if (!tb_sync_apply_locked(state.bytes)) {
+    tb_state_sync_apply_fn_t apply_state = s_sync.config.apply_state;
+    void *callback_data = s_sync.config.user_data;
+    const bool output_suspended = s_sync.output_suspended;
+    const uint32_t session = s_sync.session;
+    osal_mutex_give(s_sync.lock);
+    if (!apply_state(state.bytes, output_suspended, callback_data)) {
+        if (osal_mutex_take(s_sync.lock) == OSAL_SUCCESS) {
+            if (s_sync.initialized && s_sync.session == session) {
+                tb_sync_fail_attempt_locked();
+            }
+            osal_mutex_give(s_sync.lock);
+        }
+        return;
+    }
+    if (osal_mutex_take(s_sync.lock) != OSAL_SUCCESS) {
+        return;
+    }
+    bool notify = false;
+    tb_state_sync_state_fn_t publish_attributes = NULL;
+    tb_state_sync_void_fn_t publish_telemetry = NULL;
+    uint8_t applied_state[TB_STATE_SYNC_MAX_STATE_BYTES];
+    if (!s_sync.initialized || s_sync.session != session ||
+        !tb_sync_apply_locked(state.bytes)) {
         tb_sync_fail_attempt_locked();
+    } else {
+        memcpy(applied_state, s_sync.applied_state.bytes,
+               s_sync.config.state_size);
+        publish_attributes = s_sync.config.publish_applied_attributes;
+        publish_telemetry = s_sync.config.publish_telemetry;
+        notify = true;
     }
     osal_mutex_give(s_sync.lock);
+    if (notify) {
+        tb_sync_publish_applied(applied_state, output_suspended,
+                                publish_attributes, publish_telemetry,
+                                callback_data);
+    }
 }
 
 int tb_state_sync_respond_rpc_error(tb_client_t *client, uint32_t request_id,

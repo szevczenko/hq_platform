@@ -28,6 +28,9 @@ typedef enum hq_net_startup_mode {
 typedef struct hq_net_config {
     hq_net_backend_t backend;
     hq_net_startup_mode_t startup_mode;
+    /** Required for provisioning mode; the password must be non-empty. */
+    const char *provisioning_ap_name;
+    const char *provisioning_ap_password;
 } hq_net_config_t;
 
 /**

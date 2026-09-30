@@ -41,6 +41,8 @@ int main(void)
 	const hq_net_config_t net_config = {
 		.backend = HQ_NET_BACKEND_WIFI,
 		.startup_mode = HQ_NET_STARTUP_MODE_PROVISIONING,
+		.provisioning_ap_name = "hq-device-setup",
+		.provisioning_ap_password = "change-me-now",
 	};
 	const hq_net_callbacks_t net_callbacks = {
 		.on_connected = on_network_connected,

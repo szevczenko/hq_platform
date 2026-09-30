@@ -559,6 +559,8 @@ static tb_client_connect_failure_reason_t map_connect_failure_reason(
         return TB_CLIENT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED;
     case MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED:
         return TB_CLIENT_CONNECT_FAILURE_REASON_CONNACK_REJECTED;
+    case MQTT_CONNECT_FAILURE_REASON_AUTH_REJECTED:
+        return TB_CLIENT_CONNECT_FAILURE_REASON_AUTH_REJECTED;
     case MQTT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR:
     default:
         return TB_CLIENT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR;
@@ -725,7 +727,11 @@ int tb_client_update_credentials(tb_client_t *client,
                                  const char *client_id)
 {
     if (client == NULL || !client->initialized || access_token == NULL ||
-        client_id == NULL || access_token[0] == '\0' || client_id[0] == '\0') {
+        client_id == NULL || access_token[0] == '\0' || client_id[0] == '\0' ||
+        strnlen(access_token, sizeof(client->config.access_token)) >=
+            sizeof(client->config.access_token) ||
+        strnlen(client_id, sizeof(client->config.client_id)) >=
+            sizeof(client->config.client_id)) {
         return -1;
     }
     (void)snprintf(client->config.access_token,

@@ -3,6 +3,7 @@
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "osal_log.h"
 #include "osal_mutex.h"
@@ -178,7 +179,12 @@ int hq_net_start(const hq_net_config_t *config,
         callbacks->on_disconnected == NULL ||
         config->backend != HQ_NET_BACKEND_WIFI ||
         (config->startup_mode != HQ_NET_STARTUP_MODE_PROVISIONING &&
-         config->startup_mode != HQ_NET_STARTUP_MODE_STATION_ONLY)) {
+                 config->startup_mode != HQ_NET_STARTUP_MODE_STATION_ONLY) ||
+                (config->startup_mode == HQ_NET_STARTUP_MODE_PROVISIONING &&
+                 (config->provisioning_ap_name == NULL ||
+                    config->provisioning_ap_password == NULL ||
+                    config->provisioning_ap_name[0] == '\0' ||
+                    config->provisioning_ap_password[0] == '\0')) {
         return HQ_NET_ERR_INVALID_ARGUMENT;
     }
     if (!net_ensure_lock() || !net_lock()) {
@@ -199,6 +205,12 @@ int hq_net_start(const hq_net_config_t *config,
     net_unlock();
 
     wifi_mgmt_init();
+    if (config->startup_mode == HQ_NET_STARTUP_MODE_PROVISIONING &&
+        !wifi_mgmt_set_ap_credentials(config->provisioning_ap_name,
+                                      config->provisioning_ap_password)) {
+        net_rollback(token);
+        return HQ_NET_ERR_START_FAILED;
+    }
     if (config->startup_mode == HQ_NET_STARTUP_MODE_STATION_ONLY) {
         wifi_mgmt_set_wifi_type(T_WIFI_TYPE_CLIENT);
     } else {

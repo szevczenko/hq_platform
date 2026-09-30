@@ -5,11 +5,12 @@
 
 #include "cJSON.h"
 #include "osal_task.h"
+#include "osal_bin_sem.h"
 #include "tb_provision.h"
 
 typedef struct {
-	volatile bool ready;
 	bool valid;
+	osal_bin_sem_id_t done;
 	tb_enrollment_credentials_t credentials;
 } response_state_t;
 
@@ -59,7 +60,7 @@ static void response_callback(const char *json, void *user_data)
 			      sizeof(state->credentials.credentials_value) - 1U);
 		state->valid = true;
 	}
-	state->ready = true;
+	(void)osal_bin_sem_give(state->done);
 	cJSON_Delete(root);
 }
 
@@ -94,6 +95,12 @@ tb_enrollment_status_t tb_enrollment_enroll(
 		complete(complete_cb, result, NULL, complete_user_data);
 		return result;
 	}
+	if (osal_bin_sem_create(&response.done, "tb_enrollment_done",
+	                        OSAL_SEM_EMPTY) != OSAL_SUCCESS) {
+		complete(complete_cb, TB_ENROLLMENT_ERR_REQUEST, NULL,
+		         complete_user_data);
+		return TB_ENROLLMENT_ERR_REQUEST;
+	}
 	request = (tb_provision_request_t){
 		.device_name = config->device_name,
 		.provision_device_key = config->provision_device_key,
@@ -103,31 +110,33 @@ tb_enrollment_status_t tb_enrollment_enroll(
 			 timeout_ms) != 0) {
 		/* The transport may have registered the callback before publish failed. */
 		tb_provision_cancel(client);
+		osal_bin_sem_delete(response.done);
 		result = TB_ENROLLMENT_ERR_REQUEST;
 		complete(complete_cb, result, NULL, complete_user_data);
 		return result;
 	}
 	start = osal_task_get_time_ms();
-	while (!response.ready &&
-	       (uint32_t)(osal_task_get_time_ms() - start) < timeout_ms) {
-		(void)osal_task_delay_ms(10U);
-	}
-	if (!response.ready || !response.valid) {
+	(void)start;
+	if (osal_bin_sem_timed_wait(response.done, timeout_ms) != OSAL_SUCCESS ||
+	    !response.valid) {
 		/* Clear the transport callback before the stack-owned response state ends. */
 		tb_provision_cancel(client);
 		memset(&response.credentials, 0, sizeof(response.credentials));
 		result = TB_ENROLLMENT_ERR_RESPONSE;
 		complete(complete_cb, result, NULL, complete_user_data);
+		osal_bin_sem_delete(response.done);
 		return result;
 	}
 	if (persist_cb != NULL && !persist_cb(&response.credentials, persist_user_data)) {
 		memset(&response.credentials, 0, sizeof(response.credentials));
 		result = TB_ENROLLMENT_ERR_PERSIST;
 		complete(complete_cb, result, NULL, complete_user_data);
+		osal_bin_sem_delete(response.done);
 		return result;
 	}
 	complete(complete_cb, TB_ENROLLMENT_OK, &response.credentials,
 		 complete_user_data);
 	memset(&response.credentials, 0, sizeof(response.credentials));
+	osal_bin_sem_delete(response.done);
 	return TB_ENROLLMENT_OK;
 }
