@@ -47,7 +47,9 @@
 #include "hq_config.h"
 #include "mongoose.h"
 #include "mongoose_process.h"
+#include "osal_log.h"
 #include "osal_mutex.h"
+#include "osal_task.h"
 #include "wifi_managment.h"
 
 /* Default listen URLs from Kconfig. Overridable at runtime per-listener so
@@ -63,6 +65,12 @@
 #define WIFI_PROVISIONING_URL_MAX_LEN      128u
 /* How long to wait for a listener create/close callback on the poll thread. */
 #define WIFI_PROVISIONING_INVOKE_TIMEOUT_MS 2000u
+/* Upper bound for the async AP+STA radio transition that a successful mode
+ * request triggers on the Wi-Fi worker, plus the poll cadence used to observe
+ * the effective mode through wifi_mgmt_get_mode(). The first check is
+ * immediate, so a mode that is already CLI_SER costs nothing. */
+#define WIFI_PROVISIONING_AP_VERIFY_TIMEOUT_MS 5000u
+#define WIFI_PROVISIONING_AP_VERIFY_POLL_MS     10u
 
 /* Upper bound (bytes) on the provisioning request body. Derived from Kconfig
  * with a safe default so the portal runs even when the option is not wired
@@ -93,8 +101,15 @@ static struct mg_connection  *s_http_nc;      /* Poll thread only. */
 static bool   s_http_bound;                   /* Lifecycle snapshot.         */
 #ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
 static void ( *s_stop_boundary_hook )( void );
+static bool ( *s_mode_request_hook )( void );
+static bool ( *s_radio_verify_hook )( void );
 #endif
 static wifi_http_provisioning_state_t s_state;
+/* Result of the most recent start attempt. Written at the end of every
+ * start_ex() (including the already-running no-op path) and read only through
+ * the getter; both are guarded by s_mutex. */
+static wifi_http_provisioning_start_status_t s_last_start_status =
+  WIFI_HTTP_PROVISIONING_START_OK;
 static char   s_http_url[WIFI_PROVISIONING_URL_MAX_LEN];
 static bool   s_http_configured;
 static char   s_dns_url[WIFI_PROVISIONING_URL_MAX_LEN];
@@ -371,6 +386,20 @@ static void prov_wifi_event_cb( wifi_mgmt_event_t event, void * user_data )
     default:
       break;
   }
+  s_last_failure[sizeof( s_last_failure ) - 1] = '\0';
+  (void) osal_mutex_give( s_mutex );
+}
+
+/* A new credential submission starts a new station attempt. Do not expose
+ * the failure category latched by the previous attempt while this one is
+ * still connecting. */
+static void prov_reset_wifi_failure( void )
+{
+  if ( !s_mutex_ready ) return;
+
+  (void) osal_mutex_take( s_mutex );
+  s_wifi_failed = false;
+  strncpy( s_last_failure, "no_failure", sizeof( s_last_failure ) - 1 );
   s_last_failure[sizeof( s_last_failure ) - 1] = '\0';
   (void) osal_mutex_give( s_mutex );
 }
@@ -663,6 +692,7 @@ static void prov_handle_credentials_request( struct mg_connection * nc,
   /* Push credentials and request an asynchronous connect. */
   ( void ) wifi_mgmt_set_ap_name( ssid, ssid_len );
   ( void ) wifi_mgmt_set_password( password, pass_len );
+  prov_reset_wifi_failure();
   ( void ) wifi_mgmt_connect();
 
   /* Never retain a password in a scratch buffer. */
@@ -703,21 +733,26 @@ static void prov_handle_disconnect_request( struct mg_connection * nc )
   mg_http_reply( nc, 202, s_json_headers, "%s", "{\"state\":\"accepted\"}" );
 }
 
-static bool prov_respond_packed( struct mg_connection * nc, const char * path,
-                                const char * headers )
+static bool prov_respond_packed( struct mg_connection * nc,
+                                 struct mg_http_message * hm,
+                                 const char * path, const char * headers )
 {
-  size_t size = 0u;
-  const char * data = mg_unpack( path, &size, NULL );
+  struct mg_str packed = mg_unpacked( path );
+  struct mg_http_serve_opts opts = {
+    .extra_headers = headers,
+    .fs = &mg_fs_packed,
+  };
 
-  if ( data == NULL ) return false;
-  mg_http_reply( nc, 200, headers, "%.*s", ( int ) size, data );
+  if ( packed.buf == NULL ) return false;
+  mg_http_serve_file( nc, hm, path, &opts );
   return true;
 }
 
 /* Serve the captive portal landing page as a 200 OK HTML document. */
-static void prov_respond_portal( struct mg_connection * nc )
+static void prov_respond_portal( struct mg_connection * nc,
+                                 struct mg_http_message * hm )
 {
-  if ( !prov_respond_packed( nc, "/index.html", s_html_headers ) )
+  if ( !prov_respond_packed( nc, hm, "/index.html", s_html_headers ) )
     mg_http_reply( nc, 200, s_html_headers, "%s", s_portal_html );
 }
 
@@ -872,7 +907,7 @@ static void http_ev_handler( struct mg_connection * nc, int ev, void * ev_data )
    * it believe the network is already connected). */
   if ( prov_is_captive_probe( hm->uri ) )
   {
-    prov_respond_portal( nc );
+    prov_respond_portal( nc, hm );
     nc->is_draining = 1;
     return;
   }
@@ -880,14 +915,14 @@ static void http_ev_handler( struct mg_connection * nc, int ev, void * ev_data )
   /* The portal root serves the landing page directly. */
   if ( mg_strcmp( hm->uri, mg_str( "/" ) ) == 0 )
   {
-    prov_respond_portal( nc );
+    prov_respond_portal( nc, hm );
     nc->is_draining = 1;
     return;
   }
 
   if ( mg_strcmp( hm->uri, mg_str( "/app.css" ) ) == 0 )
   {
-    if ( !prov_respond_packed( nc, "/app.css", s_css_headers ) )
+    if ( !prov_respond_packed( nc, hm, "/app.css", s_css_headers ) )
       mg_http_reply( nc, 404, "Content-Type: text/plain\r\n", "Not Found" );
     nc->is_draining = 1;
     return;
@@ -895,7 +930,7 @@ static void http_ev_handler( struct mg_connection * nc, int ev, void * ev_data )
 
   if ( mg_strcmp( hm->uri, mg_str( "/app.js" ) ) == 0 )
   {
-    if ( !prov_respond_packed( nc, "/app.js", s_js_headers ) )
+    if ( !prov_respond_packed( nc, hm, "/app.js", s_js_headers ) )
       mg_http_reply( nc, 404, "Content-Type: text/plain\r\n", "Not Found" );
     nc->is_draining = 1;
     return;
@@ -959,23 +994,124 @@ static void prov_set_error( void )
   ( void ) osal_mutex_give( s_mutex );
 }
 
-bool wifi_http_provisioning_start( void )
+/* Stable short name for a start result. Used only to make the failure log
+ * signatures self-describing; the numeric code is the authoritative error. */
+static const char * prov_start_status_name( wifi_http_provisioning_start_status_t status )
 {
-  bool started = false;
+  switch ( status )
+  {
+    case WIFI_HTTP_PROVISIONING_START_OK:                   return "ok";
+    case WIFI_HTTP_PROVISIONING_START_ALREADY_RUNNING:      return "already_running";
+    case WIFI_HTTP_PROVISIONING_START_ERR_DEPENDENCY:       return "dependency_missing";
+    case WIFI_HTTP_PROVISIONING_START_ERR_MODE_TRANSITION:  return "mode_transition_refused";
+    case WIFI_HTTP_PROVISIONING_START_ERR_HTTP_BIND:        return "http_bind_refused";
+    case WIFI_HTTP_PROVISIONING_START_ERR_DNS_BIND:         return "dns_bind_refused";
+    case WIFI_HTTP_PROVISIONING_START_ERR_NO_AP:            return "no_ap";
+    default:                                                return "unknown";
+  }
+}
 
-  if ( !prov_ensure_mutex() ) return false;
+/* Record the outcome of the most recent start attempt under the state mutex. */
+static void prov_record_start_status( wifi_http_provisioning_start_status_t status )
+{
+  if ( !s_mutex_ready ) return;
+  ( void ) osal_mutex_take( s_mutex );
+  s_last_start_status = status;
+  ( void ) osal_mutex_give( s_mutex );
+}
+
+/* Fail a start: move to ERROR, record the distinct result, and emit the stable
+ * failure log signature. The message carries only the error code (and its
+ * static tag) - never an SSID, password, token, or URL-with-credential.
+ * Returns @p status so the caller can hand it straight to return. */
+static wifi_http_provisioning_start_status_t prov_fail_start(
+    wifi_http_provisioning_start_status_t status )
+{
+  prov_set_error();
+  prov_record_start_status( status );
+  osal_log_error( "[wifi-prov] start failed (%s, status=%d)",
+                  prov_start_status_name( status ), ( int ) status );
+  return status;
+}
+
+/* Request AP+STA mode. Tests may install a hook to reproduce a refused
+ * transition deterministically; production always asks the Wi-Fi management
+ * layer. */
+static bool prov_request_ap_sta_mode( void )
+{
+#ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+  if ( s_mode_request_hook != NULL ) return s_mode_request_hook();
+#endif
+  return wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER );
+}
+
+/* Verify that the radio actually reached AP+STA mode. The mode request is
+ * asynchronous (it serializes on the Wi-Fi worker), so after a successful
+ * request this polls the effective mode through wifi_mgmt_get_mode() up to a
+ * bounded budget. Tests may replace the poll with a deterministic hook. */
+static bool prov_ap_sta_reached( void )
+{
+  uint32_t elapsed = 0u;
+
+#ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
+  if ( s_radio_verify_hook != NULL ) return s_radio_verify_hook();
+#endif
+
+  if ( wifi_mgmt_get_mode() == T_WIFI_TYPE_CLI_SER ) return true;
+  while ( elapsed < WIFI_PROVISIONING_AP_VERIFY_TIMEOUT_MS )
+  {
+    ( void ) osal_task_delay_ms( WIFI_PROVISIONING_AP_VERIFY_POLL_MS );
+    elapsed += WIFI_PROVISIONING_AP_VERIFY_POLL_MS;
+    if ( wifi_mgmt_get_mode() == T_WIFI_TYPE_CLI_SER ) return true;
+  }
+  return false;
+}
+
+/* Roll back listeners that were opened during a failed start: close the HTTP
+ * listener on the poll thread (when present and Mongoose is still running)
+ * and stop the captive DNS listener, so no half-started portal is left. */
+static void prov_rollback_listeners( void )
+{
+  if ( s_http_bound && MongooseProcess_IsRunning() )
+  {
+    ( void ) MongooseProcess_Invoke( http_listener_stop_cb, NULL,
+                                     WIFI_PROVISIONING_INVOKE_TIMEOUT_MS );
+    s_http_bound = false;
+  }
+  else if ( s_http_bound )
+  {
+    s_http_bound = false;
+  }
+
+  if ( s_dns_started )
+  {
+    ( void ) captive_dns_server_stop();
+    s_dns_started = false;
+  }
+}
+
+wifi_http_provisioning_start_status_t wifi_http_provisioning_start_ex( void )
+{
+  wifi_http_provisioning_start_status_t status = WIFI_HTTP_PROVISIONING_START_OK;
+
+  if ( !prov_ensure_mutex() )
+  {
+    return WIFI_HTTP_PROVISIONING_START_ERR_DEPENDENCY;
+  }
 
   /* Serialize the entire start() with stop(): single-owner lifecycle. */
   ( void ) osal_mutex_take( s_lifecycle_mutex );
 
-  /* Idempotent: already running or starting is a safe no-op. */
+  /* Idempotent: already running or starting is a safe no-op, reported with
+   * its own distinct status. */
   ( void ) osal_mutex_take( s_mutex );
   if ( s_state == WIFI_PROVISIONING_RUNNING ||
        s_state == WIFI_PROVISIONING_STARTING )
   {
     ( void ) osal_mutex_give( s_mutex );
     ( void ) osal_mutex_give( s_lifecycle_mutex );
-    return true;
+    prov_record_start_status( WIFI_HTTP_PROVISIONING_START_ALREADY_RUNNING );
+    return WIFI_HTTP_PROVISIONING_START_ALREADY_RUNNING;
   }
   /* A stop cannot be in flight while we hold s_lifecycle_mutex, so the state
    * is STOPPED or ERROR here; both are valid start points. */
@@ -985,14 +1121,14 @@ bool wifi_http_provisioning_start( void )
   /* Require the shared Mongoose process to be running. */
   if ( !MongooseProcess_IsRunning() )
   {
-    prov_set_error();
+    status = prov_fail_start( WIFI_HTTP_PROVISIONING_START_ERR_DEPENDENCY );
     goto out;
   }
 
   /* Require Wi-Fi management to be initialized/started. */
   if ( !wifi_mgmt_is_running() )
   {
-    prov_set_error();
+    status = prov_fail_start( WIFI_HTTP_PROVISIONING_START_ERR_DEPENDENCY );
     goto out;
   }
 
@@ -1016,23 +1152,24 @@ bool wifi_http_provisioning_start( void )
 
   prov_ensure_default_ap_ip();
 
-  /* Request AP+STA mode before opening listeners. */
-  if ( !wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ) )
+  /* Request AP+STA mode before opening listeners. A refused request is a
+   * distinct failure: the radio never even attempted the transition. */
+  if ( !prov_request_ap_sta_mode() )
   {
-    prov_set_error();
+    status = prov_fail_start( WIFI_HTTP_PROVISIONING_START_ERR_MODE_TRANSITION );
     goto out;
   }
 
   /* Start the captive DNS listener first. */
   if ( !captive_dns_server_set_bind_url( s_dns_url ) )
   {
-    prov_set_error();
+    status = prov_fail_start( WIFI_HTTP_PROVISIONING_START_ERR_DNS_BIND );
     goto out;
   }
   captive_dns_server_set_ip4( s_ap_ip );
   if ( !captive_dns_server_start() )
   {
-    prov_set_error();
+    status = prov_fail_start( WIFI_HTTP_PROVISIONING_START_ERR_DNS_BIND );
     goto out;
   }
   s_dns_started = true;
@@ -1051,11 +1188,22 @@ bool wifi_http_provisioning_start( void )
        * listener that was already started. */
       ( void ) captive_dns_server_stop();
       s_dns_started = false;
-      prov_set_error();
+      status = prov_fail_start( WIFI_HTTP_PROVISIONING_START_ERR_HTTP_BIND );
       goto out;
     }
   }
   s_http_bound = true;
+
+  /* After a successful bind, verify the radio actually reached AP+STA. A
+   * mismatch is a first-class failure ("started without an AP"), not a silent
+   * success: the listeners are rolled back and the caller is told exactly
+   * what is missing. */
+  if ( !prov_ap_sta_reached() )
+  {
+    prov_rollback_listeners();
+    status = prov_fail_start( WIFI_HTTP_PROVISIONING_START_ERR_NO_AP );
+    goto out;
+  }
 
   /* Track Wi-Fi link state while the portal is active so the status route can
    * report the current link state and the last failure category. */
@@ -1066,15 +1214,24 @@ bool wifi_http_provisioning_start( void )
   ( void ) osal_mutex_give( s_mutex );
   prov_subscribe_wifi_events();
 
-  /* Running only after both listeners are bound. */
+  /* Running only after both listeners are bound and the AP is confirmed. */
   ( void ) osal_mutex_take( s_mutex );
   s_state = WIFI_PROVISIONING_RUNNING;
   ( void ) osal_mutex_give( s_mutex );
-  started = true;
+  status = WIFI_HTTP_PROVISIONING_START_OK;
+  prov_record_start_status( status );
 
 out:
   ( void ) osal_mutex_give( s_lifecycle_mutex );
-  return started;
+  return status;
+}
+
+bool wifi_http_provisioning_start( void )
+{
+  wifi_http_provisioning_start_status_t status = wifi_http_provisioning_start_ex();
+
+  return status == WIFI_HTTP_PROVISIONING_START_OK ||
+         status == WIFI_HTTP_PROVISIONING_START_ALREADY_RUNNING;
 }
 
 bool wifi_http_provisioning_stop( void )
@@ -1152,10 +1309,55 @@ wifi_http_provisioning_state_t wifi_http_provisioning_get_state( void )
   return st;
 }
 
+wifi_http_provisioning_start_status_t wifi_http_provisioning_get_last_start_status( void )
+{
+  wifi_http_provisioning_start_status_t status = WIFI_HTTP_PROVISIONING_START_OK;
+
+  if ( prov_ensure_mutex() )
+  {
+    ( void ) osal_mutex_take( s_mutex );
+    status = s_last_start_status;
+    ( void ) osal_mutex_give( s_mutex );
+  }
+  return status;
+}
+
+bool wifi_http_provisioning_is_reachable( void )
+{
+  bool reachable = false;
+
+  /* The radio side is checked first: when Wi-Fi management is down (or the
+   * mode did not take), the portal cannot be reachable regardless of the
+   * listener snapshots. */
+  if ( wifi_mgmt_get_mode() != T_WIFI_TYPE_CLI_SER ) return false;
+
+  if ( prov_ensure_mutex() )
+  {
+    ( void ) osal_mutex_take( s_mutex );
+    if ( s_state == WIFI_PROVISIONING_RUNNING &&
+         s_http_bound && s_dns_started )
+    {
+      reachable = true;
+    }
+    ( void ) osal_mutex_give( s_mutex );
+  }
+  return reachable;
+}
+
 #ifdef WIFI_PROVISIONING_TEST_OBSERVABILITY
 void wifi_http_provisioning_test_set_stop_boundary_hook( void ( *hook )( void ) )
 {
   s_stop_boundary_hook = hook;
+}
+
+void wifi_http_provisioning_test_set_mode_request_hook( bool ( *hook )( void ) )
+{
+  s_mode_request_hook = hook;
+}
+
+void wifi_http_provisioning_test_set_radio_verify_hook( bool ( *hook )( void ) )
+{
+  s_radio_verify_hook = hook;
 }
 #endif
 

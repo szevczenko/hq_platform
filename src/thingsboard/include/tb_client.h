@@ -31,7 +31,8 @@ typedef enum {
 typedef enum {
 	TB_CLIENT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED = 0,
 	TB_CLIENT_CONNECT_FAILURE_REASON_CONNACK_REJECTED,
-	TB_CLIENT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR
+    TB_CLIENT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR,
+    TB_CLIENT_CONNECT_FAILURE_REASON_AUTH_REJECTED
 } tb_client_connect_failure_reason_t;
 
 typedef enum {
@@ -87,6 +88,10 @@ typedef struct {
  * @return 0 on success, negative on error
  */
 int tb_client_init(tb_client_t **client, const tb_client_config_t *config);
+
+int tb_client_update_credentials(tb_client_t *client,
+                                 const char *access_token,
+                                 const char *client_id);
 
 /**
  * @brief Deinitialize and free the ThingsBoard client

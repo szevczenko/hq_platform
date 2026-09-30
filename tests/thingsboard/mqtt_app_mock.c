@@ -32,6 +32,8 @@ int mock_subscription_replay_count = 0;
 static mqtt_connect_callback_t s_connect_cb = NULL;
 static mqtt_disconnect_callback_t s_disconnect_cb = NULL;
 static mqtt_connect_failure_callback_t s_connect_failure_cb = NULL;
+static bool s_config_initialized;
+static bool s_verified_config_current;
 
 #define MOCK_MAX_SUBS 16
 #define MOCK_MAX_EVENTS 32
@@ -137,6 +139,8 @@ void mqtt_app_mock_reset(void)
     s_replay_subscriptions_on_connect = false;
     s_mock_time_ms = 0;
     s_has_connected_once = false;
+    s_config_initialized = false;
+    s_verified_config_current = false;
     memset(mock_publishes, 0, sizeof(mock_publishes));
     memset(mock_subscribes, 0, sizeof(mock_subscribes));
     memset(s_subscriptions, 0, sizeof(s_subscriptions));
@@ -292,6 +296,12 @@ void mqtt_app_set_connect_failure_callback(mqtt_connect_failure_callback_t cb)
     s_connect_failure_cb = cb;
 }
 
+void mqtt_app_set_config_validation_callback(
+    mqtt_config_validation_callback_t cb)
+{
+    (void)cb;
+}
+
 void mqtt_app_set_connection_policy(const mqtt_connection_policy_t *policy)
 {
     if (policy != NULL) {
@@ -416,7 +426,6 @@ typedef struct {
 static mock_cert_cfg_t s_cfg_cert = {0};
 static mock_cert_cfg_t s_cfg_client_cert = {0};
 static mock_cert_cfg_t s_cfg_client_key = {0};
-
 static mock_cert_cfg_t *get_cert_cfg(mqtt_config_value_t key)
 {
     switch (key) {
@@ -433,6 +442,10 @@ static mock_cert_cfg_t *get_cert_cfg(mqtt_config_value_t key)
 
 void mqtt_config_init(void)
 {
+    if (s_config_initialized) {
+        return;
+    }
+    s_config_initialized = true;
     memset(s_cfg_address, 0, sizeof(s_cfg_address));
     memset(s_cfg_username, 0, sizeof(s_cfg_username));
     memset(s_cfg_password, 0, sizeof(s_cfg_password));
@@ -567,4 +580,19 @@ bool mqtt_config_save(void)
 void mqtt_config_set_callback(mqtt_apply_config_cb cb)
 {
     (void)cb;
+}
+
+bool mqtt_config_verified_is_current(void)
+{
+    return s_verified_config_current;
+}
+
+void mqtt_config_invalidate_verified(void)
+{
+    s_verified_config_current = false;
+}
+
+void mqtt_app_mock_set_verified_config(bool current)
+{
+    s_verified_config_current = current;
 }

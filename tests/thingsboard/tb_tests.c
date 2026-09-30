@@ -22,7 +22,9 @@ int main(void)
 	run_attributes_tests();
 	run_rpc_tests();
 	run_provision_claim_tests();
+	run_enrollment_tests();
 	run_fwu_tests();
+	run_state_sync_tests();
 
 #ifndef ESP_PLATFORM
 	return UNITY_END();

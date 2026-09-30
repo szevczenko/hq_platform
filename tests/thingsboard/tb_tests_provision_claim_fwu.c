@@ -633,6 +633,317 @@ static void test_firmware_update_oversized_chunk_stream(void)
 	destroy_test_client(client);
 }
 
+static bool s_fw_reboot_required_called = false;
+static char s_fw_reboot_version[128] = { 0 };
+
+static void fw_reboot_required_cb(const char *new_title,
+				  const char *new_version, void *user_data)
+{
+	(void)new_title;
+	(void)user_data;
+	s_fw_reboot_required_called = true;
+	if (new_version != NULL) {
+		strncpy(s_fw_reboot_version, new_version,
+			sizeof(s_fw_reboot_version) - 1);
+	}
+}
+
+/* Init + metadata delivery for an 8-byte "ABCDEFGH" image; returns req id. */
+static uint32_t fw_start_test_download(tb_client_t *client,
+				       const tb_firmware_update_config_t *cfg)
+{
+	static uint32_t attr_resp_id = 100;
+	char attr_topic[64];
+	const char *fw_meta = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
+			      "\"fw_version\":\"1.1.0\","
+			      "\"fw_checksum\":\"" FW_SHA256_ABCDEFGH "\","
+			      "\"fw_checksum_algorithm\":\"SHA256\","
+			      "\"fw_size\":8}}";
+
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_init(client, cfg));
+	mock_publish_count = 0;
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_request_check(client));
+	int attr_idx = find_last_publish_with_prefix(
+		"v1/devices/me/attributes/request/");
+	TEST_ASSERT_TRUE(attr_idx >= 0);
+	attr_resp_id = parse_topic_suffix_id(mock_publishes[attr_idx].topic);
+	snprintf(attr_topic, sizeof(attr_topic),
+		 "v1/devices/me/attributes/response/%u", attr_resp_id);
+	mqtt_app_mock_deliver_message(attr_topic, fw_meta, strlen(fw_meta));
+	TEST_ASSERT_TRUE(tb_firmware_update_is_in_progress());
+	return parse_fw_request_id(
+		find_last_publish_with_prefix("v2/fw/request/"));
+}
+
+static void fw_deliver_chunk(uint32_t req_id, uint32_t chunk,
+			     const char *data)
+{
+	char chunk_topic[128];
+
+	snprintf(chunk_topic, sizeof(chunk_topic),
+		 "v2/fw/response/%u/chunk/%u", req_id, chunk);
+	mqtt_app_mock_deliver_message(chunk_topic, data, strlen(data));
+}
+
+static void test_firmware_update_chunk_timeout_rerequest_then_success(void)
+{
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT_NOT_NULL(client);
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+		.chunk_timeout_ms = 1000,
+		.max_chunk_retries = 2,
+	};
+	uint32_t req_id = fw_start_test_download(client, &cfg);
+	TEST_ASSERT_TRUE(req_id > 0);
+
+	tb_firmware_update_poll(client, 0);
+	int before = mock_publish_count;
+	tb_firmware_update_poll(client, 999);
+	TEST_ASSERT_EQUAL(before, mock_publish_count);
+	tb_firmware_update_poll(client, 1000);
+	int idx = find_last_publish_with_prefix("v2/fw/request/");
+	TEST_ASSERT_TRUE(idx >= before);
+	TEST_ASSERT_NOT_NULL(strstr(mock_publishes[idx].topic, "/chunk/0"));
+
+	fw_deliver_chunk(req_id, 0, "ABCD");
+	/* Progress re-arms the window and refills the retry budget. */
+	tb_firmware_update_poll(client, 1500);
+	tb_firmware_update_poll(client, 2400);
+	TEST_ASSERT_TRUE(tb_firmware_update_is_in_progress());
+	fw_deliver_chunk(req_id, 1, "EFGH");
+	TEST_ASSERT_FALSE(tb_firmware_update_is_in_progress());
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("UPDATED", ""));
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
+static void test_firmware_update_chunk_timeout_exhaustion_fails(void)
+{
+	tb_firmware_update_status_t status;
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT_NOT_NULL(client);
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+		.chunk_timeout_ms = 1000,
+		.max_chunk_retries = 2,
+	};
+	TEST_ASSERT_TRUE(fw_start_test_download(client, &cfg) > 0);
+
+	tb_firmware_update_poll(client, 0);
+	tb_firmware_update_poll(client, 1000);
+	tb_firmware_update_poll(client, 2000);
+	TEST_ASSERT_TRUE(tb_firmware_update_is_in_progress());
+	tb_firmware_update_poll(client, 3000);
+	TEST_ASSERT_FALSE(tb_firmware_update_is_in_progress());
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("FAILED",
+						   "firmware chunk timeout"));
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_get_status(&status));
+	TEST_ASSERT_EQUAL(TB_FIRMWARE_UPDATE_STATE_FAILED, status.state);
+	TEST_ASSERT_EQUAL_STRING("firmware chunk timeout", status.last_error);
+	TEST_ASSERT_EQUAL_STRING("1.1.0", status.target_version);
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
+static void test_firmware_update_deferred_restart_then_restore(void)
+{
+	tb_firmware_update_status_t status;
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT_NOT_NULL(client);
+	s_fw_applied_called = false;
+	s_fw_reboot_required_called = false;
+	memset(s_fw_reboot_version, 0, sizeof(s_fw_reboot_version));
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+		.on_applied = fw_applied_cb,
+		.on_reboot_required = fw_reboot_required_cb,
+	};
+	uint32_t req_id = fw_start_test_download(client, &cfg);
+	fw_deliver_chunk(req_id, 0, "ABCD");
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_get_status(&status));
+	TEST_ASSERT_EQUAL(TB_FIRMWARE_UPDATE_STATE_DOWNLOADING, status.state);
+	TEST_ASSERT_EQUAL(4, status.downloaded_size);
+	TEST_ASSERT_EQUAL(8, status.total_size);
+	fw_deliver_chunk(req_id, 1, "EFGH");
+
+	TEST_ASSERT_TRUE(s_fw_reboot_required_called);
+	TEST_ASSERT_EQUAL_STRING("1.1.0", s_fw_reboot_version);
+	TEST_ASSERT_FALSE(s_fw_applied_called);
+	TEST_ASSERT_FALSE(tb_firmware_update_is_in_progress());
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("UPDATING", ""));
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_get_status(&status));
+	TEST_ASSERT_EQUAL(TB_FIRMWARE_UPDATE_STATE_UPDATING, status.state);
+
+	/* No new metadata request while the restart is pending. */
+	mock_publish_count = 0;
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_request_check(client));
+	TEST_ASSERT_EQUAL(0, mock_publish_count);
+	tb_firmware_update_deinit(client);
+
+	/* "Next boot" runs the new version: the persisted UPDATING resolves. */
+	cfg.current_version = "1.1.0";
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_init(client, &cfg));
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("UPDATED", ""));
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_get_status(&status));
+	TEST_ASSERT_EQUAL(TB_FIRMWARE_UPDATE_STATE_UPDATED, status.state);
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
+static void test_firmware_update_reinit_aborts_open_session(void)
+{
+	tb_firmware_update_status_t status;
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT_NOT_NULL(client);
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+	};
+	TEST_ASSERT_TRUE(fw_start_test_download(client, &cfg) > 0);
+
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_init(client, &cfg));
+	TEST_ASSERT_FALSE(tb_firmware_update_is_in_progress());
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches(
+		"FAILED", "firmware download interrupted by reconnect"));
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_get_status(&status));
+	TEST_ASSERT_EQUAL(TB_FIRMWARE_UPDATE_STATE_FAILED, status.state);
+
+	/* The aborted OSAL session no longer blocks a fresh download. */
+	uint32_t req_id = fw_start_test_download(client, &cfg);
+	fw_deliver_chunk(req_id, 0, "ABCD");
+	fw_deliver_chunk(req_id, 1, "EFGH");
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("UPDATED", ""));
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
+static void test_firmware_update_state_names(void)
+{
+	TEST_ASSERT_EQUAL_STRING("IDLE", tb_firmware_update_state_name(
+		TB_FIRMWARE_UPDATE_STATE_IDLE));
+	TEST_ASSERT_EQUAL_STRING("DOWNLOADING", tb_firmware_update_state_name(
+		TB_FIRMWARE_UPDATE_STATE_DOWNLOADING));
+	TEST_ASSERT_EQUAL_STRING("UPDATING", tb_firmware_update_state_name(
+		TB_FIRMWARE_UPDATE_STATE_UPDATING));
+	TEST_ASSERT_EQUAL_STRING("FAILED", tb_firmware_update_state_name(
+		TB_FIRMWARE_UPDATE_STATE_FAILED));
+	TEST_ASSERT_EQUAL(-1, tb_firmware_update_get_status(NULL));
+}
+
+static void test_firmware_update_partial_last_chunk_keeps_chunk_size(void)
+{
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT_NOT_NULL(client);
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+	};
+	const char *fw_meta = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
+			      "\"fw_version\":\"1.2.0\","
+			      "\"fw_checksum\":\"261305762671a58cae5b74990bcfc236c2336fb04a0fbac626166d9491d2884c\","
+			      "\"fw_checksum_algorithm\":\"SHA256\","
+			      "\"fw_size\":10}}";
+
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_init(client, &cfg));
+	mock_publish_count = 0;
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_request_check(client));
+	int attr_idx = find_last_publish_with_prefix(
+		"v1/devices/me/attributes/request/");
+	TEST_ASSERT_TRUE(attr_idx >= 0);
+	char attr_topic[64];
+	snprintf(attr_topic, sizeof(attr_topic),
+		 "v1/devices/me/attributes/response/%u",
+		 parse_topic_suffix_id(mock_publishes[attr_idx].topic));
+	mqtt_app_mock_deliver_message(attr_topic, fw_meta, strlen(fw_meta));
+	uint32_t req_id = parse_fw_request_id(
+		find_last_publish_with_prefix("v2/fw/request/"));
+	TEST_ASSERT_TRUE(req_id > 0);
+
+	fw_deliver_chunk(req_id, 0, "ABCD");
+	fw_deliver_chunk(req_id, 1, "EFGH");
+	int idx = find_last_publish_with_prefix("v2/fw/request/");
+	TEST_ASSERT_NOT_NULL(strstr(mock_publishes[idx].topic, "/chunk/2"));
+	/* ThingsBoard offsets by size * chunk: 2 here would read bytes 4..5. */
+	TEST_ASSERT_EQUAL_STRING("4", mock_publishes[idx].message);
+
+	fw_deliver_chunk(req_id, 2, "IJ");
+	TEST_ASSERT_FALSE(tb_firmware_update_is_in_progress());
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("UPDATED", ""));
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
+static void fw_deliver_check_response(tb_client_t *client, const char *json)
+{
+	char attr_topic[64];
+
+	mock_publish_count = 0;
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_request_check(client));
+	int attr_idx = find_last_publish_with_prefix(
+		"v1/devices/me/attributes/request/");
+	TEST_ASSERT_TRUE(attr_idx >= 0);
+	snprintf(attr_topic, sizeof(attr_topic),
+		 "v1/devices/me/attributes/response/%u",
+		 parse_topic_suffix_id(mock_publishes[attr_idx].topic));
+	mock_publish_count = 0;
+	mqtt_app_mock_deliver_message(attr_topic, json, strlen(json));
+}
+
+static void test_firmware_update_check_resolves_stale_states(void)
+{
+	tb_firmware_update_status_t status;
+	tb_client_t *client = create_test_client();
+	TEST_ASSERT_NOT_NULL(client);
+	tb_firmware_update_config_t cfg = {
+		.current_title = "hq_platform.bin",
+		.current_version = "1.0.0",
+		.chunk_size = 4,
+	};
+	uint32_t req_id = fw_start_test_download(client, &cfg);
+	fw_deliver_chunk(req_id, 0, "ABCD");
+	fw_deliver_chunk(req_id, 1, "XXXX");
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("FAILED",
+						   "firmware checksum mismatch"));
+
+	/* The failure survives a restart until the next check. */
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_init(client, &cfg));
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("FAILED",
+						   "firmware checksum mismatch"));
+
+	fw_deliver_check_response(client, "{}");
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("IDLE", ""));
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_get_status(&status));
+	TEST_ASSERT_EQUAL(TB_FIRMWARE_UPDATE_STATE_IDLE, status.state);
+	fw_deliver_check_response(client, "{}");
+	TEST_ASSERT_EQUAL(0, mock_publish_count);
+
+	/* Assigning the running version reports UPDATED once. */
+	const char *same = "{\"shared\":{\"fw_title\":\"hq_platform.bin\","
+			   "\"fw_version\":\"1.0.0\","
+			   "\"fw_checksum\":\"" FW_SHA256_ABCDEFGH "\","
+			   "\"fw_checksum_algorithm\":\"SHA256\","
+			   "\"fw_size\":8}}";
+	fw_deliver_check_response(client, same);
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("UPDATED", ""));
+	fw_deliver_check_response(client, same);
+	TEST_ASSERT_EQUAL(0, mock_publish_count);
+
+	/* A restart restores UPDATED, not the old failure. */
+	TEST_ASSERT_EQUAL(0, tb_firmware_update_init(client, &cfg));
+	TEST_ASSERT_TRUE(last_fw_telemetry_matches("UPDATED", ""));
+	tb_firmware_update_deinit(client);
+	destroy_test_client(client);
+}
+
 void run_provision_claim_tests(void)
 {
 	RUN_TEST(test_provisioning);
@@ -655,4 +966,11 @@ void run_fwu_tests(void)
 	RUN_TEST(test_firmware_update_checksum_mismatch);
 	RUN_TEST(test_firmware_update_invalid_checksum_metadata);
 	RUN_TEST(test_firmware_update_oversized_chunk_stream);
+	RUN_TEST(test_firmware_update_chunk_timeout_rerequest_then_success);
+	RUN_TEST(test_firmware_update_chunk_timeout_exhaustion_fails);
+	RUN_TEST(test_firmware_update_deferred_restart_then_restore);
+	RUN_TEST(test_firmware_update_reinit_aborts_open_session);
+	RUN_TEST(test_firmware_update_state_names);
+	RUN_TEST(test_firmware_update_partial_last_chunk_keeps_chunk_size);
+	RUN_TEST(test_firmware_update_check_resolves_stale_states);
 }

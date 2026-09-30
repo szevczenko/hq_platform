@@ -8,6 +8,7 @@
 #include "tb_client.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -558,6 +559,8 @@ static tb_client_connect_failure_reason_t map_connect_failure_reason(
         return TB_CLIENT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED;
     case MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED:
         return TB_CLIENT_CONNECT_FAILURE_REASON_CONNACK_REJECTED;
+    case MQTT_CONNECT_FAILURE_REASON_AUTH_REJECTED:
+        return TB_CLIENT_CONNECT_FAILURE_REASON_AUTH_REJECTED;
     case MQTT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR:
     default:
         return TB_CLIENT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR;
@@ -673,17 +676,23 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
         return -1;
     }
 
-    /* Configure the MQTT connection parameters */
+    /* Keep an already-applied verified transport intact.  Credential
+     * ownership remains with ThingsBoard, while broker/TLS settings remain
+     * with the secure configuration owner. */
     mqtt_config_init();
-    mqtt_config_set_string(ctx->config.server_url, MQTT_CONFIG_VALUE_ADDRESS);
+    if (!mqtt_config_verified_is_current()) {
+        mqtt_config_set_string(ctx->config.server_url,
+                               MQTT_CONFIG_VALUE_ADDRESS);
+        if (ctx->config.client_id[0] != '\0') {
+            mqtt_config_set_string(ctx->config.client_id,
+                                   MQTT_CONFIG_VALUE_CLIENT_ID);
+        } else {
+            mqtt_config_set_string(ctx->config.access_token,
+                                   MQTT_CONFIG_VALUE_CLIENT_ID);
+        }
+    }
     mqtt_config_set_string(ctx->config.access_token, MQTT_CONFIG_VALUE_USERNAME);
     mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD);
-
-    if (ctx->config.client_id[0] != '\0') {
-        mqtt_config_set_string(ctx->config.client_id, MQTT_CONFIG_VALUE_CLIENT_ID);
-    } else {
-        mqtt_config_set_string(ctx->config.access_token, MQTT_CONFIG_VALUE_CLIENT_ID);
-    }
 
     mqtt_connection_policy_t policy = {
         .keepalive_sec = clamp_keepalive_sec(ctx->config.keepalive_sec),
@@ -710,6 +719,30 @@ int tb_client_init(tb_client_t **client, const tb_client_config_t *config)
     *client = ctx;
 
     osal_log_info("[tb] ThingsBoard client initialized");
+    return 0;
+}
+
+int tb_client_update_credentials(tb_client_t *client,
+                                 const char *access_token,
+                                 const char *client_id)
+{
+    if (client == NULL || !client->initialized || access_token == NULL ||
+        client_id == NULL || access_token[0] == '\0' || client_id[0] == '\0' ||
+        strnlen(access_token, sizeof(client->config.access_token)) >=
+            sizeof(client->config.access_token) ||
+        strnlen(client_id, sizeof(client->config.client_id)) >=
+            sizeof(client->config.client_id)) {
+        return -1;
+    }
+    (void)snprintf(client->config.access_token,
+                   sizeof(client->config.access_token), "%s", access_token);
+    (void)snprintf(client->config.client_id,
+                   sizeof(client->config.client_id), "%s", client_id);
+    mqtt_config_set_string(access_token, MQTT_CONFIG_VALUE_USERNAME);
+    mqtt_config_set_string("", MQTT_CONFIG_VALUE_PASSWORD);
+    if (!mqtt_config_verified_is_current()) {
+        mqtt_config_set_string(client_id, MQTT_CONFIG_VALUE_CLIENT_ID);
+    }
     return 0;
 }
 

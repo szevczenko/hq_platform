@@ -1,5 +1,6 @@
 if(NOT ESP_PLATFORM)
   include(${CMAKE_CURRENT_SOURCE_DIR}/common_tests.cmake)
+  add_subdirectory(app_services)
 
   # TASK-143: optional focused sanitizer build for the race regression
   # executable.  Accepted values: ""/none (default), "address" (ASan + UBSan),
@@ -224,9 +225,18 @@ if(NOT ESP_PLATFORM)
   # WIFI_MGMT_TEST_OBSERVABILITY enables the test-only lifecycle snapshot API
   # (TASK-135C) inside wifi_managment.c/h.  It is defined only for this test
   # target; production builds and the other Wi-Fi test targets never define it.
+  #
+  # TASK-014: the platform ships no AP name/password default in a public
+  # header anymore; wifi_managment.c still honors WIFI_AP_NAME /
+  # WIFI_AP_PASSWORD as build-time overrides so examples can keep a historical
+  # compile-time identity.  Supplying the historical values here lets the host
+  # tests pin the "default behavior unchanged when never called" case against
+  # the exact identity products currently expect.
   target_compile_definitions(wifi_tests PRIVATE
     OSAL_TESTS_AGGREGATE
     WIFI_MGMT_TEST_OBSERVABILITY
+    WIFI_AP_NAME="Bimbrownik"
+    WIFI_AP_PASSWORD="SuperTrudne1!-_"
   )
 
   target_link_libraries(wifi_tests
@@ -502,15 +512,28 @@ if(NOT ESP_PLATFORM)
     # failures are injected with real socket conflicts.  Registered as a
     # separate target so a lifecycle regression is isolated from the route
     # tests.
+    # The source set mirrors the hq_wifi_provisioning/hq_wifi library wiring
+    # (provisioning module + Wi-Fi management + the POSIX simulator HAL) but is
+    # compiled directly into this binary so WIFI_PROVISIONING_TEST_OBSERVABILITY
+    # enables the deterministic start-status test hooks (refused mode request,
+    # started-without-AP) in the module under test.
     add_executable(wifi_http_provisioning_lifecycle_tests
       ${WIFI_PROVISIONING_TEST_DIR}/wifi_http_provisioning_lifecycle_test.c
       ${WIFI_PROVISIONING_TEST_DIR}/wifi_provisioning_test_fixture.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
+      ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
+      ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
+      ${WIFI_SRC_DIR}/wifi_config.c
+      ${WIFI_SRC_DIR}/wifi_utils.c
+      ${WIFI_SRC_DIR}/platforms/posix/wifi_hal_driver.c
     )
 
     target_include_directories(wifi_http_provisioning_lifecycle_tests
       PRIVATE ${WIFI_PROVISIONING_TEST_DIR}
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi
+      PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi/platforms/posix
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/mongoose
       PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/osal/include
       PRIVATE ${HQ_CONFIG_DIR}
@@ -522,8 +545,14 @@ if(NOT ESP_PLATFORM)
       )
     endif()
 
+    target_compile_definitions(wifi_http_provisioning_lifecycle_tests PRIVATE
+      WIFI_PROVISIONING_TEST_OBSERVABILITY=1
+    )
+
     target_link_libraries(wifi_http_provisioning_lifecycle_tests
-      hq_wifi_provisioning
+      hq_mongoose
+      hq_osal
+      hq_cjson
       unity
       pthread
     )
@@ -544,6 +573,7 @@ if(NOT ESP_PLATFORM)
       ${CMAKE_CURRENT_SOURCE_DIR}/wifi_provisioning/wifi_http_provisioning_subscription_test.c
       ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning/wifi_http_provisioning.c
       ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning/wifi_provisioning.c
+      ${CMAKE_CURRENT_SOURCE_DIR}/../src/wifi_provisioning/wifi_provisioning_controller.c
     )
 
     target_include_directories(wifi_http_provisioning_subscription_tests
@@ -586,6 +616,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -637,6 +668,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -688,6 +720,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -741,6 +774,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -790,6 +824,7 @@ if(NOT ESP_PLATFORM)
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_http_provisioning.c
       ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning.c
       ${WIFI_SRC_DIR}/wifi_managment.c
+        ${WIFI_PROVISIONING_SRC_DIR}/wifi_provisioning_controller.c
       ${WIFI_SRC_DIR}/wifi_config.c
       ${WIFI_SRC_DIR}/wifi_utils.c
       ${WIFI_TEST_DIR}/wifi_hal_mock.c
@@ -1003,13 +1038,17 @@ if(NOT ESP_PLATFORM)
     ${TB_TEST_DIR}/tb_tests_telemetry.c
     ${TB_TEST_DIR}/tb_tests_attributes_rpc.c
     ${TB_TEST_DIR}/tb_tests_provision_claim_fwu.c
+    ${TB_TEST_DIR}/tb_tests_enrollment.c
+    ${TB_TEST_DIR}/tb_tests_state_sync.c
     ${TB_TEST_DIR}/mqtt_app_mock.c
     # ThingsBoard module sources (linked against mock, not real mqtt_app)
     ${TB_SRC_DIR}/tb_client.c
     ${TB_SRC_DIR}/tb_telemetry.c
     ${TB_SRC_DIR}/tb_attributes.c
     ${TB_SRC_DIR}/tb_rpc.c
+    ${TB_SRC_DIR}/tb_state_sync.c
     ${TB_SRC_DIR}/tb_provision.c
+    ${TB_SRC_DIR}/tb_enrollment.c
     ${TB_SRC_DIR}/tb_claim.c
     ${TB_SRC_DIR}/tb_firmware_update.c
   )

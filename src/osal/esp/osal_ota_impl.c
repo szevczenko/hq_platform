@@ -414,6 +414,11 @@ osal_status_t osal_ota_confirm_running_image(void)
 
 osal_status_t osal_ota_finish(bool apply_update)
 {
+    return osal_ota_finish_ex(apply_update, apply_update);
+}
+
+osal_status_t osal_ota_finish_ex(bool apply_update, bool restart)
+{
     if (!s_ota_ctx.active) {
         return OSAL_ERR_INCORRECT_OBJ_STATE;
     }
@@ -448,7 +453,7 @@ osal_status_t osal_ota_finish(bool apply_update)
                   apply_update ? 1 : 0, s_ota_ctx.written_size);
     osal_ota_reset_ctx();
 
-    if (apply_update) {
+    if (apply_update && restart) {
         osal_log_info("[osal_ota] Rebooting into updated partition");
         esp_restart();
     }

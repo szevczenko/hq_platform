@@ -20,7 +20,9 @@
  *
  * Storage (the littlefs "storage" partition, see partitions.csv) is mounted
  * before Wi-Fi management so saved credentials can be loaded at startup and
- * written back after a successful connection (wifi_ap.json).
+ * written back after a successful connection (wifi_ap.json). This standalone
+ * provisioning demo explicitly formats the partition when it cannot be
+ * mounted, which gives a freshly flashed device a usable filesystem.
  *
  * Credential persistence: submitted credentials are stored in wifi_ap.json on
  * the littlefs storage partition. To erase-and-reprovision a device, erase
@@ -41,6 +43,19 @@
 /* Storage partition (partitions.csv) that backs credential persistence. */
 #define DEMO_STORAGE_DEVICE "storage"
 #define DEMO_STORAGE_MOUNT  "/littlefs"
+
+/* Provisioning soft-AP identity — EXAMPLE-SPECIFIC (TASK-014).
+ *
+ * The platform treats the provisioning AP identity as a RUNTIME configuration:
+ * a product MUST set its own identity (name + password) with
+ * wifi_mgmt_set_ap_credentials() before wifi_mgmt_start(), and the platform
+ * ships no default AP password in any public header.  This example sets an
+ * explicit example identity below; a real product would derive the name from
+ * its model/serial number (e.g. "KitchenLamp-a1b2c3") and keep the password
+ * out of logs.  The demo's banner prints this exact name as the broadcast
+ * SSID. */
+#define DEMO_AP_NAME     "Bimbrownik"
+#define DEMO_AP_PASSWORD "SuperTrudne1!-_"
 
 /* How long to wait for the Wi-Fi worker task to come up after start(). */
 #define DEMO_WIFI_START_TIMEOUT_MS 5000u
@@ -71,8 +86,30 @@ static const char *demo_controller_state_name( wifi_provisioning_controller_stat
     case WIFI_PROVISIONING_CONTROLLER_ONLINE:           return "online";
     case WIFI_PROVISIONING_CONTROLLER_PROVISIONING:     return "provisioning";
     case WIFI_PROVISIONING_CONTROLLER_GRACE:            return "grace";
+    case WIFI_PROVISIONING_CONTROLLER_RETIRING_AP:      return "retiring_ap";
     default:                                            return "unknown";
   }
+}
+
+/* Opt-in state-change notification hook (see the controller header for the
+ * callback contract: it is delivered on the thread that committed the
+ * transition - the Wi-Fi/timer callback context for event-driven transitions,
+ * the calling thread for init/stop/deinit - and must not block or call back
+ * into the controller API). The demo mirrors the controller lifecycle in its
+ * own state machine by logging every transition, including the
+ * session/generation token used to discard stale notifications from an earlier
+ * controller lifecycle. */
+static void demo_on_controller_state_changed(
+    wifi_provisioning_controller_state_t previous,
+    wifi_provisioning_controller_state_t current,
+    uint32_t session,
+    void *user_ctx )
+{
+  (void) user_ctx;
+  printf( "[demo] controller state: %s -> %s (session %u)\n",
+          demo_controller_state_name( previous ),
+          demo_controller_state_name( current ),
+          (unsigned) session );
 }
 
 /* ------------------------------------------------------------------ */
@@ -100,9 +137,16 @@ static int demo_init_storage( void )
           DEMO_STORAGE_DEVICE, DEMO_STORAGE_MOUNT );
   if ( osal_mount( DEMO_STORAGE_DEVICE, DEMO_STORAGE_MOUNT ) != OSAL_SUCCESS )
   {
-    printf( "[demo] ERROR: cannot mount %s partition (see partitions.csv)\n",
-            DEMO_STORAGE_DEVICE );
-    return -1;
+      printf( "[demo] storage mount failed; formatting %s for provisioning\n",
+        DEMO_STORAGE_DEVICE );
+      if ( osal_mkfs( NULL, DEMO_STORAGE_DEVICE, DEMO_STORAGE_MOUNT, 0U, 0U ) !=
+     OSAL_SUCCESS ||
+     osal_mount( DEMO_STORAGE_DEVICE, DEMO_STORAGE_MOUNT ) != OSAL_SUCCESS )
+      {
+        printf( "[demo] ERROR: cannot initialize %s partition (see partitions.csv)\n",
+          DEMO_STORAGE_DEVICE );
+        return -1;
+      }
   }
   printf( "[demo] init 2/5: storage ready\n" );
   return 0;
@@ -113,6 +157,18 @@ static int demo_init_storage( void )
 static int demo_init_wifi( void )
 {
   printf( "[demo] init 3/5: Wi-Fi management (AP+STA)...\n" );
+
+  /* TASK-014: the provisioning AP identity is a runtime configuration and
+   * MUST be set before wifi_mgmt_start(); calls after the module is running
+   * are rejected.  A product passes its own identity here (the demo uses the
+   * explicit example identity above). */
+  if ( !wifi_mgmt_set_ap_credentials( DEMO_AP_NAME, DEMO_AP_PASSWORD ) )
+  {
+    printf( "[demo] ERROR: cannot set provisioning AP identity "
+            "(must be configured before wifi_mgmt_start)\n" );
+    return -1;
+  }
+
   wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLI_SER );
   wifi_mgmt_init();
   wifi_mgmt_start();
@@ -165,8 +221,14 @@ static int demo_init_provisioning( void )
   }
 
   /* Automatic fallback: starts provisioning now when wifi_ap.json does not
-   * exist yet and reopens it when saved credentials are exhausted. */
-  if ( !wifi_provisioning_controller_init() )
+   * exist yet and reopens it when saved credentials are exhausted. The opt-in
+   * state-change hook lets the demo's own state machine mirror the controller
+   * lifecycle without polling. */
+  const wifi_provisioning_controller_config_t ctrl_cfg = {
+    .on_state_changed = demo_on_controller_state_changed,
+    .user_ctx         = NULL,
+  };
+  if ( !wifi_provisioning_controller_init_with_config( &ctrl_cfg ) )
   {
     printf( "[demo] ERROR: provisioning fallback controller failed\n" );
     return -1;
@@ -214,7 +276,7 @@ void app_main( void )
 
   demo_print_status();
   printf( "\n[demo] connect a phone/laptop to the %s access point and open "
-          "http://10.10.0.1 in a browser\n", WIFI_AP_NAME );
+          "http://10.10.0.1 in a browser\n", DEMO_AP_NAME );
   printf( "[demo] submitting credentials through the portal stores them in "
           "wifi_ap.json on the storage partition\n" );
   printf( "\n" );

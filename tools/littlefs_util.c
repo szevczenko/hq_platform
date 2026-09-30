@@ -502,6 +502,8 @@ static int file_size_bytes(const char *path, uint64_t *size_out)
     return 0;
 }
 
+static void lfs_ctx_close(lfs_ctx_t *ctx);
+
 static int lfs_ctx_open(lfs_ctx_t *ctx, const cli_opts_t *opts,
                         const char *image_path, bool for_pack)
 {

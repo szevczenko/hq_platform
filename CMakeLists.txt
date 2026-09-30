@@ -6,7 +6,7 @@ if(DEFINED ENV{IDF_PATH} AND ESP_PLATFORM)
   # src/hal/hq_hal (not src/hal) is registered: ESP-IDF derives the component
   # name from the directory basename, so registering src/hal directly would
   # override the framework `hal` component shipped with ESP-IDF.
-  set(EXTRA_COMPONENT_DIRS main src/osal src/hal/hq_hal src/mongoose src/cmd src/wifi src/thingsboard src/wifi_provisioning)
+  set(EXTRA_COMPONENT_DIRS main src/osal src/hq_storage src/hq_app_services src/hq_input src/hal/hq_hal src/mongoose src/cmd src/wifi src/hq_net src/thingsboard src/wifi_provisioning)
   include($ENV{IDF_PATH}/tools/cmake/project.cmake)
   project(hq_platform)
 else()

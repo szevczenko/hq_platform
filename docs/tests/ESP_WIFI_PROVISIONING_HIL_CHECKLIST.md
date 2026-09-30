@@ -93,7 +93,7 @@ If the actual result differs from the **Expected result**:
 
 | Parameter | Value (default) |
 |-----------|-----------------|
-| AP SSID | `WIFI_AP_NAME` — `Bimbrownik` (from `src/wifi/wifi_managment.h`) |
+| AP SSID | `DEMO_AP_NAME` — `Bimbrownik` (set at runtime by the demo example via `wifi_mgmt_set_ap_credentials()` before start; a product MUST set its own identity — see `wifi_managment.h`) |
 | AP / gateway IP | `10.10.0.1` |
 | HTTP portal | `http://0.0.0.0:80` (`CONFIG_WIFI_HTTP_PROVISIONING_HTTP_URL`) |
 | Captive DNS | `udp://0.0.0.0:53` (`CONFIG_WIFI_HTTP_PROVISIONING_DNS_URL`) |

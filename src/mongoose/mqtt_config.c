@@ -7,6 +7,7 @@
 
 #include "cJSON.h"
 #include "hq_config.h"
+#include "mqtt_app.h"
 #include "osal_file.h"
 #include "osal_log.h"
 
@@ -63,6 +64,21 @@ typedef struct {
 static mqtt_apply_config_cb apply_cb;
 static config_data_t config;
 static bool config_initialized;
+
+typedef struct {
+	char address[MQTT_CONFIG_STR_SIZE];
+	char client_id[MQTT_CONFIG_STR_SIZE];
+	char ca_path[MQTT_CONFIG_STR_SIZE];
+	char ca_pem[MQTT_CERT_MAX_SIZE];
+	char client_cert_path[MQTT_CONFIG_STR_SIZE];
+	char client_cert_pem[MQTT_CERT_MAX_SIZE];
+	char client_key_path[MQTT_CONFIG_STR_SIZE];
+	char client_key_pem[MQTT_CERT_MAX_SIZE];
+	bool mutual_tls;
+	bool applied;
+} verified_config_state_t;
+
+static verified_config_state_t verified_config;
 
 static void str_copy_safe(char *dst, size_t dst_size, const char *src)
 {
@@ -563,4 +579,219 @@ bool mqtt_config_save(void)
 void mqtt_config_set_callback(mqtt_apply_config_cb cb)
 {
 	apply_cb = cb;
+}
+
+static bool verified_copy(char *dst, size_t dst_size, const char *src,
+			  bool required)
+{
+	if (!src)
+		return !required;
+	if (strnlen(src, dst_size) >= dst_size ||
+	    (required && src[0] == '\0'))
+		return false;
+	str_copy_safe(dst, dst_size, src);
+	return true;
+}
+
+static bool verified_cert_path(const char *path)
+{
+	return path && strncmp(path, "/cert/", 6u) == 0 &&
+	       path[6] != '\0' && strstr(path, "..") == NULL;
+}
+
+static bool verified_cert_matches(mqtt_config_value_t key,
+				  const char *expected_path,
+				  const char *expected_pem,
+				  bool required)
+{
+	mqtt_cert_source_t source = MQTT_CERT_SOURCE_NONE;
+	const char *path = NULL;
+	const char *pem;
+
+	if (!mqtt_config_get_cert_source(&source, &path, key))
+		return false;
+	if (!required)
+		return source == MQTT_CERT_SOURCE_NONE && (!path || path[0] == '\0');
+	pem = mqtt_config_get_cert(key);
+	return source == MQTT_CERT_SOURCE_FILE_PATH && path && pem &&
+	       strcmp(path, expected_path) == 0 &&
+	       strcmp(pem, expected_pem) == 0;
+}
+
+static bool verified_candidate_matches(const mqtt_config_snapshot_t *candidate)
+{
+	if (!candidate || !verified_config.applied || !candidate->address ||
+	    !candidate->client_id || !candidate->cert_value ||
+	    !candidate->cert_resolved || !candidate->ssl_enabled ||
+	    candidate->skip_verify || strcmp(candidate->address,
+					     verified_config.address) != 0 ||
+	    strcmp(candidate->client_id, verified_config.client_id) != 0 ||
+	    candidate->cert_source != MQTT_CERT_SOURCE_FILE_PATH ||
+	    strcmp(candidate->cert_value, verified_config.ca_path) != 0 ||
+	    strcmp(candidate->cert_resolved, verified_config.ca_pem) != 0)
+		return false;
+
+	if (verified_config.mutual_tls)
+		return candidate->client_cert_source == MQTT_CERT_SOURCE_FILE_PATH &&
+		       candidate->client_key_source == MQTT_CERT_SOURCE_FILE_PATH &&
+		       candidate->client_cert_value &&
+		       candidate->client_key_value &&
+		       candidate->client_cert_resolved &&
+		       candidate->client_key_resolved &&
+		       strcmp(candidate->client_cert_value,
+			      verified_config.client_cert_path) == 0 &&
+		       strcmp(candidate->client_key_value,
+			      verified_config.client_key_path) == 0 &&
+		       strcmp(candidate->client_cert_resolved,
+			      verified_config.client_cert_pem) == 0 &&
+		       strcmp(candidate->client_key_resolved,
+			      verified_config.client_key_pem) == 0;
+
+	return candidate->client_cert_source == MQTT_CERT_SOURCE_NONE &&
+	       candidate->client_key_source == MQTT_CERT_SOURCE_NONE;
+}
+
+static bool verified_config_gate(const mqtt_config_snapshot_t *candidate)
+{
+	return verified_candidate_matches(candidate);
+}
+
+mqtt_verified_config_status_t mqtt_config_apply_verified(
+	const mqtt_verified_config_t *verified)
+{
+	verified_config_state_t next = { 0 };
+	const char *pem;
+
+	verified_config.applied = false;
+	if (!verified || !verified_copy(next.address, sizeof(next.address),
+					 verified->address, true) ||
+	    strncmp(next.address, "mqtts://", 8u) != 0 ||
+	    next.address[8] == '\0' ||
+	    !verified_copy(next.client_id, sizeof(next.client_id),
+			   verified->client_id, true) ||
+	    !verified_copy(next.ca_path, sizeof(next.ca_path),
+			   verified->ca_path, true) ||
+	    !verified_cert_path(next.ca_path))
+		return MQTT_VERIFIED_CONFIG_INVALID;
+	if ((verified->username &&
+	     strnlen(verified->username, MQTT_CONFIG_STR_SIZE) >=
+		     MQTT_CONFIG_STR_SIZE) ||
+	    (verified->password &&
+	     strnlen(verified->password, MQTT_CONFIG_STR_SIZE) >=
+		     MQTT_CONFIG_STR_SIZE))
+		return MQTT_VERIFIED_CONFIG_INVALID;
+
+	next.mutual_tls = verified->client_cert_path || verified->client_key_path;
+	if (next.mutual_tls &&
+	    (!verified_copy(next.client_cert_path,
+			    sizeof(next.client_cert_path),
+			    verified->client_cert_path, true) ||
+	     !verified_copy(next.client_key_path, sizeof(next.client_key_path),
+			    verified->client_key_path, true) ||
+	     !verified_cert_path(next.client_cert_path) ||
+	     !verified_cert_path(next.client_key_path)))
+		return MQTT_VERIFIED_CONFIG_INVALID;
+
+	mqtt_config_init();
+	if (!mqtt_config_set_string(next.address, MQTT_CONFIG_VALUE_ADDRESS) ||
+	    !mqtt_config_set_string(next.client_id, MQTT_CONFIG_VALUE_CLIENT_ID) ||
+	    !mqtt_config_set_bool(true, MQTT_CONFIG_VALUE_SSL) ||
+	    !mqtt_config_set_bool(false, MQTT_CONFIG_VALUE_SKIP_VERIFY))
+		return MQTT_VERIFIED_CONFIG_APPLY_ERROR;
+	if ((verified->username &&
+	     !mqtt_config_set_string(verified->username,
+				     MQTT_CONFIG_VALUE_USERNAME)) ||
+	    (verified->password &&
+	     !mqtt_config_set_string(verified->password,
+				     MQTT_CONFIG_VALUE_PASSWORD)))
+		return MQTT_VERIFIED_CONFIG_APPLY_ERROR;
+	if (!mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+					 verified->ca_path,
+					 MQTT_CONFIG_VALUE_CERT))
+		return MQTT_VERIFIED_CONFIG_CA_ERROR;
+
+	if (next.mutual_tls) {
+		if (!mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+						 verified->client_cert_path,
+						 MQTT_CONFIG_VALUE_CLIENT_CERT) ||
+		    !mqtt_config_set_cert_source(MQTT_CERT_SOURCE_FILE_PATH,
+						 verified->client_key_path,
+						 MQTT_CONFIG_VALUE_CLIENT_KEY))
+			return MQTT_VERIFIED_CONFIG_CLIENT_CERT_ERROR;
+	} else if (!mqtt_config_set_cert_source(MQTT_CERT_SOURCE_NONE, NULL,
+						MQTT_CONFIG_VALUE_CLIENT_CERT) ||
+			   !mqtt_config_set_cert_source(MQTT_CERT_SOURCE_NONE, NULL,
+						MQTT_CONFIG_VALUE_CLIENT_KEY)) {
+		return MQTT_VERIFIED_CONFIG_APPLY_ERROR;
+	}
+
+	pem = mqtt_config_get_cert(MQTT_CONFIG_VALUE_CERT);
+	if (!pem || !verified_copy(next.ca_pem, sizeof(next.ca_pem), pem, true))
+		return MQTT_VERIFIED_CONFIG_CA_ERROR;
+	if (next.mutual_tls) {
+		pem = mqtt_config_get_cert(MQTT_CONFIG_VALUE_CLIENT_CERT);
+		if (!pem || !verified_copy(next.client_cert_pem,
+					   sizeof(next.client_cert_pem), pem, true))
+			return MQTT_VERIFIED_CONFIG_CLIENT_CERT_ERROR;
+		pem = mqtt_config_get_cert(MQTT_CONFIG_VALUE_CLIENT_KEY);
+		if (!pem || !verified_copy(next.client_key_pem,
+					   sizeof(next.client_key_pem), pem, true))
+			return MQTT_VERIFIED_CONFIG_CLIENT_CERT_ERROR;
+	}
+
+	next.applied = true;
+	verified_config = next;
+	mqtt_app_set_config_validation_callback(verified_config_gate);
+	if (mqtt_config_verified_is_current())
+		return MQTT_VERIFIED_CONFIG_OK;
+	verified_config.applied = false;
+	return MQTT_VERIFIED_CONFIG_APPLY_ERROR;
+}
+
+bool mqtt_config_verified_is_current(void)
+{
+	bool ssl = false;
+	bool skip_verify = true;
+	const char *address;
+	const char *client_id;
+
+	if (!verified_config.applied ||
+	    !mqtt_config_get_bool(&ssl, MQTT_CONFIG_VALUE_SSL) || !ssl ||
+	    !mqtt_config_get_bool(&skip_verify, MQTT_CONFIG_VALUE_SKIP_VERIFY) ||
+	    skip_verify)
+		return false;
+	address = mqtt_config_get_string(MQTT_CONFIG_VALUE_ADDRESS);
+	client_id = mqtt_config_get_string(MQTT_CONFIG_VALUE_CLIENT_ID);
+	return address && client_id &&
+	       strcmp(address, verified_config.address) == 0 &&
+	       strcmp(client_id, verified_config.client_id) == 0 &&
+	       verified_cert_matches(MQTT_CONFIG_VALUE_CERT,
+				     verified_config.ca_path,
+				     verified_config.ca_pem, true) &&
+	       verified_cert_matches(MQTT_CONFIG_VALUE_CLIENT_CERT,
+				     verified_config.client_cert_path,
+				     verified_config.client_cert_pem,
+				     verified_config.mutual_tls) &&
+	       verified_cert_matches(MQTT_CONFIG_VALUE_CLIENT_KEY,
+				     verified_config.client_key_path,
+				     verified_config.client_key_pem,
+				     verified_config.mutual_tls);
+}
+
+void mqtt_config_invalidate_verified(void)
+{
+	verified_config.applied = false;
+	mqtt_app_set_config_validation_callback(NULL);
+}
+
+bool mqtt_config_get_verified_server_url(char *out, size_t out_size)
+{
+	if (!out || out_size == 0u)
+		return false;
+	out[0] = '\0';
+	if (!mqtt_config_verified_is_current() ||
+	    strlen(verified_config.address) >= out_size)
+		return false;
+	str_copy_safe(out, out_size, verified_config.address);
+	return true;
 }

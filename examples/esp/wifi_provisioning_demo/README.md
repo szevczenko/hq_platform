@@ -66,17 +66,28 @@ in `defconfig/esp_provisioning.defconfig` and behaves as follows:
 | Condition                          | Behavior                                         |
 |------------------------------------|--------------------------------------------------|
 | No saved credential exists          | Portal opens immediately at boot                  |
-| Saved credentials exhausted (connect failed) | Portal reopens once per fallback session  |
+| Saved credentials exhausted (connect failed) | Portal reopens after the configured fallback budget (default 1 = first failure) |
 | Single transient disconnect         | Portal never reopens                              |
 | Credential submitted while portal up| Station connects; portal stays for the grace period |
 | Grace period expires                | Portal stops; STA-only transition (AP retired)     |
 
+The fallback budget (`CONFIG_WIFI_HTTP_PROVISIONING_FALLBACK_ATTEMPTS`) is the
+number of consecutive `CONNECT_FAILED` events the controller must observe
+while waiting for a saved-credential connection before it opens the portal.
+The demo keeps the historical value of 1 (the portal opens on the first
+failure); a product can raise it so a transient router reboot does not surface
+the provisioning AP, set it to 0 to disable the failure-driven fallback
+entirely, or override it per device at init time through
+`wifi_provisioning_controller_config_t.fallback_budget`.
+
 ## Provisioning flow
 
 1. Power the board. With no `wifi_ap.json` on the storage partition the demo
-   starts the portal automatically: the device creates the `wifi_provisioning`
-   access point (SSID advertised in the console banner) and the captive DNS
-   responder answers all A queries with `10.10.0.1`.
+   starts the portal automatically: the device creates the example's
+   provisioning access point (`DEMO_AP_NAME` — `Bimbrownik`, set explicitly at
+   runtime via `wifi_mgmt_set_ap_credentials()` before start; a product MUST
+   set its own identity) and the captive DNS responder answers all A queries
+   with `10.10.0.1`.
 2. Connect a phone/laptop to that AP. A browser opens the captive portal at
    `http://10.10.0.1` (any DNS/HTTP request is redirected to it).
 3. Select the home network and enter its password; the portal submits the
@@ -102,6 +113,13 @@ Submitted credentials are written to `wifi_ap.json` on the littlefs
 Wi-Fi management layer loads that file, so the device reconnects to the saved
 network without user interaction; the portal only reopens if the saved
 credentials fail.
+
+On boot, this demo formats `storage` and retries the mount when the partition
+cannot be mounted. This handles a freshly flashed or erased device, but also
+discards any unreadable credentials and other files on that partition. The
+format is performed explicitly by the demo; the shared OSAL `osal_mount()` API
+does not format failed mounts implicitly, so other products can choose a safer
+recovery policy.
 
 ## Build, flash, monitor
 

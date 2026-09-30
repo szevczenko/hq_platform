@@ -36,6 +36,26 @@ set_target_properties(cmd_demo PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
 )
 
+add_executable(iot_device_template
+  ${CMAKE_CURRENT_LIST_DIR}/../common/iot_device_template.c
+)
+
+target_include_directories(iot_device_template
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/hq_app_services/include
+  PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../src/hq_net/include
+  PRIVATE ${HQ_CONFIG_DIR}
+)
+
+target_link_libraries(iot_device_template
+  hq_app_services
+  hq_net
+  pthread
+)
+
+set_target_properties(iot_device_template PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/examples
+)
+
 add_executable(mqtt_demo
   ${CMAKE_CURRENT_LIST_DIR}/../common/mqtt_demo.c
 )

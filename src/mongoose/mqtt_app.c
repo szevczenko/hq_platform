@@ -405,10 +405,13 @@ static void mqtt_snapshot_from_candidate(mqtt_config_snapshot_t *snapshot,
 	snapshot->skip_verify = cand->skip_verify;
 	snapshot->cert_source = cand->cert_source;
 	snapshot->cert_value = cand->cert_value;
+	snapshot->cert_resolved = cand->cert_resolved;
 	snapshot->client_cert_source = cand->client_cert_source;
 	snapshot->client_cert_value = cand->client_cert_value;
+	snapshot->client_cert_resolved = cand->client_cert_resolved;
 	snapshot->client_key_source = cand->client_key_source;
 	snapshot->client_key_value = cand->client_key_value;
+	snapshot->client_key_resolved = cand->client_key_resolved;
 }
 
 /* Returns true when the apply-config handler may reconnect.  The gate is
@@ -1092,7 +1095,10 @@ static void handle_mqtt_command_event(struct mg_mqtt_message *mm)
 			osal_log_error("MQTT CONNACK rejected ack=%u",
 				       (unsigned)mm->ack);
 			mqtt_notify_connect_failure(
-				MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED);
+				(mm->ack == 4u || mm->ack == 5u ||
+				 mm->ack == 0x86u || mm->ack == 0x87u)
+					? MQTT_CONNECT_FAILURE_REASON_AUTH_REJECTED
+					: MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED);
 			if (mqtt_state.nc != NULL)
 				mqtt_state.nc->is_closing = 1;
 		}

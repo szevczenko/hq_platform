@@ -16,13 +16,19 @@
 
 /* Public macros -------------------------------------------------------------*/
 
-#ifndef WIFI_AP_NAME
-#define WIFI_AP_NAME "Bimbrownik"
-#endif
-
-#ifndef WIFI_AP_PASSWORD
-#define WIFI_AP_PASSWORD "SuperTrudne1!-_"
-#endif
+/*
+ * Provisioning AP identity
+ * -------------------------
+ * The soft-AP broadcast by the device for provisioning is a RUNTIME
+ * configuration: a product MUST set its own identity with
+ * wifi_mgmt_set_ap_credentials() before wifi_mgmt_start() (see the function
+ * documentation below).  This public header deliberately ships no AP name and
+ * no AP password.  The neutral non-secret fallback used when a build defines
+ * neither WIFI_AP_NAME nor WIFI_AP_PASSWORD lives in the implementation
+ * (wifi_managment.c), and examples that want to keep a compile-time identity
+ * may still override those two macros at build time through their own build
+ * configuration.
+ */
 
 /** @brief Maximum SSID length in characters (without null terminator). */
 #define MAX_SSID_SIZE        32
@@ -127,6 +133,37 @@ typedef void ( *wifi_mgmt_event_cb_t )( wifi_mgmt_event_t event, void* user_data
 void wifi_mgmt_set_wifi_type( wifi_type_t type );
 
 /**
+ * @brief   Set the provisioning soft-AP identity (broadcast name + password).
+ *
+ * @details Configures the access point that the device broadcasts for
+ *          provisioning.  The identity is applied by the platform HAL when the
+ *          Wi-Fi module starts, so this is the canonical way for a product —
+ *          or a single device, e.g. via a serial-number-derived name such as
+ *          "KitchenLamp-a1b2c3" — to choose its own provisioning AP identity
+ *          at runtime.  The full name is accepted verbatim: the platform does
+ *          not append a MAC suffix to an explicitly configured identity and
+ *          keeps out of identity policy, and it never stores or logs the
+ *          password.
+ *
+ * @param   [in] name     - null-terminated AP broadcast name (SSID),
+ *                          1..@c MAX_SSID_SIZE characters
+ * @param   [in] password - null-terminated AP password,
+ *                          0..@c MAX_PASSWORD_SIZE characters
+ *                          (an empty string opens the AP without a key)
+ * @return  true when the identity was accepted and will be used on the next
+ *          @c wifi_mgmt_start, false on invalid input or when called while
+ *          the module is already running.
+ *
+ * @note    MUST be called before @c wifi_mgmt_start(): the AP interface comes
+ *          up from the value set at that point.  Calls made after the module
+ *          has started — or while a start is in progress — are rejected and
+ *          return false; stop the module (and start it again) to apply a new
+ *          identity.  Products MUST set their own identity; the platform does
+ *          not impose one and ships no secret default.
+ */
+bool wifi_mgmt_set_ap_credentials( const char* name, const char* password );
+
+/**
  * @brief   Asynchronously request a runtime transition to @p type.
  *
  * @details The requested mode is serialized inside the Wi-Fi worker task so
@@ -143,6 +180,24 @@ void wifi_mgmt_set_wifi_type( wifi_type_t type );
  *          failure leaves the worker in a defined, recoverable state.
  */
 bool wifi_mgmt_request_mode( wifi_type_t type );
+
+/**
+ * @brief   Query the effective Wi-Fi operating mode.
+ *
+ * @details Reports the mode the radio is actually running in, not merely a
+ *          requested mode: the value is committed only after a HAL mode
+ *          transition succeeds.  Use this to verify that an asynchronous
+ *          @c wifi_mgmt_request_mode() call has been applied (the request
+ *          itself only returns "accepted").  @c WIFI_MGMT_EVENT_MODE_CHANGED
+ *          is emitted at the same commit point.
+ *
+ * @return  The current effective @c wifi_type_t
+ *          (@c T_WIFI_TYPE_SERVER, @c T_WIFI_TYPE_CLIENT, or
+ *          @c T_WIFI_TYPE_CLI_SER).
+ * @note    Only meaningful while the module is running; a stopped module
+ *          reports the last committed mode.
+ */
+wifi_type_t wifi_mgmt_get_mode( void );
 
 /**
  * @brief   Initialize the Wi-Fi management module and spawn the worker task.
@@ -351,6 +406,49 @@ int wifi_mgmt_get_rssi( void );
  * @return  true if credentials were read from persistent storage, otherwise false
  */
 bool wifi_mgmt_is_read_data( void );
+
+/**
+ * @brief   Erase all saved Wi-Fi credentials from persistent storage.
+ *
+ * @details Removes the credential file (@c WIFI_CONFIG_FILE_PATH —
+ *          @c wifi_ap.json on the mounted storage) and clears the in-memory
+ *          credential state, so the device immediately reports "fresh":
+ *          afterwards @c wifi_mgmt_is_read_data() returns false and the
+ *          controller (and products) treat the device as never provisioned.
+ *          The provisioning soft-AP identity configured via
+ *          @c wifi_mgmt_set_ap_credentials() is NOT affected.
+ *
+ *          The call is idempotent: erasing when no credential is saved is a
+ *          no-op success (the returned status is still true).
+ *
+ *          Behavior in each Wi-Fi state:
+ *          - not initialized / stopped: any credential file present on the
+ *            mounted storage is removed; @c wifi_mgmt_is_read_data() is false
+ *            afterwards;
+ *          - running, disconnected: the saved credential is removed from
+ *            storage and from memory; @c wifi_mgmt_is_read_data() is false
+ *            immediately; the module keeps running;
+ *          - running, connected: the saved credential is removed from storage
+ *            and from memory and @c wifi_mgmt_is_read_data() is false
+ *            immediately; the current session stays connected (the HAL owns
+ *            the live network configuration) but a subsequent reconnect or
+ *            restart starts from the fresh-device state.
+ *
+ *          Recovery contract: after erase, restart the device — or re-run the
+ *          documented re-init path — and the management layer no longer holds
+ *          a saved credential, so the controller's fresh-device fallback opens
+ *          the provisioning portal.  Any device can therefore be forced back
+ *          into the provisioning flow and re-provisioned without serial
+ *          access or a reflash.
+ *
+ * @return  true when no credential remains persisted (erase succeeded or
+ *          there was nothing to erase), false only when a credential file
+ *          exists but could not be removed.
+ *
+ * @note    This call never logs credential content — only the outcome is
+ *          logged, consistent with the platform Wi-Fi logging policy.
+ */
+bool wifi_mgmt_erase_credentials( void );
 
 /**
  * @brief   Check whether the Wi-Fi management module is running.

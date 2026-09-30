@@ -21,6 +21,7 @@
 #include <netinet/in.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -360,6 +361,17 @@ static void run_captive_tests( void )
                                   resp, sizeof( resp ) ) > 0 );
   assert_status_code( resp, 200 );
   TEST_ASSERT_TRUE( contains_ci( resp, "Content-Type: text/javascript" ) );
+
+  /* The browser must receive the whole packed script, not just the headers.
+   * This catches a portal response that grows one unbounded send buffer. */
+  char * script_resp = calloc( 1u, 24576u );
+  TEST_ASSERT_NOT_NULL( script_resp );
+  int script_len = http_request( http_port, "GET", "/app.js", script_resp,
+                                 24575u );
+  TEST_ASSERT_TRUE( script_len > 22000 );
+  assert_status_code( script_resp, 200 );
+  TEST_ASSERT_NOT_NULL( strstr( body_of( script_resp ), "document" ) );
+  free( script_resp );
 
   /* --- unknown browser GET route redirects to the portal root -------- */
   TEST_ASSERT_TRUE( http_request( http_port, "GET", "/favicon.ico",

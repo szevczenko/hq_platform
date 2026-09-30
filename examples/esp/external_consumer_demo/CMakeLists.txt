@@ -23,6 +23,7 @@ set(EXTRA_COMPONENT_DIRS
   ${HQ_REPO_ROOT}/src/wifi
   ${HQ_REPO_ROOT}/src/thingsboard
   ${HQ_REPO_ROOT}/src/mongoose
+  ${HQ_REPO_ROOT}/src/hq_app_services
 )
 
 include(${HQ_REPO_ROOT}/cmake/configure.cmake)

@@ -8,7 +8,8 @@
  *   init:     OSAL -> Mongoose -> Wi-Fi management -> provisioning
  *   shutdown: provisioning -> Wi-Fi management -> Mongoose -> OSAL
  *
- * Listeners owned by the demo:
+ * Listeners owned by the demo (ports overridable through the environment
+ * variables WIFI_PROV_DEMO_HTTP_PORT / WIFI_PROV_DEMO_DNS_PORT):
  *   HTTP   http://127.0.0.1:8080    provisioning portal + REST API
  *   DNS    udp://127.0.0.1:10053    captive DNS responder
  *
@@ -25,6 +26,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -39,13 +41,35 @@
 #error "wifi_provisioning_demo.c targets POSIX (simulated Wi-Fi) only"
 #endif
 
-/* Listen addresses required by TASK-130. */
-#define DEMO_HTTP_URL "http://127.0.0.1:8080"
-#define DEMO_DNS_URL  "udp://127.0.0.1:10053"
+/* Default listen ports required by TASK-130. */
+#define DEMO_HTTP_PORT_DEFAULT 8080u
+#define DEMO_DNS_PORT_DEFAULT  10053u
 
-/* Same ports, numeric, used only for the post-shutdown release check. */
-#define DEMO_HTTP_PORT 8080
-#define DEMO_DNS_PORT  10053
+static unsigned s_http_port = DEMO_HTTP_PORT_DEFAULT;
+static unsigned s_dns_port  = DEMO_DNS_PORT_DEFAULT;
+static char     s_http_url[32];
+static char     s_dns_url[32];
+
+/* Read an optional port override; false when the value is malformed. */
+static bool demo_port_from_env( const char *name, unsigned *port )
+{
+  const char   *value = getenv( name );
+  char         *end   = NULL;
+  unsigned long parsed;
+
+  if ( value == NULL || value[0] == '\0' )
+  {
+    return true;
+  }
+  parsed = strtoul( value, &end, 10 );
+  if ( *end != '\0' || parsed == 0ul || parsed > 65535ul )
+  {
+    printf( "[demo] ERROR: invalid %s=%s\n", name, value );
+    return false;
+  }
+  *port = ( unsigned ) parsed;
+  return true;
+}
 
 /* How long to wait for the Wi-Fi worker task to come up after start(). */
 #define DEMO_WIFI_START_TIMEOUT_MS 3000u
@@ -135,30 +159,35 @@ static int demo_init_wifi( void )
 static int demo_init_provisioning( void )
 {
   printf( "[demo] init 4/4: provisioning app (HTTP %s, DNS %s)...\n",
-          DEMO_HTTP_URL, DEMO_DNS_URL );
+          s_http_url, s_dns_url );
 
-  if ( !wifi_http_provisioning_set_http_url( DEMO_HTTP_URL ) )
+  if ( !wifi_http_provisioning_set_http_url( s_http_url ) )
   {
     printf( "[demo] ERROR: cannot configure HTTP listen URL\n" );
     return -1;
   }
-  if ( !wifi_http_provisioning_set_dns_url( DEMO_DNS_URL ) )
+  if ( !wifi_http_provisioning_set_dns_url( s_dns_url ) )
   {
     printf( "[demo] ERROR: cannot configure DNS listen URL\n" );
     return -1;
   }
-  if ( !wifi_http_provisioning_start() )
+  wifi_http_provisioning_start_status_t st = wifi_http_provisioning_start_ex();
+  if ( st != WIFI_HTTP_PROVISIONING_START_OK &&
+       st != WIFI_HTTP_PROVISIONING_START_ALREADY_RUNNING )
   {
-    printf( "[demo] ERROR: provisioning app failed to start\n" );
+    printf( "[demo] ERROR: provisioning app failed to start (status=%d)\n",
+            ( int ) wifi_http_provisioning_get_last_start_status() );
     return -1;
   }
-  if ( wifi_http_provisioning_get_state() != WIFI_PROVISIONING_RUNNING )
+  /* RUNNING alone does not prove the radio reached AP+STA; only a reachable
+   * portal (AP + both listeners) counts as started for this demo. */
+  if ( !wifi_http_provisioning_is_reachable() )
   {
-    printf( "[demo] ERROR: provisioning app not RUNNING (state=%s)\n",
+    printf( "[demo] ERROR: provisioning app not reachable (state=%s)\n",
             demo_prov_state_name( wifi_http_provisioning_get_state() ) );
     return -1;
   }
-  printf( "[demo] init 4/4: provisioning app RUNNING\n" );
+  printf( "[demo] init 4/4: provisioning app RUNNING and reachable\n" );
   return 0;
 }
 
@@ -226,7 +255,7 @@ static bool demo_ports_released( void )
     memset( &addr, 0, sizeof( addr ) );
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl( INADDR_LOOPBACK );
-    addr.sin_port        = htons( DEMO_HTTP_PORT );
+    addr.sin_port        = htons( ( uint16_t ) s_http_port );
     tcp_free = ( bind( tcp_fd, ( struct sockaddr * ) &addr,
                        sizeof( addr ) ) == 0 );
     close( tcp_fd );
@@ -238,7 +267,7 @@ static bool demo_ports_released( void )
     memset( &addr, 0, sizeof( addr ) );
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl( INADDR_LOOPBACK );
-    addr.sin_port        = htons( DEMO_DNS_PORT );
+    addr.sin_port        = htons( ( uint16_t ) s_dns_port );
     udp_free = ( bind( udp_fd, ( struct sockaddr * ) &addr, sizeof( addr ) ) == 0 );
     close( udp_fd );
   }
@@ -371,6 +400,16 @@ int main( void )
   printf( "     Wi-Fi Provisioning Demo (POSIX, simulated Wi-Fi)\n" );
   printf( "===========================================================\n" );
 
+  if ( !demo_port_from_env( "WIFI_PROV_DEMO_HTTP_PORT", &s_http_port ) ||
+       !demo_port_from_env( "WIFI_PROV_DEMO_DNS_PORT", &s_dns_port ) )
+  {
+    return 1;
+  }
+  ( void ) snprintf( s_http_url, sizeof( s_http_url ), "http://127.0.0.1:%u",
+                     s_http_port );
+  ( void ) snprintf( s_dns_url, sizeof( s_dns_url ), "udp://127.0.0.1:%u",
+                     s_dns_port );
+
   if ( demo_init_osal() != 0 )       return 1;
   if ( demo_init_mongoose() != 0 )   return 1;
   if ( demo_init_wifi() != 0 )       return 1;
@@ -381,9 +420,9 @@ int main( void )
     return 1;
   }
 
-  printf( "\nPortal:   http://127.0.0.1:%u/\n", DEMO_HTTP_PORT );
+  printf( "\nPortal:   http://127.0.0.1:%u/\n", s_http_port );
   printf( "DNS:      udp://127.0.0.1:%u  (try: dig @127.0.0.1 -p %u provision.local)\n",
-          DEMO_DNS_PORT, DEMO_DNS_PORT );
+          s_dns_port, s_dns_port );
   printf( "Shutdown: press Ctrl-C, or type 'exit' and press Enter\n\n" );
   demo_print_simulated_networks();
   printf( "\n" );
@@ -401,7 +440,7 @@ int main( void )
   if ( demo_ports_released() )
   {
     printf( "[demo] shutdown complete: HTTP :%u and DNS :%u were released\n",
-            DEMO_HTTP_PORT, DEMO_DNS_PORT );
+            s_http_port, s_dns_port );
   }
   else
   {

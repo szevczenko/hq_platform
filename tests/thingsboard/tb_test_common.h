@@ -18,6 +18,7 @@
 #include "tb_claim.h"
 #include "tb_client.h"
 #include "tb_firmware_update.h"
+#include "tb_enrollment.h"
 #include "tb_provision.h"
 #include "tb_rpc.h"
 #include "tb_telemetry.h"
@@ -35,6 +36,8 @@ void run_telemetry_tests(void);
 void run_attributes_tests(void);
 void run_rpc_tests(void);
 void run_provision_claim_tests(void);
+void run_enrollment_tests(void);
 void run_fwu_tests(void);
+void run_state_sync_tests(void);
 
 #endif

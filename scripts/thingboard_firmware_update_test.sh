@@ -321,7 +321,7 @@ log "Running demo for ${RUN_SECONDS}s"
 timeout "${RUN_SECONDS}s" "./$BUILD_DIR/examples/thingboard_firmware_update_demo" | tee "$OUT_DIR/demo_runtime.log" || true
 
 log "Fetching latest firmware telemetry from ThingsBoard"
-telemetry_json="$(api_get "/api/plugins/telemetry/DEVICE/$device_id/values/timeseries?keys=fw_state,fw_error,current_fw_title,current_fw_version")"
+telemetry_json="$(api_get "/api/plugins/telemetry/DEVICE/$device_id/values/timeseries?keys=fw_state,fw_error,fw_title,fw_version")"
 printf '%s\n' "$telemetry_json" > "$JSON_DIR/firmware_telemetry.json"
 
 cat > "$OUT_DIR/summary.txt" <<EOF

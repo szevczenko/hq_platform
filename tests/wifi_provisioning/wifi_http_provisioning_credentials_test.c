@@ -11,7 +11,10 @@
  *    password, missing/incorrect Content-Type, and oversized bodies),
  *  - unsupported HTTP methods are rejected with 405,
  *  - every response is JSON with Cache-Control: no-store and never contains a
- *    submitted password or a "password" field.
+ *    submitted password or a "password" field,
+ *  - the saved-credential erase API (wifi_mgmt_erase_credentials) is
+ *    idempotent while Wi-Fi runs, removes wifi_ap.json from persistent
+ *    storage, and leaves the device reporting "fresh" (is_read_data false).
  */
 
 #include <arpa/inet.h>
@@ -26,6 +29,7 @@
 #include "mongoose_process.h"
 #include "osal_task.h"
 #include "unity.h"
+#include "wifi_config.h"
 #include "wifi_hal_mock.h"
 #include "wifi_http_provisioning.h"
 #include "wifi_managment.h"
@@ -396,6 +400,64 @@ static void run_credentials_tests( void )
   assert_api_headers( resp );
 }
 
+/* ------------------------------------------------------------------ */
+/* Saved-credential erase (TASK-015).                                   */
+/*                                                                      */
+/* The fixture leaves Wi-Fi management running on a fresh filesystem, so */
+/* this scenario covers the running-state guarantee of the erase API:    */
+/*  - erase with no credential is an idempotent no-op success,           */
+/*  - erase with a persisted credential removes wifi_ap.json,            */
+/*  - erase flips wifi_mgmt_is_read_data() to false immediately,         */
+/*  - a repeated erase stays a no-op success.                            */
+/* ------------------------------------------------------------------ */
+static void run_erase_credentials_tests( void )
+{
+  wifi_config_list_t seeded = { 0 };
+  wifi_config_list_t loaded = { 0 };
+
+  /* The shared fixture brings Wi-Fi management up with no saved data. */
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "fixture starts fresh (no saved credential)" );
+
+  /* Erase with none: idempotent no-op success while running. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "erase with no credential is a no-op success" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "is_read_data false after the no-op erase" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "repeated no-op erase succeeds" );
+
+  /* Seed a persisted credential (as if provisioned on an earlier boot) and
+   * verify it is really there before erasing it. */
+  seeded.count = 1;
+  seeded.last_use = 5;
+  seeded.entries[0].nb = 5;
+  strncpy( seeded.entries[0].ssid, "EraseHomeNet",
+           sizeof( seeded.entries[0].ssid ) - 1 );
+  strncpy( seeded.entries[0].password, "EraseHomeSecret",
+           sizeof( seeded.entries[0].password ) - 1 );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_save( &seeded ) );
+  TEST_ASSERT_EQUAL_INT( OSAL_SUCCESS, wifi_config_load( &loaded ) );
+  TEST_ASSERT_EQUAL_STRING_MESSAGE( "EraseHomeNet", loaded.entries[0].ssid,
+                                    "seeded credential is present in storage" );
+
+  /* Erase while the module is running: storage and in-memory state are
+   * cleared and the device reports fresh. */
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "erase with a credential present succeeds" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "is_read_data false after erase" );
+  memset( &loaded, 0, sizeof( loaded ) );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_config_load( &loaded ) != OSAL_SUCCESS,
+                            "credential file removed from persistent storage" );
+  TEST_ASSERT_EQUAL_MESSAGE( 0, loaded.count,
+                             "no credentials remain after erase" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_erase_credentials(),
+                            "erase-then-erase stays an idempotent success" );
+  TEST_ASSERT_FALSE_MESSAGE( wifi_mgmt_is_read_data(),
+                             "still fresh after the repeated erase" );
+}
+
 #ifdef ESP_PLATFORM
 void app_main( void )
 #else
@@ -412,6 +474,7 @@ int main( void )
    * clean test failure; setUp()/tearDown() own the component + filesystem
    * lifecycle around the scenario. */
   RUN_TEST( run_credentials_tests );
+  RUN_TEST( run_erase_credentials_tests );
 
   rc = UNITY_END();
   return rc;

@@ -238,7 +238,10 @@ static void test_start_rejected_without_mongoose( void )
 	       "start must be rejected when Mongoose is not running" );
 	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_ERROR,
 	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_EQUAL_INT( WIFI_HTTP_PROVISIONING_START_ERR_DEPENDENCY,
+	                       wifi_http_provisioning_get_last_start_status() );
 	TEST_ASSERT_FALSE( captive_dns_server_is_running() );
+	TEST_ASSERT_FALSE( wifi_http_provisioning_is_reachable() );
 
 	/* Bring the shared process back for the remaining tests. */
 	MongooseProcess_Init();
@@ -269,8 +272,11 @@ static void test_http_bind_failure_roll_back_dns( void )
 	                  WIFI_PROVISIONING_ERROR ||
 	                  wifi_http_provisioning_get_state() ==
 	                  WIFI_PROVISIONING_STOPPED );
+	TEST_ASSERT_EQUAL_INT( WIFI_HTTP_PROVISIONING_START_ERR_HTTP_BIND,
+	                       wifi_http_provisioning_get_last_start_status() );
 	TEST_ASSERT_FALSE_MESSAGE( captive_dns_server_is_running(),
 	       "the DNS listener must be rolled back after HTTP bind failure" );
+	TEST_ASSERT_FALSE( wifi_http_provisioning_is_reachable() );
 	TEST_ASSERT_TRUE( MongooseProcess_IsRunning() );
 	close( fd );
 
@@ -302,7 +308,10 @@ static void test_dns_bind_failure_roll_back( void )
 	                  WIFI_PROVISIONING_ERROR ||
 	                  wifi_http_provisioning_get_state() ==
 	                  WIFI_PROVISIONING_STOPPED );
+	TEST_ASSERT_EQUAL_INT( WIFI_HTTP_PROVISIONING_START_ERR_DNS_BIND,
+	                       wifi_http_provisioning_get_last_start_status() );
 	TEST_ASSERT_FALSE( captive_dns_server_is_running() );
+	TEST_ASSERT_FALSE( wifi_http_provisioning_is_reachable() );
 	TEST_ASSERT_TRUE( MongooseProcess_IsRunning() );
 	close( fd );
 
@@ -323,10 +332,114 @@ static void test_recovery_after_failure( void )
 	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
 	                       wifi_http_provisioning_get_state() );
 	TEST_ASSERT_TRUE( captive_dns_server_is_running() );
+	TEST_ASSERT_TRUE_MESSAGE( wifi_http_provisioning_is_reachable(),
+	       "a clean start with AP+STA and both listeners must be reachable" );
 	TEST_ASSERT_TRUE( wifi_http_provisioning_stop() );
 	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_STOPPED,
 	                       wifi_http_provisioning_get_state() );
 	TEST_ASSERT_FALSE( captive_dns_server_is_running() );
+	TEST_ASSERT_FALSE_MESSAGE( wifi_http_provisioning_is_reachable(),
+	       "after stop the portal must not be reachable" );
+}
+
+/* ------------------------------------------------------------------ */
+/* Start status observability (TASK-016).                              */
+/* ------------------------------------------------------------------ */
+
+/* Test-only hook state: when the hook is installed the start path uses these
+ * results instead of the real Wi-Fi management layer, so a refused mode
+ * transition and a "started without an AP" can be reproduced deterministically
+ * against a real HAL that cannot be told to fail a mode change. */
+static bool s_mode_request_result = true;
+static bool s_radio_verify_result = true;
+
+static bool mode_request_hook( void ) { return s_mode_request_result; }
+static bool radio_verify_hook( void ) { return s_radio_verify_result; }
+
+/* A refused AP+STA request is its own failure mode: nothing is bound, no
+ * listener is left behind, and the portal is not reachable. */
+static void test_mode_transition_refused_reports_status( void )
+{
+	char http_url[64], dns_url[64];
+
+	configure_fresh_listeners( http_url, sizeof( http_url ),
+	                           dns_url, sizeof( dns_url ) );
+	wifi_http_provisioning_test_set_mode_request_hook( mode_request_hook );
+	s_mode_request_result = false;
+
+	TEST_ASSERT_FALSE_MESSAGE( wifi_http_provisioning_start(),
+	       "a refused AP+STA request must fail the start" );
+	TEST_ASSERT_EQUAL_INT( WIFI_HTTP_PROVISIONING_START_ERR_MODE_TRANSITION,
+	                       wifi_http_provisioning_get_last_start_status() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_ERROR,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_FALSE( captive_dns_server_is_running() );
+	TEST_ASSERT_FALSE_MESSAGE( wifi_http_provisioning_is_reachable(),
+	       "a portal whose radio never attempted AP+STA is not reachable" );
+
+	/* Restore the real request path. */
+	wifi_http_provisioning_test_set_mode_request_hook( NULL );
+	s_mode_request_result = true;
+}
+
+/* A start whose radio never reaches AP+STA is a first-class error, not a
+ * silent success: the listeners that were already opened must be rolled back
+ * and the status must say so. A later clean cycle recovers fully. */
+static void test_start_without_ap_reports_no_ap( void )
+{
+	char http_url[64], dns_url[64];
+
+	configure_fresh_listeners( http_url, sizeof( http_url ),
+	                           dns_url, sizeof( dns_url ) );
+	wifi_http_provisioning_test_set_radio_verify_hook( radio_verify_hook );
+	s_radio_verify_result = false;
+
+	TEST_ASSERT_FALSE_MESSAGE( wifi_http_provisioning_start(),
+	       "started without an AP must fail, never silently succeed" );
+	TEST_ASSERT_EQUAL_INT( WIFI_HTTP_PROVISIONING_START_ERR_NO_AP,
+	                       wifi_http_provisioning_get_last_start_status() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_ERROR,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_FALSE_MESSAGE( captive_dns_server_is_running(),
+	       "the DNS listener must be rolled back when the AP never came up" );
+	TEST_ASSERT_FALSE_MESSAGE( wifi_http_provisioning_is_reachable(),
+	       "even with listeners up, a portal without an AP is not reachable" );
+
+	/* The same configured listeners still rebind: the rollback released them. */
+	wifi_http_provisioning_test_set_radio_verify_hook( NULL );
+	s_radio_verify_result = true;
+	TEST_ASSERT_TRUE( wifi_http_provisioning_start() );
+	TEST_ASSERT_EQUAL_INT( WIFI_PROVISIONING_RUNNING,
+	                       wifi_http_provisioning_get_state() );
+	TEST_ASSERT_TRUE_MESSAGE( wifi_http_provisioning_is_reachable(),
+	       "a clean restart after the no-AP failure must be reachable" );
+	TEST_ASSERT_TRUE( wifi_http_provisioning_stop() );
+	TEST_ASSERT_FALSE( wifi_http_provisioning_is_reachable() );
+}
+
+/* Idempotent repeat while running reports ALREADY_RUNNING (still success for
+ * the bool wrapper) and a reachable portal stays reachable. */
+static void test_start_reports_already_running( void )
+{
+	char http_url[64], dns_url[64];
+
+	configure_fresh_listeners( http_url, sizeof( http_url ),
+	                           dns_url, sizeof( dns_url ) );
+
+	TEST_ASSERT_EQUAL_INT( WIFI_HTTP_PROVISIONING_START_OK,
+	                       wifi_http_provisioning_start_ex() );
+	TEST_ASSERT_TRUE( wifi_http_provisioning_is_reachable() );
+
+	TEST_ASSERT_EQUAL_INT( WIFI_HTTP_PROVISIONING_START_ALREADY_RUNNING,
+	                       wifi_http_provisioning_start_ex() );
+	TEST_ASSERT_TRUE_MESSAGE( wifi_http_provisioning_start(),
+	       "the bool wrapper must keep treating an already-running start as success" );
+	TEST_ASSERT_EQUAL_INT( WIFI_HTTP_PROVISIONING_START_ALREADY_RUNNING,
+	                       wifi_http_provisioning_get_last_start_status() );
+	TEST_ASSERT_TRUE( wifi_http_provisioning_is_reachable() );
+
+	TEST_ASSERT_TRUE( wifi_http_provisioning_stop() );
+	TEST_ASSERT_FALSE( wifi_http_provisioning_is_reachable() );
 }
 
 /* Stopping provisioning must not stop the shared Mongoose process, which is
@@ -540,6 +653,9 @@ int main( void )
 	RUN_TEST( test_http_bind_failure_roll_back_dns );
 	RUN_TEST( test_dns_bind_failure_roll_back );
 	RUN_TEST( test_recovery_after_failure );
+	RUN_TEST( test_mode_transition_refused_reports_status );
+	RUN_TEST( test_start_without_ap_reports_no_ap );
+	RUN_TEST( test_start_reports_already_running );
 	RUN_TEST( test_stop_does_not_stop_mongoose_or_mqtt );
 	RUN_TEST( test_repeated_stop_is_safe_and_idempotent );
 	RUN_TEST( test_concurrent_stop_callers );

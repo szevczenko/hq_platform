@@ -28,7 +28,8 @@ typedef enum {
 	MQTT_CONNECT_FAILURE_REASON_CONNECT_CREATE_FAILED = 0,
 	MQTT_CONNECT_FAILURE_REASON_CONNACK_REJECTED,
 	MQTT_CONNECT_FAILURE_REASON_TRANSPORT_ERROR,
-	MQTT_CONNECT_FAILURE_REASON_CONFIG_REJECTED
+	MQTT_CONNECT_FAILURE_REASON_CONFIG_REJECTED,
+	MQTT_CONNECT_FAILURE_REASON_AUTH_REJECTED
 } mqtt_connect_failure_reason_t;
 
 typedef void (*mqtt_connect_callback_t)(void);
@@ -45,8 +46,9 @@ typedef void (*mqtt_connect_failure_callback_t)(
  * mqtt_app_set_config_validation_callback()).  It contains owned copies of
  * the exact values the reconnect would use: the broker address and client
  * identifier, the SSL flag, skip-verify, and the certificate sources/values
- * (a file path for
- * MQTT_CERT_SOURCE_FILE_PATH or the raw PEM text for MQTT_CERT_SOURCE_RAW).
+ * (a file path for MQTT_CERT_SOURCE_FILE_PATH or the raw PEM text for
+ * MQTT_CERT_SOURCE_RAW) and the resolved PEM material captured by the
+ * transport.
  *
  * The platform guarantees that a reconnect approved through this gate uses
  * these validated values and never rereads the mutable mqtt_config state, so
@@ -61,10 +63,13 @@ typedef struct {
 	bool skip_verify;
 	mqtt_cert_source_t cert_source;
 	const char *cert_value;
+	const char *cert_resolved;
 	mqtt_cert_source_t client_cert_source;
 	const char *client_cert_value;
+	const char *client_cert_resolved;
 	mqtt_cert_source_t client_key_source;
 	const char *client_key_value;
+	const char *client_key_resolved;
 } mqtt_config_snapshot_t;
 
 /**

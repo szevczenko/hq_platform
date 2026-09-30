@@ -136,7 +136,7 @@ else()
         "-DOUTPUT=${MONGOOSE_PACKED_FS}"
         -P "${MONGOOSE_PACK_GENERATOR}"
       WORKING_DIRECTORY "${MONGOOSE_WEB_DIR}"
-      DEPENDS ${MONGOOSE_WEB_FILES}
+      DEPENDS ${MONGOOSE_PACK_TOOL} ${MONGOOSE_WEB_FILES}
       COMMENT "Generating Mongoose packed filesystem (packed_fs.c)"
     )
     add_custom_target(hq_mongoose_packed_fs_generate DEPENDS "${MONGOOSE_PACKED_FS}")
@@ -147,5 +147,7 @@ else()
     # packed filesystem consistently for every consumer of hq_mongoose.
     target_sources(hq_mongoose PRIVATE "${MONGOOSE_PACKED_FS}")
     target_compile_definitions(hq_mongoose PRIVATE MG_ENABLE_PACKED_FS=1)
+    set_source_files_properties("${MONGOOSE_PACKED_FS}"
+      PROPERTIES GENERATED TRUE)
   endif()
 endif()
