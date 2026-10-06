@@ -1062,6 +1062,11 @@ static void _request_mode_change( void )
     hal_mode = WIFI_HAL_MODE_APSTA;
   }
 
+  /* A transition from STA to an AP-bearing mode must derive authmode from the
+   * current AP password just like startup does. Otherwise an empty password
+   * retains the default WPA2 mode and ESP-IDF rejects the AP config. */
+  _apply_ap_authmode( hal_mode );
+
   if ( wifi_hal_set_ap_config( &g_ctx.ap_cfg ) != OSAL_SUCCESS ||
        wifi_hal_set_sta_config( &g_ctx.sta_cfg ) != OSAL_SUCCESS )
   {

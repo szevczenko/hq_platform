@@ -2131,6 +2131,43 @@ static void test_ap_credentials_empty_password_opens_ap( void )
   TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after open-AP check" );
 }
 
+static void test_ap_credentials_empty_password_opens_ap_on_mode_change( void )
+{
+  _ap_identity_clean_baseline();
+
+  wifi_mgmt_set_wifi_type( T_WIFI_TYPE_CLIENT );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_set_ap_credentials( "OpenLamp-mode-change", "" ),
+    "empty password accepted before STA startup" );
+
+  wifi_mgmt_init();
+  wifi_mgmt_start();
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_wait_ready( 3000 ), "STA module ready" );
+  wifi_hal_mock_state_t ms = { 0 };
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_INT( WIFI_HAL_MODE_STA, ms.mode );
+
+  _reset_event( &g_ev_mode );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_subscribe( WIFI_MGMT_EVENT_MODE_CHANGED, _record_event, &g_ev_mode ),
+    "subscribe to mode-change completion" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    wifi_mgmt_request_mode( T_WIFI_TYPE_CLI_SER ),
+    "request STA->AP+STA mode change" );
+  TEST_ASSERT_TRUE_MESSAGE(
+    _wait_mode_for_count( 1, 3000 ), "AP+STA transition completes" );
+
+  memset( &ms, 0, sizeof( ms ) );
+  _snap_mock( &ms );
+  TEST_ASSERT_EQUAL_INT( WIFI_HAL_MODE_APSTA, ms.mode );
+  TEST_ASSERT_EQUAL_STRING( "OpenLamp-mode-change", ms.ap_cfg.ssid );
+  TEST_ASSERT_EQUAL_INT( 0, ms.ap_cfg.password[0] );
+  TEST_ASSERT_EQUAL_INT( 0, ms.ap_cfg.authmode );
+
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_stop(), "stop after mode-change check" );
+  TEST_ASSERT_TRUE_MESSAGE( wifi_mgmt_deinit(), "deinit after mode-change check" );
+}
+
 static void test_ap_credentials_password_never_logged( void )
 {
   _ap_identity_clean_baseline();
@@ -2451,6 +2488,7 @@ void wifi_mgmt_tests_run( void )
   RUN_TEST( test_ap_credentials_set_before_start_is_honored );
   RUN_TEST( test_ap_credentials_rejected_after_start );
   RUN_TEST( test_ap_credentials_empty_password_opens_ap );
+  RUN_TEST( test_ap_credentials_empty_password_opens_ap_on_mode_change );
   RUN_TEST( test_ap_credentials_password_never_logged );
 
   /* --- TASK-015: saved-credential erase API (isolated lifetimes) ---

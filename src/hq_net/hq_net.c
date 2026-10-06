@@ -183,8 +183,7 @@ int hq_net_start(const hq_net_config_t *config,
                 (config->startup_mode == HQ_NET_STARTUP_MODE_PROVISIONING &&
                  (config->provisioning_ap_name == NULL ||
                     config->provisioning_ap_password == NULL ||
-                    config->provisioning_ap_name[0] == '\0' ||
-                    config->provisioning_ap_password[0] == '\0'))) {
+                    config->provisioning_ap_name[0] == '\0'))) {
         return HQ_NET_ERR_INVALID_ARGUMENT;
     }
     if (!net_ensure_lock() || !net_lock()) {
